@@ -1,6 +1,7 @@
 import DirectionsBoatOutlinedIcon from '@mui/icons-material/DirectionsBoatOutlined';
 import {
   Alert,
+  AlertTitle,
   Box,
   Button,
   Card,
@@ -11,12 +12,12 @@ import {
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { SignInRequestSchema } from '@tradeflow/contracts';
+import { type SignInRequest, SignInRequestSchema } from '@tradeflow/contracts';
 import { type SubmitEvent, useState } from 'react';
 import { type Location, Navigate, useLocation } from 'react-router';
 import { ApiError, isUnauthenticated } from '../../../shared/api/http-client';
-import { signIn } from '../api/auth.api';
-import { sessionQuery, switchIdentity } from '../session';
+import { useSignOut, useSignOutState } from '../hooks/use-sign-out';
+import { sessionQuery, startSession } from '../session';
 import { announceSessionChange } from '../session-sync';
 
 const DEFAULT_TARGET = '/voyages';
@@ -52,15 +53,19 @@ export function SignInPage() {
   const queryClient = useQueryClient();
   const { data: identity } = useQuery(sessionQuery);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const signOut = useSignOutState();
+  const retrySignOut = useSignOut();
 
   const mutation = useMutation({
-    mutationFn: signIn,
-    onSuccess: async (signedIn) => {
-      // Publishing the identity re-renders this page, which then redirects.
-      await switchIdentity(queryClient, signedIn);
+    // Publishing the identity re-renders this page, which then redirects.
+    mutationFn: (credentials: SignInRequest) => startSession(queryClient, credentials),
+    onSuccess: () => {
       announceSessionChange();
     },
   });
+  // The previous session's sign-out must be answered first, or its response could clear the
+  // cookie of the new session. `startSession` waits for it anyway; this keeps the form honest.
+  const signingOut = signOut.status === 'pending';
 
   if (identity) {
     return <Navigate to={redirectTarget(location.state)} replace />;
@@ -104,6 +109,31 @@ export function SignInPage() {
               <Typography variant="h1">Sign in to TradeFlow</Typography>
             </Stack>
 
+            {signingOut && (
+              <Alert
+                severity="info"
+                role="status"
+                icon={<CircularProgress size={20} color="inherit" aria-hidden />}
+              >
+                Finishing sign-out…
+              </Alert>
+            )}
+
+            {signOut.status === 'failed' && (
+              <Alert
+                severity="warning"
+                action={
+                  <Button color="inherit" size="small" onClick={() => void retrySignOut()}>
+                    Retry sign-out
+                  </Button>
+                }
+              >
+                <AlertTitle>Sign-out was not confirmed</AlertTitle>
+                The server did not confirm it, so your previous session may still be active. Retry
+                to end it, or sign in to replace it.
+              </Alert>
+            )}
+
             {mutation.error && (
               <Alert severity="error">{describeSignInError(mutation.error)}</Alert>
             )}
@@ -131,7 +161,7 @@ export function SignInPage() {
               type="submit"
               variant="contained"
               size="large"
-              disabled={mutation.isPending}
+              disabled={mutation.isPending || signingOut}
               startIcon={mutation.isPending ? <CircularProgress size={18} color="inherit" /> : null}
             >
               Sign in

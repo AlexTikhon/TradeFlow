@@ -218,15 +218,26 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
   publishes the new identity. Queries still observed by the outgoing tree are removed the moment
   that tree unmounts, by a query-cache subscription; they are not removed earlier, because a last
   render would rebuild and refetch them.
+- **Ordering.** Each explicit transition starts a new _generation_ (kept per query client in
+  `session.ts`) and cancels session checks in flight. A check's answer counts only if no
+  transition started while it was on its way; a stale answer neither publishes an identity nor
+  purges data. Requests that change the cookie (sign-in, sign-out) run one at a time, so a slow
+  sign-out response cannot clear the cookie of a newer sign-in. The sign-in form stays disabled
+  ("Finishing sign-out…") until the previous sign-out is answered.
 - **Sign-out** acts locally first (abort, purge, go to `/sign-in`) and then revokes the session on
-  the server, so nothing from the old identity remains on screen even if the network is down.
+  the server, so nothing from the old identity remains on screen even if the network is down. If
+  the server does not confirm, the sign-in page says so and offers a retry. Until then the tab
+  stays signed out: session checks answer "nobody" without restoring the old identity. Signing
+  in also clears this state (sign-in revokes the session the browser presented). The state lives
+  in memory, so a reload asks the server again.
 - **Session end detected by the server.** A 401 on a query of the _current_ identity means the
   session expired or was revoked. The client signs out locally. A late 401 from an earlier
   identity's request is ignored.
 - **Other tabs.** Tabs share cookies, so a sign-in or sign-out in one tab changes every tab's
-  identity. Tabs notify each other on a `BroadcastChannel`. A receiving tab purges its protected
-  data immediately and resets the session query to "unknown" until the server answers. The
-  session is also re-checked whenever a tab regains focus.
+  identity. Tabs notify each other on a `BroadcastChannel` after a sign-in or a confirmed
+  sign-out. A receiving tab starts a new generation, purges its protected data immediately and
+  resets the session query to "unknown" until the server answers. The session is also re-checked
+  whenever a tab regains focus. Cookie requests are ordered within a tab, not across tabs.
 
 ### Presentation details that are correctness issues
 

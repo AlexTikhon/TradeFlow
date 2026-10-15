@@ -1,3 +1,4 @@
+import { QueryObserver } from '@tanstack/react-query';
 import { screen, waitFor } from '@testing-library/react';
 import type { CurrentUser, VoyageListResponse } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
@@ -6,6 +7,7 @@ import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../test/fixtures/au
 import { aVoyageSummary } from '../../test/fixtures/voyages';
 import { type FakeSession, problemResponse, server } from '../../test/msw-server';
 import { renderRoute } from '../../test/render-route';
+import { sessionQuery } from './session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from './session-sync';
 
 const ana = aCurrentUser();
@@ -67,7 +69,20 @@ afterEach(() => {
   watchers.splice(0).forEach((observer) => {
     observer.disconnect();
   });
+  sessionObservers.splice(0).forEach((unsubscribe) => {
+    unsubscribe();
+  });
 });
+
+/**
+ * Watches the session from outside the route tree, as an always-mounted component would. Without
+ * it, the session query briefly has no observer while routes swap, and TanStack Query aborts the
+ * check then: that would hide a stale answer instead of proving the client ignores it.
+ */
+function keepSessionObserved(queryClient: ReturnType<typeof renderRoute>['queryClient']) {
+  sessionObservers.push(new QueryObserver(queryClient, sessionQuery).subscribe(() => undefined));
+}
+const sessionObservers: (() => void)[] = [];
 
 async function signInWith(user: ReturnType<typeof renderRoute>['user'], email: string) {
   await user.type(await screen.findByLabelText(/Email/), email);
@@ -203,6 +218,154 @@ describe('authentication', () => {
       expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
       release();
       expect(await screen.findByRole('link', { name: 'TF-CLAIRE-ONLY' })).toBeInTheDocument();
+      expect(anasDataShown.seen).toBe(false);
+    } finally {
+      otherTab.close();
+      stopSync();
+    }
+  });
+
+  it('waits for an unfinished sign-out before signing in again', async () => {
+    const { router, user, session } = renderRoute('/voyages', { accounts: [ana, claire] });
+    serveScopedVoyages(session);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    const signOut = session.holdNext('sign-out');
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut.received;
+
+    expect(await screen.findByText('Finishing sign-out…')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    expect(screen.queryByText('TF-ANA-ONLY')).not.toBeInTheDocument();
+    expect(screen.queryByText('Ana Souza')).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/Email/), claire.user.email);
+    await user.type(screen.getByLabelText(/Password/), `${TEST_PASSWORD}{Enter}`);
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled();
+    expect(session.signInRequests).toBe(0);
+
+    signOut.release();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+    });
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('link', { name: 'TF-CLAIRE-ONLY' })).toBeInTheDocument();
+    // The sign-out response arrived first, so it cleared Ana's cookie, not Claire's.
+    expect(session.current).toEqual(claire);
+  });
+
+  it('ignores a session check that answers "Ana" after Ana signed out', async () => {
+    const { router, user, session, queryClient } = renderRoute('/voyages');
+    serveScopedVoyages(session);
+    keepSessionObserved(queryClient);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    // The tab regained focus: the session is being re-checked while Ana is still signed in.
+    const check = session.holdNext('me');
+    const staleCheck = queryClient.refetchQueries({ queryKey: ['session'] });
+    await check.received;
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(session.log).toContain('sign-out answered');
+    });
+    check.release();
+    await staleCheck;
+
+    expect(router.state.location.pathname).toBe('/sign-in');
+    expect(queryClient.getQueryData(['session'])).toBeNull();
+    expect(screen.queryByText('Ana Souza')).not.toBeInTheDocument();
+  });
+
+  it('ignores a session check that answers "nobody" after a successful sign-in', async () => {
+    const { router, user, session, queryClient } = renderRoute('/sign-in', {
+      signedInAs: null,
+      accounts: [ana],
+    });
+    serveScopedVoyages(session);
+    keepSessionObserved(queryClient);
+    await waitFor(() => {
+      expect(queryClient.getQueryData(['session'])).toBeNull();
+    });
+    // A re-check starts while nobody is signed in, and answers only after Ana signed in.
+    const check = session.holdNext('me');
+    const staleCheck = queryClient.refetchQueries({ queryKey: ['session'] });
+    await check.received;
+
+    await signInWith(user, ana.user.email);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    check.release();
+    await staleCheck;
+
+    expect(queryClient.getQueryData(['session'])).toEqual(ana);
+    expect(router.state.location.pathname).toBe('/voyages');
+    expect(screen.getByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    expect(
+      queryClient
+        .getQueryCache()
+        .findAll({ queryKey: ['protected', `${ana.user.id}:${ana.organization.id}`] }),
+    ).not.toHaveLength(0);
+  });
+
+  it('reports a failed sign-out instead of restoring the session, and retries it', async () => {
+    const { router, user, session, queryClient } = renderRoute('/voyages');
+    serveScopedVoyages(session);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    session.failNextSignOut();
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    expect(await screen.findByText('Sign-out was not confirmed')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    // The server still knows Ana. Re-checking (as on window focus) must not sign her back in.
+    await queryClient.refetchQueries({ queryKey: ['session'] });
+    expect(router.state.location.pathname).toBe('/sign-in');
+    expect(screen.queryByText('Ana Souza')).not.toBeInTheDocument();
+    expect(screen.queryByText('TF-ANA-ONLY')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry sign-out' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Sign-out was not confirmed')).not.toBeInTheDocument();
+    });
+    expect(session.signOutRequests).toBe(2);
+    expect(session.current).toBeNull();
+    expect(router.state.location.pathname).toBe('/sign-in');
+  });
+
+  it('aborts pending protected requests when another tab changes who is signed in', async () => {
+    const { session, queryClient } = renderRoute('/voyages', { accounts: [ana, claire] });
+    const stopSync = startSessionSync(queryClient);
+    const otherTab = new BroadcastChannel(SESSION_CHANNEL_NAME);
+    try {
+      const { requests, release } = serveScopedVoyages(session, { held: [ana] });
+      await waitFor(() => {
+        expect(requests).toHaveLength(1);
+      });
+      // A session check made before the change is still on its way back, answering "Ana".
+      const check = session.holdNext('me');
+      const staleCheck = queryClient.refetchQueries({ queryKey: ['session'] });
+      await check.received;
+      const anasDataShown = watchForText('TF-ANA-ONLY');
+
+      session.current = claire;
+      otherTab.postMessage(SESSION_CHANGED);
+
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      expect(requests[0]?.signal.aborted).toBe(true);
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({ queryKey: ['protected', `${ana.user.id}:${ana.organization.id}`] }),
+      ).toHaveLength(0);
+
+      release();
+      check.release();
+      await staleCheck;
+      expect(await screen.findByRole('link', { name: 'TF-CLAIRE-ONLY' })).toBeInTheDocument();
+      expect(screen.getByText('Claire Morel')).toBeInTheDocument();
       expect(anasDataShown.seen).toBe(false);
     } finally {
       otherTab.close();
