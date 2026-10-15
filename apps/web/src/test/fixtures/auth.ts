@@ -10,6 +10,7 @@ export function aCurrentUser(overrides: Partial<CurrentUser> = {}): CurrentUser 
       id: '01990000-0000-7000-8002-000000000001',
       email: 'ana.souza@cerrado-graos.example',
       fullName: 'Ana Souza',
+      role: 'OPERATOR',
     },
     organization: {
       id: '01990000-0000-7000-8001-000000000001',
@@ -27,6 +28,7 @@ export const anotherUser = (): CurrentUser =>
       id: '01990000-0000-7000-8002-000000000005',
       email: 'claire.morel@lacustra.example',
       fullName: 'Claire Morel',
+      role: 'OPERATOR',
     },
     organization: {
       id: '01990000-0000-7000-8001-000000000004',

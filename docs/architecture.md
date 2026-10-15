@@ -57,10 +57,16 @@ src/
       session-cookie.ts         cookie name, attributes, parsing
       password.ts               argon2id hashing (PHC strings)
       session-token.ts          random tokens and their SHA-256 digests
+      user-permissions.ts       requireOperator(principal, action): the role check (ADR 0008)
+    audit/
+      audit-trail.ts            AuditTrail.record(tx, event): append-only, same transaction
+    reference-data/
+      reference-data.*.ts       GET /vessels, /commodities, /ports; id existence checks
     voyages/
       voyages.controller.ts     HTTP only: parse input, call service, map "missing" to 404
-      voyages.service.ts        use cases (queries today), each taking the Principal
+      voyages.service.ts        use cases (list, get, create), each taking the Principal
       voyage-access.ts          accessibleVoyages(principal): the one visibility predicate
+      voyage-reference.ts       takeNextVoyageReference(tx): per-year counter, row-locked
       voyage.read-model.ts      Prisma select shapes + row → contract mapping
 ```
 
@@ -70,7 +76,10 @@ Each domain module owns its controller, services and persistence access. Rules t
 extraction possible later:
 
 - A module talks to another module only through that module's exported providers, never by
-  querying the other module's tables directly. (No cross-module calls exist yet.)
+  querying the other module's tables directly. `voyages` imports `ReferenceDataService` (to check
+  that the ids in a request exist) and `AuditTrail` (to record what it did); it never touches
+  `audit_events` itself. Its read model still joins vessel, commodity and port rows through
+  relations, because those columns are part of what a voyage is.
 - Shared code lives in `common/` (HTTP plumbing) or `infrastructure/` (technical adapters) and holds
   no domain rules.
 - **No generic repository layer.** Prisma already is a typed data-access layer; wrapping it in
@@ -78,10 +87,11 @@ extraction possible later:
   close to its use cases. The `*.read-model.ts` file plays that role for reads: it declares
   exactly which columns a query loads, so new columns are never exposed by accident.
 
-The `auth` module owns identity: it reads `users` (with their organization) and owns `sessions`.
-Other modules depend only on what it exports: the `Principal` type and the
-`@CurrentPrincipal()` / `@Public()` decorators. There is still no `organizations` module, because
-nothing manages organizations on their own yet.
+The `auth` module owns identity: it reads `users` (with their organization and role) and owns
+`sessions`. Other modules depend only on what it exports: the `Principal` type, the
+`@CurrentPrincipal()` / `@Public()` decorators and `requireOperator`. There is still no
+`organizations` module, because nothing manages organizations on their own yet. `audit` owns
+`audit_events`; `reference-data` owns vessels, commodities and ports.
 
 ### Request pipeline
 
@@ -98,7 +108,9 @@ nothing manages organizations on their own yet.
    concern. Authorization is not a controller concern: voyage services `AND` the
    `accessibleVoyages(principal)` predicate into every query
    ([ADR 0006](decisions/0006-participation-based-access.md)), so "not yours" and "does not
-   exist" are the same empty result and the same 404.
+   exist" are the same empty result and the same 404. Commands also check the user's role first
+   thing in the service (`requireOperator`, [ADR 0008](decisions/0008-user-roles.md)), which
+   answers 403. The role comes from the principal, read from the user row for this request.
 4. **Errors.** `ProblemDetailsFilter` turns every exception into RFC 9457 Problem Details:
 
    ```json
@@ -140,7 +152,31 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
   because Prisma's schema language cannot express them: positive quantity, ordered laycan, distinct
   load and discharge ports, IMO / UN/LOCODE / country-code formats, lowercase emails.
 - Foreign keys use `RESTRICT` except voyage → participants (`CASCADE`), so reference data cannot be
-  deleted out from under a voyage.
+  deleted out from under a voyage, and audited rows cannot be deleted from under their events.
+- `audit_events` is append-only for every writer: a trigger refuses `UPDATE` and `DELETE`.
+
+### Writes (first one: `POST /api/voyages`)
+
+The order of checks, and who decides what:
+
+1. **Guards:** cross-site requests are refused (403), and a request without a session gets 401
+   before its body is looked at.
+2. **Contract:** `CreateVoyageRequestSchema` (a closed object, `additionalProperties: false` in
+   OpenAPI) accepts only shipment facts. Quantities are decimal strings that must fit
+   `DECIMAL(14,3)`; excess precision is a 400, never rounded. Ordered laycan and distinct ports
+   are checked here too, and again by CHECK constraints.
+3. **Service:** the role check (403), then `ReferenceDataService.unknownReferences` turns ids
+   that name nothing into field errors (400, same Problem Details shape as contract failures).
+4. **One interactive transaction:** take the next reference from the year's counter row (the
+   upsert locks it, so concurrent creations queue and a rollback returns the number), insert the
+   voyage (`PLANNED`) with the principal's organization as `EXPORTER`, and record
+   `VOYAGE_CREATED` with the principal as actor ([ADR 0009](decisions/0009-transactional-audit-events.md)).
+   Any failure rolls back all of it and returns a generic 500.
+5. **Response:** `201` with the `VoyageDetail` and a `Location` header.
+
+Integration tests run all of this against PostgreSQL: concurrent creations get consecutive,
+unique references; a forced audit failure (a temporary trigger) leaves no voyage, participation
+or reference behind; spoofed organization ids in the body, headers or query change nothing.
 
 ### Configuration
 
@@ -160,8 +196,11 @@ src/
       components/   RequireAuth (protected-route boundary), UserMenu
       pages/        SignInPage
     voyages/
-      api/          fetch functions + query option factories (query keys live here)
-      domain/       presentation rules for the domain (status labels, role grouping)
+      api/          fetch functions + query option factories (query keys live here),
+                    including reference data (vessels, commodities, ports) for the form
+      domain/       presentation rules for the domain (status labels, role grouping),
+                    canCreateVoyages(identity)
+      hooks/        useCreateVoyage: the mutation and what happens after it
       components/   feature UI (table, filter, facts card, participants)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
@@ -194,10 +233,20 @@ src/
 - Retry policy: 4xx responses are never retried (they are deterministic); network errors and 5xx get
   two retries.
 - Query keys are hierarchical and, for protected data, start with the identity scope
-  (`['protected', '<userId>:<organizationId>', 'voyages', 'list', filters]`), so future
-  mutations can invalidate precisely and data never crosses identities (see below).
+  (`['protected', '<userId>:<organizationId>', 'voyages', 'list', filters]`), so mutations can
+  invalidate precisely and data never crosses identities (see below). Reference data is the same
+  for everyone but is fetched with a session, so it lives under the scope too.
 - The details page validates the route parameter before fetching. A malformed id renders "not
   found" without a network request.
+- **Creating a voyage** (`/voyages/new`, offered only to operators; the API checks again). The
+  form validates with the same `CreateVoyageRequestSchema` as the API and shows its messages per
+  field; server field errors (400) land on the same fields, other failures in one alert, and the
+  input is kept. The quantity is sent as the string typed. On success, `useCreateVoyage` stores
+  the returned voyage as its detail, invalidates **that identity's** voyage lists, and opens the
+  details page. The response is checked against the identity the form was rendered for when it
+  arrives: if that identity is no longer signed in (signed out, replaced from another tab), the
+  response writes nothing to the cache and does not navigate. Navigation also happens only while
+  the form is still mounted, so a user who has moved on is not pulled back.
 
 ### Authentication in the browser
 
@@ -269,24 +318,28 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
 
 ## Testing strategy
 
-| Layer            | Tool                       | Fakes                          | Purpose                                      |
-| ---------------- | -------------------------- | ------------------------------ | -------------------------------------------- |
-| Contract schemas | Vitest                     | none                           | Wire-format rules                            |
-| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, config         |
-| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, authorization, errors, docs |
-| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client  |
-| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                       |
+| Layer            | Tool                       | Fakes                          | Purpose                                     |
+| ---------------- | -------------------------- | ------------------------------ | ------------------------------------------- |
+| Contract schemas | Vitest                     | none                           | Wire-format rules                           |
+| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, config        |
+| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs  |
+| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client |
+| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                      |
 
 Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized against a dedicated
 `*_test` database that is truncated between tests. Authorization tests sign in through the real
-endpoint and assert the participation rules against real rows: shared and private voyages,
-status filters, client-supplied organization ids, removed participation, and expired or revoked
+endpoint and assert the participation and role rules against real rows: shared and private
+voyages, status filters, client-supplied organization ids, removed participation, viewer versus
+operator (re-read on every request), atomic creation with its audit event, concurrent reference
+numbering, and expired or revoked
 sessions.
 
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
 cross-tab changes run through the real router, query client and cache. They assert, among other
 things, that an in-flight request is aborted on sign-out and that a previous user's data never
-appears in the DOM after a switch (a `MutationObserver` watches for it).
+appears in the DOM after a switch (a `MutationObserver` watches for it). Voyage creation is tested
+the same way: success, client and server validation, failures, a viewer, and a creation response
+that arrives after a sign-out or after another tab signed in as someone else.
 
 ## Operational concerns (current state)
 
@@ -302,15 +355,15 @@ appears in the DOM after a switch (a `MutationObserver` watches for it).
 
 How later requirements land on the current structure:
 
-| Requirement              | Where it goes                                                                                                                                                                                                                           |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                             |
-| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                              |
-| Write authorization      | **Not started.** Arrives with the first business write: participant-role rules in the domain service plus user permissions on an organization membership ([domain model](domain-model.md#6-user-permissions-are-not-participant-roles)) |
-| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                 |
-| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                |
-| Audit trail              | `audit_events` written in the same transaction as the change                                                                                                                                                                            |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                           |
-| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                               |
-| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                            |
-| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                              |
+| Requirement              | Where it goes                                                                                                                                                                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                |
+| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                 |
+| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations |
+| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                    |
+| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                   |
+| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                            |
+| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                              |
+| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                  |
+| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                               |
+| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                 |

@@ -16,7 +16,7 @@
 | **UN/LOCODE**    | 5-character location code (`BRSSZ` = Santos, `NLRTM` = Rotterdam).                                                                        |
 | **MT**           | Metric tonnes.                                                                                                                            |
 
-## Implemented (Milestones 1 and 2)
+## Implemented (Milestones 1 to 3)
 
 ```
                         ┌──────────────┐
@@ -38,22 +38,45 @@
                         └──────────────┘
 ```
 
-| Entity              | Key fields                                                                                                                     | Notes                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
-| `Organization`      | name, countryCode                                                                                                              | No role column, by design (see below) |
-| `User`              | organizationId, email (unique, lowercase), fullName, passwordHash (argon2id, nullable)                                         | No password means cannot sign in      |
-| `Session`           | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                           | Valid while unexpired and unrevoked   |
-| `Vessel`            | name, imoNumber (unique)                                                                                                       | Reference data shared by all tenants  |
-| `Commodity`         | code (unique), name                                                                                                            | Reference data                        |
-| `Port`              | unLocode (unique), name, countryCode                                                                                           | Reference data                        |
-| `Voyage`            | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end |                                       |
-| `VoyageParticipant` | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                          | Also the access-control relation      |
+| Entity                   | Key fields                                                                                                                     | Notes                                 |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
+| `Organization`           | name, countryCode                                                                                                              | No role column, by design (see below) |
+| `User`                   | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)          | No password means cannot sign in      |
+| `Session`                | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                           | Valid while unexpired and unrevoked   |
+| `Vessel`                 | name, imoNumber (unique)                                                                                                       | Reference data shared by all tenants  |
+| `Commodity`              | code (unique), name                                                                                                            | Reference data                        |
+| `Port`                   | unLocode (unique), name, countryCode                                                                                           | Reference data                        |
+| `Voyage`                 | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end |                                       |
+| `VoyageParticipant`      | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                          | Also the access-control relation      |
+| `AuditEvent`             | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                          | Append-only; see ADR 0009             |
+| `VoyageReferenceCounter` | year, lastNumber                                                                                                               | Hands out `TF-<year>-<number>`        |
+
+### Creating a voyage (initial business rule)
+
+An **operator** creates a voyage for **their own organization**:
+
+- The creating organization becomes the voyage's **`EXPORTER`** participant, and it is the only
+  participant at first. This is a deliberately simple starting rule: in this product the exporter
+  opens the shipment record, and traders, buyers and service providers join it later (not
+  implemented yet). A trader-initiated voyage would need a different rule.
+- Every voyage starts **`PLANNED`**.
+- The **reference** is assigned by the server: `TF-<year>-<number>`, numbered per UTC calendar
+  year, at least four digits, unique and without gaps (a failed creation gives its number back).
+- The client sends only shipment facts: vessel, commodity, quantity, load and discharge ports, and
+  laycan. Organization, participants, status, reference, actor and timestamps are never accepted
+  from it; a body that contains them is rejected.
+- Input rules: the quantity is an exact positive decimal string that fits `DECIMAL(14,3)` (at most
+  11 digits before the point and 3 after; more precision is an error, never rounded); the laycan
+  ends on or after its start; the ports differ; vessel, commodity and ports exist.
+- The voyage, its participation and one `VOYAGE_CREATED` audit event are written in one
+  transaction (ADR 0009).
 
 ### Voyage status
 
 `PLANNED → LOADING → IN_TRANSIT → DISCHARGING → COMPLETED`, with `CANCELLED` reachable from any
-non-terminal state. Transitions are not enforced yet because there are no write endpoints. They
-will live in the voyages module (and later `workflow`), not in the database.
+non-terminal state. A new voyage always starts `PLANNED`. Transitions are not enforced yet because
+no endpoint changes a status. They will live in the voyages module (and later `workflow`), not in
+the database.
 
 ### Invariants enforced by the database
 
@@ -63,6 +86,9 @@ will live in the voyages module (and later `workflow`), not in the database.
 - Format checks: IMO (7 digits), UN/LOCODE, ISO country codes, lowercase email.
 - `password_hash` is an argon2id PHC string; `token_hash` is exactly 32 bytes;
   `expires_at > created_at`.
+- `audit_events` is append-only (a trigger refuses `UPDATE` and `DELETE`), holds a JSON object
+  payload, and has at most one `VOYAGE_CREATED` per voyage.
+- Reference counters: a four-digit year and a non-negative last number.
 
 ## Modelling decisions
 
@@ -127,12 +153,15 @@ other. A trader's junior analyst sees every voyage the trader participates in bu
 allowed to accept notices. And when the organization is exporter on one voyage and buyer on
 another, its users' permissions do not change between the two.
 
-**Current state (Milestone 2).** Every signed-in user can read exactly the voyages their
-organization participates in, and nothing else. The only business endpoints are reads, so there
-are no user permissions and no write authorization yet. **Write RBAC is not done** and must not be
-assumed. When writes arrive, each command will check both layers in its service: the
-organization's participant role on that voyage (a domain rule), and the user's permission within
-their organization (a grant on a future organization membership).
+**Current state (Milestone 3).** Every signed-in user can read exactly the voyages their
+organization participates in. Users have one of two roles
+([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads; an **operator** may also
+create voyages for their organization. The role is on the user row, which is organization-scoped
+because a user belongs to exactly one organization, and it is read on every request. Creating a
+voyage needs no participant role, since the voyage does not exist yet; the creator becomes its
+exporter. Commands on existing voyages will check both layers in their service: the
+organization's participant role on that voyage (a domain rule), and the user's role within their
+organization.
 
 ## Proposed next (not implemented)
 
@@ -170,4 +199,3 @@ deliberately not modelled yet: it adds a join to every query for a case nothing 
 | `DocumentaryInstruction`       | buyer → seller, versioned, requires acknowledgement                              |
 | `Document` / `DocumentVersion` | file metadata and storage key; immutable versions                                |
 | `Task`                         | due date (often derived from laycan), assignee organization, status              |
-| `AuditEvent`                   | actor user + organization, action, subject, before/after, timestamp; append-only |

@@ -29,8 +29,18 @@ model Organization {
 
   users                User[]
   voyageParticipations VoyageParticipant[]
+  auditEvents          AuditEvent[]
 
   @@map("organizations")
+}
+
+/// What a user may do on behalf of their organization (ADR 0008). A user belongs to exactly one
+/// organization, so a role on the user row is organization-scoped. Least privilege by default.
+enum UserRole {
+  VIEWER
+  OPERATOR
+
+  @@map("user_role")
 }
 
 /// A person acting on behalf of exactly one organization.
@@ -39,6 +49,7 @@ model User {
   organizationId String   @map("organization_id") @db.Uuid
   email          String   @unique
   fullName       String   @map("full_name")
+  role           UserRole @default(VIEWER)
   /// Argon2id hash in PHC string format. Null means the user has no password and cannot sign in.
   passwordHash   String?  @map("password_hash")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -46,6 +57,7 @@ model User {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   sessions     Session[]
+  auditEvents  AuditEvent[]
 
   @@index([organizationId])
   @@map("users")
@@ -149,6 +161,7 @@ model Voyage {
   loadPort      Port                @relation("VoyageLoadPort", fields: [loadPortId], references: [id], onDelete: Restrict)
   dischargePort Port                @relation("VoyageDischargePort", fields: [dischargePortId], references: [id], onDelete: Restrict)
   participants  VoyageParticipant[]
+  auditEvents   AuditEvent[]
 
   @@index([status, laycanStart])
   @@index([vesselId])
@@ -181,4 +194,49 @@ model VoyageParticipant {
   @@unique([voyageId, organizationId, role])
   @@index([organizationId, voyageId])
   @@map("voyage_participants")
+}
+
+/// Hands out voyage reference numbers (`TF-<year>-<number>`), one row per year. Taking a number
+/// increments the row inside the creating transaction: concurrent creations queue on the row
+/// lock, and a rolled-back creation gives its number back, so references are unique and gapless.
+model VoyageReferenceCounter {
+  year       Int @id
+  lastNumber Int @map("last_number")
+
+  @@map("voyage_reference_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+enum AuditAction {
+  VOYAGE_CREATED
+
+  @@map("audit_action")
+}
+
+/// An append-only record of a business action, written in the same transaction as the action
+/// itself (ADR 0009): if the event cannot be stored, the action does not happen. The actor and
+/// time come from the server (the signed-in principal and the API's clock), never from the
+/// request. Updates and deletes are refused by a trigger (see the migration SQL).
+model AuditEvent {
+  id                  String      @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  action              AuditAction
+  actorUserId         String      @map("actor_user_id") @db.Uuid
+  actorOrganizationId String      @map("actor_organization_id") @db.Uuid
+  voyageId            String      @map("voyage_id") @db.Uuid
+  /// Set by the server when the event is written; never accepted from a client.
+  occurredAt         DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  /// Action-specific facts. For VOYAGE_CREATED: the voyage as created.
+  payload             Json
+
+  actorUser         User         @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  actorOrganization Organization @relation(fields: [actorOrganizationId], references: [id], onDelete: Restrict)
+  voyage            Voyage       @relation(fields: [voyageId], references: [id], onDelete: Restrict)
+
+  @@index([voyageId, occurredAt])
+  @@index([actorUserId])
+  @@index([actorOrganizationId])
+  @@map("audit_events")
 }

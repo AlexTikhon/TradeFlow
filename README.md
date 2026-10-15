@@ -18,21 +18,23 @@ approvals and an audit trail.
 > problems, but it is not a clone of any commercial product, and all organizations and people in the
 > demo data are fictional.
 
-## Status: Milestone 2 (identity and tenant isolation)
+## Status: Milestone 3 (first business write: create a voyage)
 
-| Area    | Delivered                                                                                                                                                        |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth    | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                           |
-| Access  | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                      |
-| API     | `GET /api/voyages` (with `?status=` filter), `GET /api/voyages/:voyageId`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                              |
-| Web     | Sign-in page, protected routes, user menu; voyage list (status filter in the URL) and details; cache partitioned by identity and purged on every identity change |
-| Data    | PostgreSQL 18 schema with DB-enforced invariants and an idempotent demo seed (7 voyages, 12 organizations, 14 users)                                             |
-| Quality | Strict TypeScript, type-aware ESLint, Prettier, 103 automated tests (authorization tested against real PostgreSQL), GitHub Actions CI                            |
+| Area    | Delivered                                                                                                                                                                          |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth    | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                                             |
+| Access  | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                                        |
+| Roles   | `VIEWER` (read) and `OPERATOR` (read and create) per user, read on every request and checked in the creating service ([ADR 0008](docs/decisions/0008-user-roles.md))               |
+| Writes  | `POST /api/voyages`: starts `PLANNED`, creator's organization becomes `EXPORTER`, server-assigned `TF-<year>-<number>`, one audit event in the same transaction                    |
+| API     | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                    |
+| Web     | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details, and a creation form for operators; cache partitioned by identity and purged on every change |
+| Data    | PostgreSQL 18 schema with DB-enforced invariants, append-only audit events, and an idempotent demo seed (7 voyages, 12 organizations, 14 users)                                    |
+| Quality | Strict TypeScript, type-aware ESLint, Prettier, 185 automated tests (authorization and transactions tested against real PostgreSQL), GitHub Actions CI                             |
 
-User permissions inside an organization (write RBAC) are **not** built: every endpoint is a read,
-so there is nothing to authorize yet beyond participation. Notices, documents, real-time updates
-and AI features are also **intentionally not built yet**. See [Roadmap](#roadmap) and the
-[domain model](docs/domain-model.md#6-user-permissions-are-not-participant-roles).
+Only voyage creation writes data. Editing voyages, adding participants, the trade string,
+notices, documents, an audit timeline in the UI, real-time updates and AI features are
+**intentionally not built yet**. See [Roadmap](#roadmap) and the
+[domain model](docs/domain-model.md#creating-a-voyage-initial-business-rule).
 
 ## Architecture at a glance
 
@@ -106,14 +108,19 @@ pnpm dev            # API on :3000, web on :5173
 ```
 
 Open <http://localhost:5173> and sign in. Every seeded user's password is `tradeflow-demo`; these
-accounts show how visibility follows participation:
+accounts show how visibility follows participation, and what each user role may do:
 
-| Email                                   | Organization (role on voyages)    | Sees voyages                   |
-| --------------------------------------- | --------------------------------- | ------------------------------ |
-| `ana.souza@cerrado-graos.example`       | Cerrado Grãos (exporter)          | TF-2026-0001, 0002, 0007       |
-| `claire.morel@lacustra.example`         | Lacustra Commodities (trader)     | TF-2026-0001, 0003, 0005       |
-| `lucia.ferreyra@pampalitoral.example`   | Pampa Litoral (exporter)          | TF-2026-0003, 0004             |
-| `pieter.bakker@atlasinspection.example` | Atlas Cargo Inspection (surveyor) | TF-2026-0001, 0002, 0003, 0005 |
+| Email                                   | Organization (role on voyages)    | User role | Sees voyages                   |
+| --------------------------------------- | --------------------------------- | --------- | ------------------------------ |
+| `ana.souza@cerrado-graos.example`       | Cerrado Grãos (exporter)          | Operator  | TF-2026-0001, 0002, 0007       |
+| `rafael.lima@cerrado-graos.example`     | Cerrado Grãos (exporter)          | Viewer    | TF-2026-0001, 0002, 0007       |
+| `claire.morel@lacustra.example`         | Lacustra Commodities (trader)     | Operator  | TF-2026-0001, 0003, 0005       |
+| `jonas.weber@lacustra.example`          | Lacustra Commodities (trader)     | Viewer    | TF-2026-0001, 0003, 0005       |
+| `lucia.ferreyra@pampalitoral.example`   | Pampa Litoral (exporter)          | Operator  | TF-2026-0003, 0004             |
+| `pieter.bakker@atlasinspection.example` | Atlas Cargo Inspection (surveyor) | Operator  | TF-2026-0001, 0002, 0003, 0005 |
+
+Operators see **New voyage** on the voyage list. A voyage they create gets the next reference
+(the seed's last is TF-2026-0007) and is visible to their organization only, as its exporter.
 
 API docs are at <http://localhost:3000/api/docs>.
 
@@ -139,7 +146,8 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
 
 ### How tests work
 
-- **contracts**: schema behaviour (decimal strings, UUIDs, enums).
+- **contracts**: schema behaviour (decimal strings, UUIDs, enums), including the create-voyage
+  rules: exact quantities within `DECIMAL(14,3)`, ordered laycan, distinct ports, no extra fields.
 - **api, unit**: pure mapping logic (decimal precision, calendar dates, participant ordering),
   password hashing, session tokens and cookies, and config validation.
 - **api, integration**: boots the real Nest application against the real `tradeflow_test`
@@ -147,17 +155,23 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
   migrations and **refuses to run against a database whose name does not end in `_test`**.
   Authentication and authorization are tested here end to end: sign-in, expiry, revocation,
   sign-out, and the participation rules (shared voyages, isolation, status filters,
-  client-supplied organization ids, removed participation, 404 for non-participants).
+  client-supplied organization ids, removed participation, 404 for non-participants). Voyage
+  creation is tested there too: 401 and 403, roles re-read on every request, validation without
+  partial writes, exactly one audit event, rollback when the audit write fails, and unique,
+  consecutive references under concurrent creation.
 - **web**: renders the real route tree with real providers. Only the network is faked, by MSW, and
   unhandled requests fail the test. Auth flows run against a stateful fake of the auth API,
   including sign-out during an in-flight request, switching users, and a change made in another
-  tab. The suite runs in `America/Sao_Paulo` time so date-shifting
+  tab. The voyage form is tested for success, validation, failures, viewers, and a response that
+  arrives after the identity changed. The suite runs in `America/Sao_Paulo` time so date-shifting
   bugs show up.
 
 ## Roadmap
 
 1. **Identity and tenant isolation (done, Milestone 2).** Sign-in, sessions, participation-scoped
-   voyage access. Still open: user permissions for writes, sign-in rate limiting, SSO.
+   voyage access. Still open: sign-in rate limiting, SSO.
+   **First business write (done, Milestone 3).** Voyage creation with viewer/operator roles,
+   transactional audit events and server-assigned references.
 2. **Trade string.** Ordered sale contracts between adjacent parties.
 3. **Notices and documentary instructions.** Versioned, directional business objects with
    optimistic concurrency and an audit trail.

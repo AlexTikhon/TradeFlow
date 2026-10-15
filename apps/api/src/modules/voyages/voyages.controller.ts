@@ -1,6 +1,9 @@
-import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import { Body, Controller, Get, NotFoundException, Param, Post, Query, Res } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiBody,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -9,12 +12,15 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import {
+  type CreateVoyageRequest,
+  CreateVoyageRequestSchema,
   type ListVoyagesQuery,
   ListVoyagesQuerySchema,
   type VoyageDetail,
   VoyageIdParamSchema,
   type VoyageListResponse,
 } from '@tradeflow/contracts';
+import type { Response } from 'express';
 import { schemaRef } from '../../common/http/openapi.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
@@ -37,6 +43,33 @@ export class VoyagesController {
     @Query(new ZodValidationPipe(ListVoyagesQuerySchema)) query: ListVoyagesQuery,
   ): Promise<VoyageListResponse> {
     return this.voyages.list(principal, query);
+  }
+
+  @Post()
+  @ApiOperation({
+    summary: 'Create a voyage; your organization becomes its exporter',
+    description:
+      'Operators only. The voyage starts PLANNED with a server-assigned reference, and your ' +
+      'organization (from the session) is added as its EXPORTER participant. The body carries ' +
+      'only shipment facts: fields such as organizationId, participants or status are rejected.',
+  })
+  @ApiBody({ schema: schemaRef('CreateVoyageRequest') })
+  @ApiCreatedResponse({
+    description: 'Created. `Location` points at the new voyage.',
+    schema: schemaRef('VoyageDetail'),
+  })
+  @ApiForbiddenResponse({
+    description: 'Your role does not allow creating voyages, or the request was cross-site',
+    schema: schemaRef('ProblemDetails'),
+  })
+  async create(
+    @CurrentPrincipal() principal: Principal,
+    @Body(new ZodValidationPipe(CreateVoyageRequestSchema)) body: CreateVoyageRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<VoyageDetail> {
+    const voyage = await this.voyages.create(principal, body);
+    response.location(`/api/voyages/${voyage.id}`);
+    return voyage;
   }
 
   @Get(':voyageId')

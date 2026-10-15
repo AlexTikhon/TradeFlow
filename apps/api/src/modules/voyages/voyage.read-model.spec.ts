@@ -24,9 +24,19 @@ function detailRow(overrides: Partial<VoyageDetailRow> = {}): VoyageDetailRow {
       name: 'MV Horizon',
       imoNumber: '9341237',
     },
-    commodity: { code: 'SOYBEANS', name: 'Soybeans' },
-    loadPort: { unLocode: 'BRSSZ', name: 'Santos', countryCode: 'BR' },
-    dischargePort: { unLocode: 'NLRTM', name: 'Rotterdam', countryCode: 'NL' },
+    commodity: { id: '01990000-0000-7000-8004-000000000001', code: 'SOYBEANS', name: 'Soybeans' },
+    loadPort: {
+      id: '01990000-0000-7000-8005-000000000001',
+      unLocode: 'BRSSZ',
+      name: 'Santos',
+      countryCode: 'BR',
+    },
+    dischargePort: {
+      id: '01990000-0000-7000-8005-000000000005',
+      unLocode: 'NLRTM',
+      name: 'Rotterdam',
+      countryCode: 'NL',
+    },
     participants: [],
     ...overrides,
   };

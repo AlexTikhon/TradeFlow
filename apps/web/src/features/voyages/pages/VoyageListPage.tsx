@@ -1,12 +1,15 @@
+import AddIcon from '@mui/icons-material/Add';
+import { Button, Stack } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { VoyageStatusSchema, type VoyageStatus } from '@tradeflow/contracts';
-import { useSearchParams } from 'react-router';
-import { useProtectedScope } from '../../../shared/auth/identity';
+import { Link as RouterLink, useSearchParams } from 'react-router';
+import { useIdentity, useProtectedScope } from '../../../shared/auth/identity';
 import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { voyageQueries } from '../api/voyage.queries';
 import { VoyagesTable } from '../components/VoyagesTable';
 import { VoyageStatusFilter } from '../components/VoyageStatusFilter';
+import { canCreateVoyages } from '../domain/permissions';
 
 /**
  * Filter state lives in the URL (shareable, survives reload, works with back/forward);
@@ -30,6 +33,7 @@ function useStatusFilter() {
 export function VoyageListPage() {
   const [status, setStatus] = useStatusFilter();
   const scope = useProtectedScope();
+  const identity = useIdentity();
   const { data, error, isPending, refetch } = useQuery(
     voyageQueries.list(scope, status ? { status } : {}),
   );
@@ -42,7 +46,21 @@ export function VoyageListPage() {
         subtitle={
           count === undefined ? 'Loading voyages…' : `${count} voyage${count === 1 ? '' : 's'}`
         }
-        actions={<VoyageStatusFilter value={status} onChange={setStatus} />}
+        actions={
+          <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+            <VoyageStatusFilter value={status} onChange={setStatus} />
+            {canCreateVoyages(identity) && (
+              <Button
+                component={RouterLink}
+                to="/voyages/new"
+                variant="contained"
+                startIcon={<AddIcon />}
+              >
+                New voyage
+              </Button>
+            )}
+          </Stack>
+        }
       />
       {error ? (
         <QueryErrorAlert

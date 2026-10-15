@@ -55,7 +55,7 @@ describe('Authentication API', () => {
         .expect(200);
 
       expect(CurrentUserSchema.parse(response.body)).toEqual({
-        user: { id: user.id, email: user.email, fullName: user.fullName },
+        user: { id: user.id, email: user.email, fullName: user.fullName, role: 'VIEWER' },
         organization: { id: organization.id, name: 'Exporter Co', countryCode: 'BR' },
       });
 
@@ -217,6 +217,18 @@ describe('Authentication API', () => {
 
       const response = await http().get('/api/auth/me').set('Cookie', cookie).expect(200);
       expect(CurrentUserSchema.parse(response.body).organization.id).toBe(trader.id);
+    });
+
+    it("reports the user's current role, read on every request", async () => {
+      const { user } = await aUser();
+      const cookie = await signIn(ctx.server, user.email);
+      const before = await http().get('/api/auth/me').set('Cookie', cookie).expect(200);
+      expect(CurrentUserSchema.parse(before.body).user.role).toBe('VIEWER');
+
+      await ctx.prisma.user.update({ where: { id: user.id }, data: { role: 'OPERATOR' } });
+
+      const after = await http().get('/api/auth/me').set('Cookie', cookie).expect(200);
+      expect(CurrentUserSchema.parse(after.body).user.role).toBe('OPERATOR');
     });
   });
 

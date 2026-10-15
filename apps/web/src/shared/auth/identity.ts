@@ -1,3 +1,4 @@
+import type { QueryClient } from '@tanstack/react-query';
 import type { CurrentUser } from '@tradeflow/contracts';
 import { createContext, useContext } from 'react';
 
@@ -24,6 +25,18 @@ export const sameIdentity = (
   a: CurrentUser | null | undefined,
   b: CurrentUser | null | undefined,
 ): boolean => (a && b ? identityKey(a) === identityKey(b) : a === b);
+
+/** Key of the session query: who is signed in. `features/auth/session.ts` owns that query. */
+export const SESSION_QUERY_KEY = ['session'] as const;
+
+/**
+ * Whether `identity` is still the one signed in. False while the session is unknown or in
+ * transition. A response that arrives for an identity no longer signed in must not write to the
+ * cache or move the UI: both now belong to someone else.
+ */
+export function isCurrentIdentity(queryClient: QueryClient, identity: CurrentUser): boolean {
+  return sameIdentity(queryClient.getQueryData<CurrentUser | null>(SESSION_QUERY_KEY), identity);
+}
 
 /** Provided by the auth boundary around every protected route. */
 export const IdentityContext = createContext<CurrentUser | null>(null);

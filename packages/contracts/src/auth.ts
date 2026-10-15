@@ -14,11 +14,21 @@ export const SignInRequestSchema = z
   })
   .register(apiSchemaRegistry, { id: 'SignInRequest' });
 
+/**
+ * What a user may do on behalf of their organization (ADR 0008). Viewers read the voyages their
+ * organization participates in; operators may also change them (today: create voyages).
+ * Unrelated to participant roles, which say what the organization does on a given voyage.
+ */
+export const USER_ROLES = ['VIEWER', 'OPERATOR'] as const;
+
+export const UserRoleSchema = z.enum(USER_ROLES).register(apiSchemaRegistry, { id: 'UserRole' });
+
 export const UserSchema = z
   .object({
     id: z.uuid(),
     email: z.email(),
     fullName: z.string(),
+    role: UserRoleSchema,
   })
   .register(apiSchemaRegistry, { id: 'User' });
 
@@ -34,5 +44,6 @@ export const CurrentUserSchema = z
   .register(apiSchemaRegistry, { id: 'CurrentUser' });
 
 export type SignInRequest = z.infer<typeof SignInRequestSchema>;
+export type UserRole = z.infer<typeof UserRoleSchema>;
 export type User = z.infer<typeof UserSchema>;
 export type CurrentUser = z.infer<typeof CurrentUserSchema>;

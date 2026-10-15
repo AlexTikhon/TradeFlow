@@ -17,9 +17,9 @@ export const voyageSummarySelect = {
   laycanEnd: true,
   updatedAt: true,
   vessel: { select: { id: true, name: true, imoNumber: true } },
-  commodity: { select: { code: true, name: true } },
-  loadPort: { select: { unLocode: true, name: true, countryCode: true } },
-  dischargePort: { select: { unLocode: true, name: true, countryCode: true } },
+  commodity: { select: { id: true, code: true, name: true } },
+  loadPort: { select: { id: true, unLocode: true, name: true, countryCode: true } },
+  dischargePort: { select: { id: true, unLocode: true, name: true, countryCode: true } },
 } satisfies Prisma.VoyageSelect;
 
 export const voyageDetailSelect = {

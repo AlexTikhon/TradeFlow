@@ -34,7 +34,13 @@ describe('OpenAPI document', () => {
     };
 
     expect(Object.keys(document.paths)).toEqual(
-      expect.arrayContaining(['/api/voyages', '/api/voyages/{voyageId}']),
+      expect.arrayContaining([
+        '/api/voyages',
+        '/api/voyages/{voyageId}',
+        '/api/vessels',
+        '/api/commodities',
+        '/api/ports',
+      ]),
     );
 
     const schemaIds = new Set(Object.keys(document.components.schemas));
@@ -68,6 +74,10 @@ describe('OpenAPI document', () => {
       operation('/api/voyages', 'get'),
       operation('/api/voyages/{voyageId}', 'get'),
       operation('/api/auth/me', 'get'),
+      operation('/api/voyages', 'post'),
+      operation('/api/vessels', 'get'),
+      operation('/api/commodities', 'get'),
+      operation('/api/ports', 'get'),
     ];
     for (const op of protectedOperations) {
       expect(op?.security).toEqual([{ session: [] }]);
@@ -81,5 +91,31 @@ describe('OpenAPI document', () => {
       expect(op).toBeDefined();
       expect(op?.security).toBeUndefined();
     }
+  });
+
+  it('documents voyage creation with a closed request schema and its failure responses', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      requestBody?: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, unknown>;
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Record<string, unknown>> };
+    };
+
+    const create = document.paths['/api/voyages']?.post;
+    expect(create?.requestBody?.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/CreateVoyageRequest',
+    });
+    expect(Object.keys(create?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '400', '401', '403']),
+    );
+    const schema = document.components.schemas.CreateVoyageRequest;
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.required).toEqual(
+      expect.arrayContaining(['vesselId', 'commodityId', 'quantity', 'loadPortId', 'laycan']),
+    );
+    expect(schema?.properties).not.toHaveProperty('organizationId');
   });
 });

@@ -42,90 +42,106 @@ const organizations = [
   { id: ORG(12), name: 'Costa Atlântica Agência Marítima Ltda.', countryCode: 'BR' },
 ] as const;
 
+// Every organization has an operator (may create voyages). Cerrado and Lacustra also have a
+// viewer (read-only), so both roles can be tried in the demo.
 const users = [
   {
     id: USER(1),
     organizationId: ORG(1),
     email: 'ana.souza@cerrado-graos.example',
     fullName: 'Ana Souza',
+    role: 'OPERATOR',
   },
   {
     id: USER(2),
     organizationId: ORG(1),
     email: 'rafael.lima@cerrado-graos.example',
     fullName: 'Rafael Lima',
+    role: 'VIEWER',
   },
   {
     id: USER(3),
     organizationId: ORG(2),
     email: 'lucia.ferreyra@pampalitoral.example',
     fullName: 'Lucía Ferreyra',
+    role: 'OPERATOR',
   },
   {
     id: USER(4),
     organizationId: ORG(3),
     email: 'mark.hollis@gulfprairie.example',
     fullName: 'Mark Hollis',
+    role: 'OPERATOR',
   },
   {
     id: USER(5),
     organizationId: ORG(4),
     email: 'claire.morel@lacustra.example',
     fullName: 'Claire Morel',
+    role: 'OPERATOR',
   },
   {
     id: USER(6),
     organizationId: ORG(4),
     email: 'jonas.weber@lacustra.example',
     fullName: 'Jonas Weber',
+    role: 'VIEWER',
   },
   {
     id: USER(7),
     organizationId: ORG(5),
     email: 'sanne.devries@nordlys.example',
     fullName: 'Sanne de Vries',
+    role: 'OPERATOR',
   },
   {
     id: USER(8),
     organizationId: ORG(6),
     email: 'wei.ling.tan@meridianagri.example',
     fullName: 'Tan Wei Ling',
+    role: 'OPERATOR',
   },
   {
     id: USER(9),
     organizationId: ORG(7),
     email: 'katrin.vogel@rhinevalley.example',
     fullName: 'Katrin Vogel',
+    role: 'OPERATOR',
   },
   {
     id: USER(10),
     organizationId: ORG(8),
     email: 'emre.kaya@anatoliamills.example',
     fullName: 'Emre Kaya',
+    role: 'OPERATOR',
   },
   {
     id: USER(11),
     organizationId: ORG(9),
     email: 'zhang.min@bohaifeed.example',
     fullName: 'Zhang Min',
+    role: 'OPERATOR',
   },
   {
     id: USER(12),
     organizationId: ORG(10),
     email: 'pablo.ortega@iberiafeeds.example',
     fullName: 'Pablo Ortega',
+    role: 'OPERATOR',
   },
   {
     id: USER(13),
     organizationId: ORG(11),
     email: 'pieter.bakker@atlasinspection.example',
     fullName: 'Pieter Bakker',
+    role: 'OPERATOR',
   },
   {
     id: USER(14),
     organizationId: ORG(12),
     email: 'joao.ribeiro@costaatlantica.example',
     fullName: 'João Ribeiro',
+    role: 'OPERATOR',
   },
 ] as const;
 
@@ -332,6 +348,18 @@ async function seed(prisma: PrismaClient): Promise<void> {
       }),
     ]);
   }
+
+  // Voyages created through the API continue numbering after the seeded references. Never
+  // lowers a counter, so re-seeding after voyages were created cannot hand out a used number.
+  await prisma.$executeRaw`
+    INSERT INTO voyage_reference_counters (year, last_number)
+    SELECT (regexp_match(reference, '^TF-(\d{4})-\d+$'))[1]::int,
+           max((regexp_match(reference, '^TF-\d{4}-(\d+)$'))[1]::int)
+    FROM voyages
+    WHERE reference ~ '^TF-\d{4}-\d+$'
+    GROUP BY 1
+    ON CONFLICT (year)
+      DO UPDATE SET last_number = GREATEST(voyage_reference_counters.last_number, EXCLUDED.last_number)`;
 }
 
 const connectionString = process.env.DATABASE_URL;

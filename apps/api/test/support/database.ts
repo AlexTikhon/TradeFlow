@@ -1,5 +1,5 @@
 import type { PrismaService } from '../../src/infrastructure/prisma/prisma.service.js';
-import type { ParticipantRole, VoyageStatus } from '../../src/generated/prisma/client.js';
+import type { ParticipantRole, UserRole, VoyageStatus } from '../../src/generated/prisma/client.js';
 import { hashPassword } from '../../src/modules/auth/password.js';
 import { generateSessionToken, hashSessionToken } from '../../src/modules/auth/session-token.js';
 
@@ -71,7 +71,11 @@ let testPasswordHash: Promise<string> | undefined;
 export async function createUser(
   prisma: PrismaService,
   organizationId: string,
-  { email = `user${next()}@example.com`, hasPassword = true } = {},
+  {
+    email = `user${next()}@example.com`,
+    hasPassword = true,
+    role = 'VIEWER',
+  }: { email?: string; hasPassword?: boolean; role?: UserRole } = {},
 ) {
   testPasswordHash ??= hashPassword(TEST_PASSWORD);
   return prisma.user.create({
@@ -79,6 +83,7 @@ export async function createUser(
       organizationId,
       email,
       fullName: `Test User ${email}`,
+      role,
       passwordHash: hasPassword ? await testPasswordHash : null,
     },
   });

@@ -1,7 +1,12 @@
 import { type Query, type QueryClient, queryOptions } from '@tanstack/react-query';
 
 import type { CurrentUser, SignInRequest } from '@tradeflow/contracts';
-import { identityKey, PROTECTED_QUERY_ROOT, sameIdentity } from '../../shared/auth/identity';
+import {
+  identityKey,
+  PROTECTED_QUERY_ROOT,
+  SESSION_QUERY_KEY,
+  sameIdentity,
+} from '../../shared/auth/identity';
 import { fetchCurrentUser, signIn, signOut } from './api/auth.api';
 
 /*
@@ -20,7 +25,7 @@ import { fetchCurrentUser, signIn, signOut } from './api/auth.api';
  * overtaken by another tab), the client asks the server and adopts its answer.
  */
 
-const SESSION_KEY = ['session'] as const;
+const SESSION_KEY = SESSION_QUERY_KEY;
 
 export type SignOutState =
   { status: 'idle' } | { status: 'pending' } | { status: 'failed'; error: unknown };

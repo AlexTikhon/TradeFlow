@@ -75,9 +75,9 @@ export class AuthService {
   }
 
   /**
-   * Resolves a session token to the acting user and their organization. Expiry and revocation
-   * are checked in the query itself, and the organization is read from the user row on every
-   * request, so a change of membership takes effect immediately.
+   * Resolves a session token to the acting user, their organization and their role. Expiry and
+   * revocation are checked in the query itself, and organization and role are read from the user
+   * row on every request, so a change of membership or role takes effect immediately.
    */
   async authenticate(token: string): Promise<Principal | null> {
     if (!isWellFormedSessionToken(token)) {
@@ -85,7 +85,7 @@ export class AuthService {
     }
     const session = await this.prisma.session.findUnique({
       where: { tokenHash: hashSessionToken(token), revokedAt: null, expiresAt: { gt: new Date() } },
-      select: { id: true, user: { select: { id: true, organizationId: true } } },
+      select: { id: true, user: { select: { id: true, organizationId: true, role: true } } },
     });
     if (!session) {
       return null;
@@ -94,6 +94,7 @@ export class AuthService {
       sessionId: session.id,
       userId: session.user.id,
       organizationId: session.user.organizationId,
+      role: session.user.role,
     };
   }
 
@@ -111,6 +112,7 @@ export class AuthService {
         id: true,
         email: true,
         fullName: true,
+        role: true,
         organization: { select: { id: true, name: true, countryCode: true } },
       },
     });
