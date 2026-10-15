@@ -1,6 +1,8 @@
 /**
- * Demo data seed. Idempotent: every row has a fixed id and is upserted, so the seed can be
- * re-run safely and demo URLs stay stable. All organizations and people are fictional.
+ * Demo data seed. Idempotent: every row has a fixed id and is upserted (or, below a seeded
+ * voyage, replaced), so the seed can be re-run safely and demo URLs stay stable. Notices are the
+ * exception: they are replaced with fresh ids on each run (see planNotice). All organizations and
+ * people are fictional.
  */
 import { PrismaPg } from '@prisma/adapter-pg';
 import {
@@ -9,6 +11,7 @@ import {
   type VoyageStatus,
 } from '../src/generated/prisma/client.js';
 import { hashPassword } from '../src/modules/auth/password.js';
+import { deadlineViolations } from '../src/modules/notices/notice-rules.js';
 import { toLinearTradeString } from '../src/modules/voyages/trade-string.js';
 
 /**
@@ -332,6 +335,124 @@ const voyages: VoyageSeed[] = [
   },
 ];
 
+interface NoticeSeed {
+  number: number;
+  /** The voyage (by number) and its contract (by position) the notice is issued under. */
+  voyage: number;
+  position: number;
+  /** An operator of the contract's seller. */
+  issuedBy: string;
+  /**
+   * Times in hours relative to when the seed runs (negative: in the past), so that each demo
+   * notice stays in the state it is meant to show: acknowledged, awaiting, or overdue.
+   */
+  issued: number;
+  due: number;
+  arrival: number;
+  message: string | null;
+  /** An operator of the contract's buyer, and when they acknowledged. */
+  acknowledged?: { by: string; at: number };
+}
+
+const noticeSeeds: NoticeSeed[] = [
+  {
+    // Cerrado → Lacustra, acknowledged by Lacustra in time.
+    number: 1,
+    voyage: 1,
+    position: 1,
+    issuedBy: USER(1),
+    issued: -144,
+    due: -96,
+    arrival: 120,
+    message: 'MV Horizon sailed Santos fully loaded. ETA Rotterdam as stated, weather permitting.',
+    acknowledged: { by: USER(5), at: -120 },
+  },
+  {
+    // Lacustra → Nordlys, awaiting Nordlys's acknowledgement.
+    number: 2,
+    voyage: 1,
+    position: 2,
+    issuedBy: USER(5),
+    issued: -118,
+    due: 24,
+    arrival: 120,
+    message: "Passing on our seller's ETA for MV Horizon at Rotterdam.",
+  },
+  {
+    // Nordlys → Rhine Valley, past its deadline and still unacknowledged: overdue.
+    number: 3,
+    voyage: 1,
+    position: 3,
+    issuedBy: USER(7),
+    issued: -96,
+    due: -48,
+    arrival: 120,
+    message: null,
+  },
+  {
+    // Cerrado → Meridian on TF-2026-0002, awaiting Meridian's acknowledgement.
+    number: 4,
+    voyage: 2,
+    position: 1,
+    issuedBy: USER(1),
+    issued: -20,
+    due: 52,
+    arrival: 480,
+    message: 'MV Nordic Harvest is loading at Paranaguá. ETA Tarragona after sailing.',
+  },
+];
+
+/**
+ * The row for one seeded notice. The issuer must work for the contract's seller and the
+ * acknowledger for its buyer, and the deadlines must satisfy the same rules the API applies at
+ * the time of issue. Anything else fails the seed before it writes.
+ *
+ * Unlike every other seeded row, a notice gets a fresh id on each run (the database assigns
+ * it). Audit events are append-only and allow one acknowledgement event per notice id, so a
+ * notice re-created under an id that was acknowledged through the API could never be
+ * acknowledged again. No URL in the app names a notice, so nothing depends on stable ids.
+ */
+function planNotice(seed: NoticeSeed, now: Date) {
+  const voyage = voyages.find((v) => v.number === seed.voyage);
+  const seller = voyage?.tradeString[seed.position - 1];
+  const buyer = voyage?.tradeString[seed.position];
+  const organizationOf = (userId: string) => users.find((u) => u.id === userId)?.organizationId;
+  const hours = (offset: number) => new Date(now.getTime() + offset * 3_600_000);
+  const name = `Notice ${seed.number}`;
+  if (!voyage || !seller || !buyer) {
+    throw new Error(`${name}: voyage ${seed.voyage} has no contract at position ${seed.position}`);
+  }
+  if (organizationOf(seed.issuedBy) !== seller) {
+    throw new Error(`${name}: the issuer does not work for the contract's seller`);
+  }
+  if (seed.acknowledged && organizationOf(seed.acknowledged.by) !== buyer) {
+    throw new Error(`${name}: the acknowledger does not work for the contract's buyer`);
+  }
+  const issuedAt = hours(seed.issued);
+  const deadlines = {
+    estimatedArrivalAt: hours(seed.arrival),
+    acknowledgementDueAt: hours(seed.due),
+  };
+  const violations = deadlineViolations(deadlines, issuedAt);
+  if (violations.length > 0) {
+    throw new Error(`${name}: ${violations.map((v) => v.message).join('; ')}`);
+  }
+  return {
+    voyageId: VOYAGE(seed.voyage),
+    tradeContractId: CONTRACT(seed.voyage, seed.position),
+    type: 'ETA' as const,
+    status: seed.acknowledged ? ('ACKNOWLEDGED' as const) : ('ISSUED' as const),
+    ...deadlines,
+    message: seed.message,
+    issuedByUserId: seed.issuedBy,
+    issuedByOrganizationId: seller,
+    issuedAt,
+    acknowledgedByUserId: seed.acknowledged?.by ?? null,
+    acknowledgedByOrganizationId: seed.acknowledged ? buyer : null,
+    acknowledgedAt: seed.acknowledged ? hours(seed.acknowledged.at) : null,
+  };
+}
+
 /**
  * The rows for one seeded voyage, with fixed ids. Its trade string is checked with the same
  * domain rules the API reads it with (toLinearTradeString throws on any violation).
@@ -393,18 +514,23 @@ async function seed(prisma: PrismaClient): Promise<void> {
     await prisma.port.upsert({ where: { id }, update: data, create: { id, ...data } });
   }
 
-  // Plan every voyage before writing any, so a seed whose trade string breaks the domain rules
-  // fails before it changes anything.
+  // Plan every voyage and notice before writing any, so a seed whose trade string or notices
+  // break the domain rules fails before it changes anything.
   const plans = voyages.map(planVoyage);
+  const now = new Date();
+  const notices = noticeSeeds.map((seed) => planNotice(seed, now));
   for (const { id, data, participants, contracts } of plans) {
-    // The seed owns these voyages, so their participants and trade string are replaced wholesale
-    // (contracts first: they reference the participants).
+    // The seed owns these voyages, so their participants, trade string and notices are replaced
+    // wholesale (notices first: they reference the contracts, which reference the participants).
+    // Notices issued through the API on a seeded voyage go too; their audit events stay.
     await prisma.$transaction([
       prisma.voyage.upsert({ where: { id }, update: data, create: { id, ...data } }),
+      prisma.notice.deleteMany({ where: { voyageId: id } }),
       prisma.tradeContract.deleteMany({ where: { voyageId: id } }),
       prisma.voyageParticipant.deleteMany({ where: { voyageId: id } }),
       prisma.voyageParticipant.createMany({ data: participants }),
       prisma.tradeContract.createMany({ data: contracts }),
+      prisma.notice.createMany({ data: notices.filter((notice) => notice.voyageId === id) }),
     ]);
   }
 
@@ -432,7 +558,8 @@ try {
   console.log(
     `Seeded ${organizations.length} organizations, ${users.length} users, ${vessels.length} vessels, ` +
       `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages ` +
-      `(${voyages.filter((voyage) => voyage.tradeString.length > 0).length} with a trade string). ` +
+      `(${voyages.filter((voyage) => voyage.tradeString.length > 0).length} with a trade string), ` +
+      `${noticeSeeds.length} ETA notices. ` +
       `Every user's password is "${DEMO_PASSWORD}".`,
   );
 } finally {

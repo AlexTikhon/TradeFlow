@@ -66,5 +66,8 @@ stored yet; the decision must still leave room for them without leaking them lat
   from any future contract-details schema, so the shared view cannot grow by accident.
 - Future confidential contract fields need a new ADR or an amendment that says who sees them.
   This one must not be cited as allowing it.
+- Contract ids are served to counterparties only, by a separate endpoint, and notices are
+  counterparty-only ([ADR 0011](0011-counterparty-notices.md)). The topology response did not
+  change.
 - Access is still evaluated per request: an organization removed from a voyage stops seeing its
   string on the next request, like the voyage itself.

@@ -16,6 +16,19 @@ const calendarDateFormat = new Intl.DateTimeFormat(LOCALE, {
   timeZone: 'UTC',
 });
 
+/**
+ * Instants (timestamps) are shown in the viewer's own time zone, and say which one: two parties
+ * reading the same notice on different continents must not misread each other's clocks.
+ */
+const instantFormat = new Intl.DateTimeFormat(LOCALE, {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZoneName: 'short',
+});
+
 const regionNames = new Intl.DisplayNames(LOCALE, { type: 'region' });
 
 /** "50,000 MT". The decimal string is formatted directly: it never becomes a float. */
@@ -30,6 +43,16 @@ export function formatCalendarDate(isoDate: string): string {
 /** "25 Sep – 4 Oct 2026" */
 export function formatLaycan({ start, end }: Laycan): string {
   return calendarDateFormat.formatRange(new Date(start), new Date(end));
+}
+
+/** "20 Oct 2026, 14:00 GMT-3" for an ISO 8601 instant, in the viewer's time zone. */
+export function formatInstant(isoInstant: string): string {
+  return instantFormat.format(new Date(isoInstant));
+}
+
+/** The viewer's time zone, e.g. "America/Sao_Paulo". */
+export function localTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
 /** "BR" -> "Brazil", falling back to the code itself. */

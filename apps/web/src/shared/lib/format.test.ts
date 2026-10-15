@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatCalendarDate, formatCountry, formatLaycan, formatQuantity } from './format';
+import {
+  formatCalendarDate,
+  formatCountry,
+  formatInstant,
+  formatLaycan,
+  formatQuantity,
+  localTimeZone,
+} from './format';
 
 describe('formatQuantity', () => {
   it('groups thousands and drops insignificant zeros', () => {
@@ -21,6 +28,21 @@ describe('calendar dates', () => {
     // Intl separates range parts with thin spaces (U+2009); compare on normalised whitespace.
     const formatted = formatLaycan({ start: '2026-09-25', end: '2026-10-04' });
     expect(formatted.replace(/\s/g, ' ')).toBe('25 Sept – 4 Oct 2026');
+  });
+});
+
+describe('instants', () => {
+  // The test run uses TZ=America/Sao_Paulo (UTC-3); see vite.config.ts.
+  it("shows an instant in the viewer's time zone and names the offset", () => {
+    expect(formatInstant('2026-10-20T17:00:00.000Z')).toBe('20 Oct 2026, 14:00 GMT-3');
+  });
+
+  it('crosses midnight with the time zone, not with UTC', () => {
+    expect(formatInstant('2026-10-21T01:30:00.000Z')).toBe('20 Oct 2026, 22:30 GMT-3');
+  });
+
+  it("names the viewer's time zone", () => {
+    expect(localTimeZone()).toBe('America/Sao_Paulo');
   });
 });
 

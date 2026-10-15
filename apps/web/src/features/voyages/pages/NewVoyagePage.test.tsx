@@ -65,10 +65,12 @@ function serveVoyageList(items = [created]) {
       return HttpResponse.json(body);
     }),
     http.get(`*/api/voyages/${created.id}`, () => HttpResponse.json(created)),
-    // A new voyage has no sale contracts yet.
+    // A new voyage has no sale contracts yet, so no notices either.
     http.get(`*/api/voyages/${created.id}/trade-string`, () =>
       HttpResponse.json(anEmptyTradeString()),
     ),
+    http.get(`*/api/voyages/${created.id}/my-contracts`, () => HttpResponse.json({ items: [] })),
+    http.get(`*/api/voyages/${created.id}/notices`, () => HttpResponse.json({ items: [] })),
   );
   return requests;
 }

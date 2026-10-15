@@ -27,7 +27,7 @@ export function createOpenApiDocument(
   const config = new DocumentBuilder()
     .setTitle('TradeFlow API')
     .setDescription('Post-trade execution for bulk commodity shipments.')
-    .setVersion('0.2.0')
+    .setVersion('0.3.0')
     .addCookieAuth(
       sessionCookieName,
       {

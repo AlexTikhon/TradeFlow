@@ -30,6 +30,8 @@ model Organization {
   users                User[]
   voyageParticipations VoyageParticipant[]
   auditEvents          AuditEvent[]
+  issuedNotices        Notice[]            @relation("NoticeIssuedBy")
+  acknowledgedNotices  Notice[]            @relation("NoticeAcknowledgedBy")
 
   @@map("organizations")
 }
@@ -55,9 +57,11 @@ model User {
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  sessions     Session[]
-  auditEvents  AuditEvent[]
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  sessions            Session[]
+  auditEvents         AuditEvent[]
+  issuedNotices       Notice[]     @relation("NoticeIssuedBy")
+  acknowledgedNotices Notice[]     @relation("NoticeAcknowledgedBy")
 
   @@index([organizationId])
   @@map("users")
@@ -163,6 +167,7 @@ model Voyage {
   participants   VoyageParticipant[]
   /// The trade string, as its sale contracts (see TradeContract).
   tradeContracts TradeContract[]
+  notices        Notice[]
   auditEvents    AuditEvent[]
 
   @@index([status, laycanStart])
@@ -224,14 +229,17 @@ model TradeContract {
   buyerParticipantId  String   @map("buyer_participant_id") @db.Uuid
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  voyage Voyage            @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  voyage  Voyage            @relation(fields: [voyageId], references: [id], onDelete: Cascade)
   // Composite keys pin both counterparties to this contract's voyage. NO ACTION (checked at the
   // end of the statement) lets a voyage deletion cascade to participants and contracts together,
   // while still refusing to delete a participant that a contract names.
-  seller VoyageParticipant @relation("TradeContractSeller", fields: [voyageId, sellerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
-  buyer  VoyageParticipant @relation("TradeContractBuyer", fields: [voyageId, buyerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  seller  VoyageParticipant @relation("TradeContractSeller", fields: [voyageId, sellerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  buyer   VoyageParticipant @relation("TradeContractBuyer", fields: [voyageId, buyerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  notices Notice[]
 
   @@unique([voyageId, position])
+  // Target of the notices' composite foreign key, so a notice stays inside its contract's voyage.
+  @@unique([voyageId, id])
   // A participant sells at most once and buys at most once per voyage: the string cannot branch.
   @@unique([voyageId, sellerParticipantId])
   @@unique([voyageId, buyerParticipantId])
@@ -249,11 +257,73 @@ model VoyageReferenceCounter {
 }
 
 // ---------------------------------------------------------------------------
+// Notices
+// ---------------------------------------------------------------------------
+
+/// One type so far. A second type with different fields will revisit how type-specific
+/// columns are stored (ADR 0011).
+enum NoticeType {
+  ETA
+
+  @@map("notice_type")
+}
+
+/// Persisted workflow state. "Overdue" is not a state: it is derived from the deadline while a
+/// notice is ISSUED, so nothing has to run when a deadline passes (ADR 0011).
+enum NoticeStatus {
+  ISSUED
+  ACKNOWLEDGED
+
+  @@map("notice_status")
+}
+
+/// A notice from the seller to the buyer under one sale contract (ADR 0011). Readable only by
+/// the contract's two counterparties; owned by the notices module. What the seller issued never
+/// changes: a trigger refuses updates to the issued columns, and an acknowledged notice cannot
+/// change at all. Issuer, acknowledger and both times come from the server, never the request.
+model Notice {
+  id                           String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  voyageId                     String       @map("voyage_id") @db.Uuid
+  tradeContractId              String       @map("trade_contract_id") @db.Uuid
+  type                         NoticeType
+  status                       NoticeStatus @default(ISSUED)
+  estimatedArrivalAt           DateTime     @map("estimated_arrival_at") @db.Timestamptz(3)
+  /// The buyer is asked to acknowledge by then. Later than issuedAt, not later than the arrival.
+  acknowledgementDueAt         DateTime     @map("acknowledgement_due_at") @db.Timestamptz(3)
+  /// Optional free text, at most 1000 characters and never blank (CHECK).
+  message                      String?
+  issuedByUserId               String       @map("issued_by_user_id") @db.Uuid
+  issuedByOrganizationId       String       @map("issued_by_organization_id") @db.Uuid
+  /// Set by the API when the notice is issued; never accepted from a client.
+  issuedAt                     DateTime     @map("issued_at") @db.Timestamptz(3)
+  /// Set together with the status, by one conditional update (all null while ISSUED; CHECK).
+  acknowledgedByUserId         String?      @map("acknowledged_by_user_id") @db.Uuid
+  acknowledgedByOrganizationId String?      @map("acknowledged_by_organization_id") @db.Uuid
+  acknowledgedAt               DateTime?    @map("acknowledged_at") @db.Timestamptz(3)
+
+  voyage                     Voyage        @relation(fields: [voyageId], references: [id], onDelete: Restrict)
+  // Composite key: the notice's voyage is its contract's voyage, whoever writes the row. A
+  // contract with notices cannot be deleted.
+  tradeContract              TradeContract @relation(fields: [voyageId, tradeContractId], references: [voyageId, id], onDelete: Restrict, onUpdate: NoAction)
+  issuedByUser               User          @relation("NoticeIssuedBy", fields: [issuedByUserId], references: [id], onDelete: Restrict)
+  issuedByOrganization       Organization  @relation("NoticeIssuedBy", fields: [issuedByOrganizationId], references: [id], onDelete: Restrict)
+  acknowledgedByUser         User?         @relation("NoticeAcknowledgedBy", fields: [acknowledgedByUserId], references: [id], onDelete: Restrict)
+  acknowledgedByOrganization Organization? @relation("NoticeAcknowledgedBy", fields: [acknowledgedByOrganizationId], references: [id], onDelete: Restrict)
+
+  @@index([voyageId, tradeContractId])
+  @@index([issuedByUserId])
+  @@index([acknowledgedByUserId])
+  @@map("notices")
+}
+
+// ---------------------------------------------------------------------------
 // Audit trail
 // ---------------------------------------------------------------------------
 
 enum AuditAction {
   VOYAGE_CREATED
+  NOTICE_ISSUED
+  NOTICE_ACKNOWLEDGED
 
   @@map("audit_action")
 }
@@ -270,7 +340,8 @@ model AuditEvent {
   voyageId            String      @map("voyage_id") @db.Uuid
   /// Set by the server when the event is written; never accepted from a client.
   occurredAt          DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
-  /// Action-specific facts. For VOYAGE_CREATED: the voyage as created.
+  /// Action-specific facts. VOYAGE_CREATED: the voyage as created. NOTICE_ISSUED: the notice as
+  /// issued. NOTICE_ACKNOWLEDGED: the notice, its contract, when, and whether it was late.
   payload             Json
 
   actorUser         User         @relation(fields: [actorUserId], references: [id], onDelete: Restrict)

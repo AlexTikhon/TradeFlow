@@ -72,11 +72,23 @@ src/
       trade-string.read-model.ts  allowlisted select + stored contracts → topology
       trade-string.service.ts   findForVoyage(principal, id): one query, access predicate inside
       trade-string.controller.ts  GET /voyages/:voyageId/trade-string
+      counterparty-contracts.ts   CounterpartyContracts: a contract as its seller or buyer sees
+                                  it; exported, the only way other modules resolve a contract
+      counterparty-contracts.controller.ts  GET /voyages/:voyageId/my-contracts
+    notices/
+      notice-rules.ts           deadline rules, overdue and lateness (pure functions)
+      notice.read-model.ts      allowlisted select + row → contract mapping, overdue derived
+      notices.service.ts        list, get, issue, acknowledge; role and side checked here
+      notices.controller.ts     /voyages/:voyageId/notices[/:noticeId[/acknowledgement]]
 ```
 
 The trade string lives in the `voyages` module rather than a module of its own: its contracts
 reference voyage participants by composite key, and reading it goes through
 `accessibleVoyages`, which the module owns. It can move out once it has its own commands.
+
+Notices are a module of their own: they have commands, their own table and their own visibility
+rule ([ADR 0011](decisions/0011-counterparty-notices.md)). They reach contracts only through
+`CounterpartyContracts`, which the voyages module exports.
 
 ### Module boundaries
 
@@ -86,7 +98,11 @@ extraction possible later:
 - A module talks to another module only through that module's exported providers, never by
   querying the other module's tables directly. `voyages` imports `ReferenceDataService` (to check
   that the ids in a request exist) and `AuditTrail` (to record what it did); it never touches
-  `audit_events` itself. Its read model still joins vessel, commodity and port rows through
+  `audit_events` itself. `notices` imports `CounterpartyContracts` (to resolve the reader's
+  contracts, with the access rule inside the query) and `AuditTrail`; it never queries
+  `trade_contracts` or `voyage_participants`. Its read model reads the actors' names and
+  organizations through the notice's own actor relations, as the voyage read model reads its
+  participants' organizations. Its read model still joins vessel, commodity and port rows through
   relations, because those columns are part of what a voyage is.
 - Shared code lives in `common/` (HTTP plumbing) or `infrastructure/` (technical adapters) and holds
   no domain rules.
@@ -99,7 +115,7 @@ The `auth` module owns identity: it reads `users` (with their organization and r
 `sessions`. Other modules depend only on what it exports: the `Principal` type, the
 `@CurrentPrincipal()` / `@Public()` decorators and `requireOperator`. There is still no
 `organizations` module, because nothing manages organizations on their own yet. `audit` owns
-`audit_events`; `reference-data` owns vessels, commodities and ports.
+`audit_events`; `reference-data` owns vessels, commodities and ports; `notices` owns `notices`.
 
 ### Request pipeline
 
@@ -168,6 +184,11 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
   `NO ACTION` (checked at the end of the statement): a voyage deletion cascades to participants
   and contracts together, while deleting a participant a contract names is refused.
 - `audit_events` is append-only for every writer: a trigger refuses `UPDATE` and `DELETE`.
+- A notice references its contract as `(voyage_id, trade_contract_id)` →
+  `trade_contracts(voyage_id, id)`, so it cannot name another voyage's contract. A trigger keeps
+  issued content immutable and an acknowledged notice unchangeable, for every writer.
+- Instants that business rules compare (`issued_at`, `acknowledged_at`) are set by the API from
+  one clock reading per command, so the CHECK constraints between them hold.
 
 ### Reads scoped below the voyage: the trade string
 
@@ -182,6 +203,38 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
 4. The response is the topology only, `{ parties, edges }`
    ([ADR 0010](decisions/0010-trade-string-visibility.md)). An integration test pins its exact
    field set, so participant ids, contract ids or later columns cannot slip in.
+
+### Counterparty-scoped reads and commands: notices
+
+Notices are visible only to the two counterparties of their contract
+([ADR 0011](decisions/0011-counterparty-notices.md)). Every notice request goes through the same
+two steps, inside the database:
+
+1. `CounterpartyContracts.listForVoyage(principal, voyageId)` loads the voyage by id `AND
+accessibleVoyages(principal)`, with only those of its contracts whose seller or buyer is the
+   principal's organization (`counterpartyContracts(principal)`). No voyage: 404. No contracts
+   (a service provider, or a trader outside this part of the string): an empty list.
+2. Notices are loaded `WHERE voyage_id = :voyageId AND trade_contract_id IN (those contracts)`.
+   A notice of another voyage, under someone else's contract, or that does not exist is the same
+   empty result and the same 404.
+
+`GET /voyages/:voyageId/my-contracts` serves step 1 to the client (ids, positions, both
+parties, the reader's side), so the issue form can name a contract; the trade-string response
+stays free of ids.
+
+Commands run in one interactive transaction each, resolving the contract inside it:
+
+- **Issue** (`POST /notices`): contract validation (400), `requireOperator` (403), the contract as
+  the principal sees it (404 `Contract was not found.`), the seller side (403), the deadline
+  against the API's clock (400), then the insert and `NOTICE_ISSUED`. `201` with `Location`.
+- **Acknowledge** (`POST /notices/:id/acknowledgement`, empty or no body): `requireOperator`, the
+  notice as the principal sees it (404), the buyer side (403), then
+  `updateMany({ where: { id, status: 'ISSUED' } })`, a single conditional `UPDATE`. Zero rows
+  means another acknowledgement won: `409`, and the transaction (with no event) rolls back.
+  Otherwise `NOTICE_ACKNOWLEDGED` is recorded and the notice returned.
+
+`overdue` is computed by the read model from the deadline and the time of the response
+(`notice-rules.ts`), never stored.
 
 ### Writes (first one: `POST /api/voyages`)
 
@@ -227,9 +280,10 @@ src/
       api/          fetch functions + query option factories (query keys live here),
                     including reference data (vessels, commodities, ports) for the form
       domain/       presentation rules for the domain (status labels, role grouping,
-                    trade-string steps in contract order), canCreateVoyages(identity)
-      hooks/        useCreateVoyage: the mutation and what happens after it
-      components/   feature UI (table, filter, facts card, trade string, participants)
+                    trade-string steps in contract order, notice states), what to offer whom
+      hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice: mutations and what
+                    happens after them
+      components/   feature UI (table, filter, facts card, trade string, notices, participants)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
   shared/
@@ -284,6 +338,19 @@ src/
   arrives: if that identity is no longer signed in (signed out, replaced from another tab), the
   response writes nothing to the cache and does not navigate. Navigation also happens only while
   the form is still mounted, so a user who has moved on is not pulled back.
+- **Notices** (a card on the details page, between the trade string and the participants). The
+  page fetches the organization's contracts and its notices in parallel with the voyage; both
+  keys nest under the voyage's detail key. The card degrades on its own like the trade string,
+  and explains itself to a participant that is a party to no contract. Operators of a seller see
+  **Issue ETA notice**, a form offering only contracts their organization sells under; times are
+  entered as wall-clock time in the viewer's zone (`datetime-local`), named on the form, and sent
+  as UTC instants. Operators of a buyer see **Acknowledge receipt** on notices waiting for them.
+  Instants are always shown in the viewer's zone with its offset. Every write goes through
+  `sendForCurrentSession` (`features/auth/session.ts`), shared with voyage creation: a 401 for the
+  session the request was sent under signs out locally, a late 401 for a replaced session changes
+  nothing, and nothing is retried automatically. A success writes to the cache only if the
+  identity it was sent for is still signed in. A 409 on acknowledging reports the conflict and
+  refreshes the list, so the user sees who acknowledged first.
 
 ### Authentication in the browser
 
@@ -373,6 +440,13 @@ sessions. The trade string is tested there too: topology for every participant a
 outsiders, the exact response fields, a stored chain that breaks the domain rules, and the
 `trade_contracts` constraints, exercised with plain SQL inserts (cross-voyage counterparties,
 duplicate positions, self-sales, branches) so that the database alone is shown to refuse them.
+Notices are tested the same way: seller and buyer operators and viewers, every other participant
+and outsiders (equal 404s), cross-voyage and foreign contract and notice ids, spoofed actors in
+bodies, headers and query strings, deadline validation, derived and late states, immutability
+and the table's constraints with plain SQL, a forced audit failure on each command, and two
+acknowledgements that genuinely race: the test holds the notice's row lock until both requests
+are blocked on their conditional update, then releases it and expects one 200, one 409 and one
+audit event. Another test pins that the trade-string response is byte-for-byte unchanged.
 
 No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
 string included) is not covered automatically. Playwright is the planned answer.
@@ -382,7 +456,10 @@ cross-tab changes run through the real router, query client and cache. They asse
 things, that an in-flight request is aborted on sign-out and that a previous user's data never
 appears in the DOM after a switch (a `MutationObserver` watches for it). Voyage creation is tested
 the same way: success, client and server validation, failures, a viewer, and a creation response
-that arrives after a sign-out or after another tab signed in as someone else.
+that arrives after a sign-out or after another tab signed in as someone else. The notice panel
+gets the same treatment: issuing (with local times converted to instants) and acknowledging,
+validation, refusals, failures without retries, a 409, expiry, and responses that arrive after
+the identity changed.
 
 ## Operational concerns (current state)
 
@@ -398,16 +475,17 @@ that arrives after a sign-out or after another tab signed in as someone else.
 
 How later requirements land on the current structure:
 
-| Requirement              | Where it goes                                                                                                                                                                                                                                                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                                                |
-| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                                                 |
-| Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details |
-| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                 |
-| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                                                    |
-| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                   |
-| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                            |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                              |
-| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                  |
-| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                                                               |
-| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                 |
+| Requirement              | Where it goes                                                                                                                                                                                                                                                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                                                                                         |
+| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                                                                                          |
+| Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Counterparty-only contract ids since M5. Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details |
+| Notices                  | **Started (M5)**: ETA notices, counterparty-only, `ISSUED → ACKNOWLEDGED` by conditional update, overdue derived ([ADR 0011](decisions/0011-counterparty-notices.md)). Next: further notice types, then notifications of new and overdue notices (outbox + jobs)                                                                    |
+| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                                                          |
+| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                                                                                             |
+| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                            |
+| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                                                                     |
+| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                                                                       |
+| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                           |
+| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                                                                                                        |
+| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                          |

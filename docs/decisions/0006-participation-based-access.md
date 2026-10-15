@@ -33,7 +33,8 @@ Access to a voyage, and to everything attached to it, is derived from **particip
 - Finer-grained visibility inside a voyage (contract-level confidentiality along the trade string)
   is layered on top, per object type. The first such rule is
   [ADR 0010](0010-trade-string-visibility.md): participants see the trade string's topology, but
-  not contract terms.
+  not contract terms. The second is [ADR 0011](0011-counterparty-notices.md): notices are
+  visible only to their contract's two counterparties, who must still participate.
 
 ## Alternatives considered
 

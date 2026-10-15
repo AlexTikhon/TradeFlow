@@ -1,6 +1,7 @@
 import { type Query, type QueryClient, queryOptions } from '@tanstack/react-query';
 
 import type { CurrentUser, SignInRequest } from '@tradeflow/contracts';
+import { isUnauthenticated } from '../../shared/api/http-client';
 import {
   identityKey,
   PROTECTED_QUERY_ROOT,
@@ -233,6 +234,25 @@ export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpo
   const current = queryClient.getQueryData<CurrentUser | null>(SESSION_KEY);
   if (control.generation !== epoch.generation || !sameIdentity(current, epoch.identity)) return;
   await switchIdentity(queryClient, null);
+}
+
+/**
+ * Sends a write on behalf of the session current now. If the server answers 401, that session
+ * has ended: the client signs out locally before the error is reported (so no form shows it as
+ * its own), unless the session has changed since the request was sent (see `sessionExpired`).
+ * The error is rethrown either way, and the write is never retried.
+ */
+export async function sendForCurrentSession<T>(
+  queryClient: QueryClient,
+  send: () => Promise<T>,
+): Promise<T> {
+  const epoch = currentSessionEpoch(queryClient);
+  try {
+    return await send();
+  } catch (error) {
+    if (isUnauthenticated(error)) await sessionExpired(queryClient, epoch);
+    throw error;
+  }
 }
 
 /**

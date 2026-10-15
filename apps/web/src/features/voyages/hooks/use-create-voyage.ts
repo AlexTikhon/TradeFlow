@@ -1,9 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CreateVoyageRequest, VoyageDetail } from '@tradeflow/contracts';
 import { useNavigate } from 'react-router';
-import { isUnauthenticated } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
-import { currentSessionEpoch, sessionExpired } from '../../auth/session';
+import { sendForCurrentSession } from '../../auth/session';
 import { voyageQueries } from '../api/voyage.queries';
 import { createVoyage } from '../api/voyages.api';
 
@@ -19,7 +18,7 @@ import { createVoyage } from '../api/voyages.api';
  * A 401 means the session the request was sent under has ended. If it is still the current
  * session, the client signs out locally; if a transition has happened since (even back to the
  * same user), or a session check has adopted another identity, the 401 is about a session that is
- * already gone and changes nothing. The write is never retried.
+ * already gone and changes nothing (`sendForCurrentSession`). The write is never retried.
  */
 export function useCreateVoyage() {
   const queryClient = useQueryClient();
@@ -29,16 +28,8 @@ export function useCreateVoyage() {
   const stillSignedIn = () => isCurrentIdentity(queryClient, identity);
 
   const mutation = useMutation({
-    mutationFn: async (request: CreateVoyageRequest) => {
-      const epoch = currentSessionEpoch(queryClient);
-      try {
-        return await createVoyage(request);
-      } catch (error) {
-        // Signed out before the error is reported, so the form never shows it as its own.
-        if (isUnauthenticated(error)) await sessionExpired(queryClient, epoch);
-        throw error;
-      }
-    },
+    mutationFn: (request: CreateVoyageRequest) =>
+      sendForCurrentSession(queryClient, () => createVoyage(request)),
     // Runs even if the form has unmounted meanwhile: the cache must reflect the new voyage.
     onSuccess: (voyage: VoyageDetail) => {
       if (!stillSignedIn()) return;

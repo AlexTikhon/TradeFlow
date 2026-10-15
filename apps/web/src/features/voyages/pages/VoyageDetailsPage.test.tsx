@@ -13,7 +13,10 @@ import { renderRoute } from '../../../test/render-route';
 
 const voyage = aVoyageDetail();
 
-/** Serves the voyage and its trade string, as the details page requests both. */
+/**
+ * Serves the voyage, its trade string and the notice panel's data, as the details page requests
+ * all of them. Notices have their own tests (VoyageNotices.test.tsx); here there are none.
+ */
 function serveVoyage(
   detail: VoyageDetail = voyage,
   tradeString: TradeString | (() => Response) = aTradeString(),
@@ -23,6 +26,8 @@ function serveVoyage(
     http.get(`*/api/voyages/${detail.id}/trade-string`, () =>
       typeof tradeString === 'function' ? tradeString() : HttpResponse.json(tradeString),
     ),
+    http.get(`*/api/voyages/${detail.id}/my-contracts`, () => HttpResponse.json({ items: [] })),
+    http.get(`*/api/voyages/${detail.id}/notices`, () => HttpResponse.json({ items: [] })),
   );
 }
 
@@ -60,6 +65,12 @@ describe('VoyageDetailsPage', () => {
     server.use(
       http.get(`*/api/voyages/${voyage.id}`, () => problemResponse(404, 'Voyage was not found.')),
       http.get(`*/api/voyages/${voyage.id}/trade-string`, () =>
+        problemResponse(404, 'Voyage was not found.'),
+      ),
+      http.get(`*/api/voyages/${voyage.id}/my-contracts`, () =>
+        problemResponse(404, 'Voyage was not found.'),
+      ),
+      http.get(`*/api/voyages/${voyage.id}/notices`, () =>
         problemResponse(404, 'Voyage was not found.'),
       ),
     );

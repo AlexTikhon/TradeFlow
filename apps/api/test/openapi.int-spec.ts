@@ -38,6 +38,10 @@ describe('OpenAPI document', () => {
         '/api/voyages',
         '/api/voyages/{voyageId}',
         '/api/voyages/{voyageId}/trade-string',
+        '/api/voyages/{voyageId}/my-contracts',
+        '/api/voyages/{voyageId}/notices',
+        '/api/voyages/{voyageId}/notices/{noticeId}',
+        '/api/voyages/{voyageId}/notices/{noticeId}/acknowledgement',
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
@@ -75,6 +79,11 @@ describe('OpenAPI document', () => {
       operation('/api/voyages', 'get'),
       operation('/api/voyages/{voyageId}', 'get'),
       operation('/api/voyages/{voyageId}/trade-string', 'get'),
+      operation('/api/voyages/{voyageId}/my-contracts', 'get'),
+      operation('/api/voyages/{voyageId}/notices', 'get'),
+      operation('/api/voyages/{voyageId}/notices', 'post'),
+      operation('/api/voyages/{voyageId}/notices/{noticeId}', 'get'),
+      operation('/api/voyages/{voyageId}/notices/{noticeId}/acknowledgement', 'post'),
       operation('/api/auth/me', 'get'),
       operation('/api/voyages', 'post'),
       operation('/api/vessels', 'get'),
@@ -150,5 +159,79 @@ describe('OpenAPI document', () => {
       'role',
     ]);
     expect(schemas.TradeRole?.enum).toEqual(['EXPORTER', 'TRADER', 'FINAL_BUYER']);
+  });
+
+  it('documents notices: closed request bodies, their refusals, and no notice data in the trade string', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      requestBody?: { required?: boolean; content: Record<string, { schema: unknown }> };
+      responses: Record<string, { content?: Record<string, unknown> }>;
+    };
+    type Schema = {
+      properties?: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+      enum?: string[];
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+    const operation = (path: string, method: string) => document.paths[path]?.[method];
+    const codes = (op: Operation | undefined) => Object.keys(op?.responses ?? {});
+
+    const issue = operation('/api/voyages/{voyageId}/notices', 'post');
+    expect(issue?.requestBody?.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/IssueNoticeRequest',
+    });
+    expect(codes(issue)).toEqual(expect.arrayContaining(['201', '400', '401', '403', '404']));
+
+    const acknowledge = operation(
+      '/api/voyages/{voyageId}/notices/{noticeId}/acknowledgement',
+      'post',
+    );
+    expect(acknowledge?.requestBody?.required).toBe(false);
+    expect(codes(acknowledge)).toEqual(
+      expect.arrayContaining(['200', '400', '401', '403', '404', '409']),
+    );
+    expect(codes(operation('/api/voyages/{voyageId}/notices/{noticeId}', 'get'))).toEqual(
+      expect.arrayContaining(['200', '401', '404']),
+    );
+    expect(
+      operation('/api/voyages/{voyageId}/my-contracts', 'get')?.responses['200']?.content?.[
+        'application/json'
+      ],
+    ).toEqual({ schema: { $ref: '#/components/schemas/CounterpartyContractListResponse' } });
+
+    const { schemas } = document.components;
+    expect(schemas.IssueNoticeRequest?.additionalProperties).toBe(false);
+    expect(Object.keys(schemas.IssueNoticeRequest?.properties ?? {}).sort()).toEqual([
+      'acknowledgementDueAt',
+      'contractId',
+      'estimatedArrivalAt',
+      'message',
+    ]);
+    expect(schemas.IssueNoticeRequest?.required?.sort()).toEqual([
+      'acknowledgementDueAt',
+      'contractId',
+      'estimatedArrivalAt',
+    ]);
+    expect(schemas.AcknowledgeNoticeRequest?.additionalProperties).toBe(false);
+    expect(schemas.AcknowledgeNoticeRequest?.properties ?? {}).toEqual({});
+    expect(schemas.NoticeStatus?.enum).toEqual(['ISSUED', 'ACKNOWLEDGED']);
+    expect(schemas.NoticeType?.enum).toEqual(['ETA']);
+    expect(Object.keys(schemas.CounterpartyContract?.properties ?? {}).sort()).toEqual([
+      'buyer',
+      'id',
+      'position',
+      'seller',
+      'side',
+    ]);
+    // The shared topology gained nothing.
+    expect(Object.keys(schemas.TradeStringEdge?.properties ?? {}).sort()).toEqual([
+      'buyerOrganizationId',
+      'position',
+      'sellerOrganizationId',
+    ]);
   });
 });
