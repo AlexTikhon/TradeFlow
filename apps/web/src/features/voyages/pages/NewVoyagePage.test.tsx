@@ -7,7 +7,7 @@ import type {
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
-import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
+import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import {
   horizon,
   nordicHarvest,
@@ -140,6 +140,34 @@ async function fillForm(user: User, values: Partial<Record<string, string>> = {}
 
 const submit = (user: User) => user.click(screen.getByRole('button', { name: 'Create voyage' }));
 
+type Client = ReturnType<typeof renderRoute>['queryClient'];
+
+const protectedQueries = (queryClient: Client) =>
+  queryClient.getQueryCache().findAll({ queryKey: ['protected'] });
+
+const failedMutations = (queryClient: Client) =>
+  queryClient
+    .getMutationCache()
+    .getAll()
+    .filter((mutation) => mutation.state.status === 'error');
+
+/** The form as the user left it: what they typed and selected is still there. */
+function expectFormKept() {
+  expect(screen.getByLabelText(/Vessel/)).toHaveValue(horizon.id);
+  expect(screen.getByLabelText(/Commodity/)).toHaveValue(soybeans.id);
+  expect(screen.getByLabelText(/Quantity/)).toHaveValue('50000.125');
+  expect(screen.getByLabelText(/Load port/)).toHaveValue(santos.id);
+  expect(screen.getByLabelText(/Discharge port/)).toHaveValue(rotterdam.id);
+  expect(screen.getByLabelText(/Laycan start/)).toHaveValue('2026-11-01');
+  expect(screen.getByLabelText(/Laycan end/)).toHaveValue('2026-11-10');
+}
+
+async function signInAs(user: User, email: string) {
+  await user.type(await screen.findByLabelText(/Email/), email);
+  await user.type(screen.getByLabelText(/Password/), TEST_PASSWORD);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+}
+
 const watchers: (() => void)[] = [];
 afterEach(() => {
   watchers.splice(0).forEach((stop) => {
@@ -267,6 +295,151 @@ describe('NewVoyagePage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Your role does not allow you to create voyages.',
     );
+  });
+
+  it.each([
+    [
+      'permission',
+      () => problemResponse(403, 'Your role does not allow you to create voyages.'),
+      'Your role does not allow you to create voyages.',
+    ],
+    [
+      'validation',
+      () => validationProblem([{ path: 'body', message: 'Laycan is too far ahead.' }]),
+      'Laycan is too far ahead.',
+    ],
+    ['network', () => HttpResponse.error(), 'The voyage could not be created. Please try again.'],
+    [
+      'server',
+      () => problemResponse(500, 'database unavailable'),
+      'The voyage could not be created. Please try again.',
+    ],
+  ])('keeps the session and what was typed after a %s failure', async (_, respond, message) => {
+    serveReferenceData();
+    const creation = serveCreation({ respond });
+    const { router, user, session, queryClient } = renderRoute('/voyages/new');
+    await fillForm(user);
+
+    await submit(user);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expectFormKept();
+    expect(router.state.location.pathname).toBe('/voyages/new');
+    expect(screen.getByText('Ana Souza')).toBeInTheDocument();
+    expect(queryClient.getQueryData(['session'])).toEqual(ana);
+    expect(protectedQueries(queryClient)).not.toEqual([]);
+    // Sent once, never retried, and the session is left alone.
+    expect(creation.bodies).toHaveLength(1);
+    expect(session.signOutRequests).toBe(0);
+  });
+
+  describe('when the server answers 401', () => {
+    const unauthenticated = () => problemResponse(401, 'Authentication is required.');
+
+    it('ends the session it was sent under and asks to sign in again', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ respond: unauthenticated });
+      const { router, user, session, queryClient } = renderRoute('/voyages/new');
+      await fillForm(user);
+      // Something protected is still loading when the session turns out to have ended.
+      let inFlightAborted = false;
+      void queryClient
+        .query({
+          queryKey: ['protected', `${ana.user.id}:${ana.organization.id}`, 'in-flight'],
+          queryFn: ({ signal }) =>
+            new Promise((_, reject) => {
+              signal.addEventListener('abort', () => {
+                inFlightAborted = true;
+                reject(new Error('aborted'));
+              });
+            }),
+        })
+        .catch(() => undefined);
+      // The session expires on the server while the user is filling the form.
+      session.current = null;
+
+      await submit(user);
+
+      expect(
+        await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+      ).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe('/sign-in');
+      expect(queryClient.getQueryData(['session'])).toBeNull();
+      expect(inFlightAborted).toBe(true);
+      await waitFor(() => {
+        expect(protectedQueries(queryClient)).toEqual([]);
+      });
+      // The write is not retried, and the server, which ended the session, is not asked to.
+      expect(creation.bodies).toHaveLength(1);
+      expect(session.signOutRequests).toBe(0);
+      expect(session.log).not.toContain('sign-out received');
+    });
+
+    it('does not sign out another user who signed in while it was on its way', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ hold: true, respond: unauthenticated });
+      const { router, user, session, queryClient } = renderRoute('/voyages/new', {
+        accounts: [ana, claire],
+      });
+      const stopSync = startSessionSync(queryClient);
+      const otherTab = new BroadcastChannel(SESSION_CHANNEL_NAME);
+      watchers.push(() => {
+        otherTab.close();
+        stopSync();
+      });
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      // Another tab signs in as Claire, which ends Ana's session: her request will be refused.
+      session.current = claire;
+      otherTab.postMessage(SESSION_CHANGED);
+      expect(
+        await screen.findByText(/Lacustra Commodities SA will be the exporter/),
+      ).toBeInTheDocument();
+
+      creation.release();
+      await waitFor(() => {
+        expect(failedMutations(queryClient)).toHaveLength(1);
+      });
+
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.getByText('Claire Morel')).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(protectedQueries(queryClient)).not.toEqual([]);
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('does not sign out the same user after they signed out and back in', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ hold: true, respond: unauthenticated });
+      const { router, user, session, queryClient } = renderRoute('/voyages/new');
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      // Ana signs out, which ends the session her request was sent under, and signs in again.
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      await signInAs(user, ana.user.email);
+      // Back on a fresh form. Same user, same organization: only the session itself is new.
+      await screen.findAllByRole('option', { name: 'Santos (BRSSZ)' });
+      expect(screen.getByLabelText(/Quantity/)).toHaveValue('');
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+
+      creation.release();
+      await waitFor(() => {
+        expect(failedMutations(queryClient)).toHaveLength(1);
+      });
+
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.getByRole('form', { name: 'New voyage' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(protectedQueries(queryClient)).not.toEqual([]);
+      // Only the sign-out Ana asked for reached the server.
+      expect(session.signOutRequests).toBe(1);
+    });
   });
 
   it('does not offer creation to a viewer', async () => {

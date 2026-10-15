@@ -201,6 +201,29 @@ async function publishIdentity(
 }
 
 /**
+ * The session as it stands now. It changes with every identity transition, including signing out
+ * and back in as the same user, so it tells sessions apart where identities cannot. Capture it
+ * when sending a request whose 401 must be attributed to the session it was sent under.
+ */
+export type SessionEpoch = number & { readonly __brand: 'SessionEpoch' };
+
+export function currentSessionEpoch(queryClient: QueryClient): SessionEpoch {
+  return controlOf(queryClient).generation as SessionEpoch;
+}
+
+/**
+ * A request sent during `epoch` was answered 401: that session has ended (expired, or revoked
+ * elsewhere). Signs out locally, like a 401 on protected data: requests are aborted, data dropped,
+ * and the auth boundary sends the user to sign in. Nothing is sent to the server, which has ended
+ * the session already. If any transition started since the request was sent, the 401 speaks for
+ * a session that is already gone, and the current one (whoever it belongs to) is left alone.
+ */
+export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpoch): Promise<void> {
+  if (controlOf(queryClient).generation !== epoch) return;
+  await switchIdentity(queryClient, null);
+}
+
+/**
  * Asks the server who is signed in and publishes the answer, whether or not anything observes
  * the session (invalidating would only mark an unobserved query stale). It is a transition of
  * its own, so checks already on their way are outdated. If the server cannot be reached, the
