@@ -1,5 +1,7 @@
 import type { PrismaService } from '../../src/infrastructure/prisma/prisma.service.js';
 import type { ParticipantRole, VoyageStatus } from '../../src/generated/prisma/client.js';
+import { hashPassword } from '../../src/modules/auth/password.js';
+import { generateSessionToken, hashSessionToken } from '../../src/modules/auth/session-token.js';
 
 /** Empties every application table (migrations history is kept). */
 export async function resetDatabase(prisma: PrismaService): Promise<void> {
@@ -59,4 +61,41 @@ export async function createVoyage(
       participants: { create: fixture.participants ?? [] },
     },
   });
+}
+
+/** Password of every user created by `createUser`. */
+export const TEST_PASSWORD = 'correct horse battery staple';
+// Hashing is deliberately slow; one hash serves every test user.
+let testPasswordHash: Promise<string> | undefined;
+
+export async function createUser(
+  prisma: PrismaService,
+  organizationId: string,
+  { email = `user${next()}@example.com`, hasPassword = true } = {},
+) {
+  testPasswordHash ??= hashPassword(TEST_PASSWORD);
+  return prisma.user.create({
+    data: {
+      organizationId,
+      email,
+      fullName: `Test User ${email}`,
+      passwordHash: hasPassword ? await testPasswordHash : null,
+    },
+  });
+}
+
+/**
+ * Inserts a session directly, for states the API cannot produce on demand (already expired).
+ * Returns the raw token, ready to send as the cookie value.
+ */
+export async function createSession(
+  prisma: PrismaService,
+  userId: string,
+  { createdAt, expiresAt }: { createdAt: Date; expiresAt: Date },
+) {
+  const token = generateSessionToken();
+  await prisma.session.create({
+    data: { userId, tokenHash: hashSessionToken(token), createdAt, expiresAt },
+  });
+  return token;
 }

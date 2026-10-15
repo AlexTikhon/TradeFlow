@@ -9,12 +9,28 @@ describe('loadConfig', () => {
       nodeEnv: 'development',
       port: 4000,
       databaseUrl: 'postgresql://u:p@localhost:5433/tradeflow',
+      session: { ttlMs: 8 * 60 * 60_000, secureCookie: false },
     });
+  });
+
+  it('uses secure cookies in production and honours the session lifetime', () => {
+    const config = loadConfig({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgresql://u:p@db:5432/tradeflow',
+      SESSION_TTL_MINUTES: '30',
+    });
+    expect(config.session).toEqual({ ttlMs: 30 * 60_000, secureCookie: true });
   });
 
   it('fails fast listing every invalid variable', () => {
     expect(() => loadConfig({ DATABASE_URL: 'mysql://localhost/db', PORT: 'abc' })).toThrow(
       /DATABASE_URL[\s\S]*PORT|PORT[\s\S]*DATABASE_URL/,
     );
+  });
+
+  it('rejects a session lifetime outside the allowed range', () => {
+    expect(() =>
+      loadConfig({ DATABASE_URL: 'postgresql://u:p@db/t', SESSION_TTL_MINUTES: '1' }),
+    ).toThrow(/SESSION_TTL_MINUTES/);
   });
 });

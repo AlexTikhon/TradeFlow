@@ -48,9 +48,19 @@ src/
   common/http/                  ProblemDetailsFilter, ZodValidationPipe, OpenAPI wiring
   health/                       GET /api/health (readiness: DB answers SELECT 1)
   modules/
+    auth/
+      auth.controller.ts        sign-in, me, sign-out
+      auth.service.ts           credential check, session create / validate / revoke
+      auth.guard.ts             global default-deny guard; attaches the Principal
+      same-origin.guard.ts      refuses cross-site unsafe requests (Fetch Metadata)
+      auth.decorators.ts        @Public(), @CurrentPrincipal(), @ApiSessionAuth()
+      session-cookie.ts         cookie name, attributes, parsing
+      password.ts               argon2id hashing (PHC strings)
+      session-token.ts          random tokens and their SHA-256 digests
     voyages/
       voyages.controller.ts     HTTP only: parse input, call service, map "missing" to 404
-      voyages.service.ts        use cases (queries today)
+      voyages.service.ts        use cases (queries today), each taking the Principal
+      voyage-access.ts          accessibleVoyages(principal): the one visibility predicate
       voyage.read-model.ts      Prisma select shapes + row → contract mapping
 ```
 
@@ -68,17 +78,28 @@ extraction possible later:
   close to its use cases. The `*.read-model.ts` file plays that role for reads: it declares
   exactly which columns a query loads, so new columns are never exposed by accident.
 
-There is no `organizations` module yet: nothing exposes organizations on their own. It appears
-with the first organization-scoped use case (authentication).
+The `auth` module owns identity: it reads `users` (with their organization) and owns `sessions`.
+Other modules depend only on what it exports: the `Principal` type and the
+`@CurrentPrincipal()` / `@Public()` decorators. There is still no `organizations` module, because
+nothing manages organizations on their own yet.
 
 ### Request pipeline
 
-1. **Validation.** `ZodValidationPipe` parses params, query and body with contract schemas. A
+1. **Guards** ([ADR 0007](decisions/0007-cookie-sessions.md)). `SameOriginGuard` refuses unsafe
+   methods that the browser marks as cross-site (403). `AuthGuard` then resolves the session
+   cookie into a `Principal { sessionId, userId, organizationId }`, or answers 401, unless the
+   route is `@Public()`. Guards run before pipes, so an unauthenticated caller gets 401 even for
+   malformed input. The organization always comes from the database, never from the request.
+2. **Validation.** `ZodValidationPipe` parses params, query and body with contract schemas. A
    failure becomes a `RequestValidationException` that carries field paths such as `query.status`
    or `param.voyageId`.
-2. **Use case.** The controller delegates to a service. Controllers hold no business logic; mapping
-   "not found" to HTTP 404 is the controller's job because it is an HTTP concern.
-3. **Errors.** `ProblemDetailsFilter` turns every exception into RFC 9457 Problem Details:
+3. **Use case.** The controller delegates to a service, passing the principal. Controllers hold no
+   business logic; mapping "not found" to HTTP 404 is the controller's job because it is an HTTP
+   concern. Authorization is not a controller concern: voyage services `AND` the
+   `accessibleVoyages(principal)` predicate into every query
+   ([ADR 0006](decisions/0006-participation-based-access.md)), so "not yours" and "does not
+   exist" are the same empty result and the same 404.
+4. **Errors.** `ProblemDetailsFilter` turns every exception into RFC 9457 Problem Details:
 
    ```json
    {
@@ -94,12 +115,17 @@ with the first organization-scoped use case (authentication).
    Errors with status 5xx are logged with their stack trace and returned with a generic `detail`,
    so internals never leak. An integration test asserts this.
 
+5. **Caching.** Every `/api` response carries `Cache-Control: no-store`: responses depend on who
+   is signed in, so no browser or proxy may keep them.
+
 ### OpenAPI
 
 Nest's Swagger module discovers routes from controller metadata. Schemas are **not** written as
 decorator DTOs: they are generated from the Zod contract registry (`z.toJSONSchema`,
 OpenAPI 3.0 target) and merged into `components.schemas`. A test asserts that every `$ref`
-resolves. Docs are served at `/api/docs`, JSON at `/api/docs/openapi.json`.
+resolves. The session cookie is declared as the `session` security scheme, and protected
+operations reference it through `@ApiSessionAuth()`. Docs are served at `/api/docs`, JSON at
+`/api/docs/openapi.json`.
 
 ### Persistence
 
@@ -127,6 +153,12 @@ once. Configuration is injected via the `APP_CONFIG` token; nothing else reads `
 src/
   app/          App, AppProviders, query-client, routes, layout, theme
   features/
+    auth/
+      api/          sign-in, sign-out, current user
+      session.ts    session query, switchIdentity, protected-data purge
+      session-sync.ts  cross-tab identity sync (BroadcastChannel)
+      components/   RequireAuth (protected-route boundary), UserMenu
+      pages/        SignInPage
     voyages/
       api/          fetch functions + query option factories (query keys live here)
       domain/       presentation rules for the domain (status labels, role grouping)
@@ -135,6 +167,7 @@ src/
       routes.tsx    the feature's routes; the app shell only composes them
   shared/
     api/        fetch wrapper: ApiError (Problem Details), ApiContractError
+    auth/       identity context and identity-scoped query keys
     lib/        formatting (numbers, calendar dates, countries)
     ui/         generic UI: PageHeader, QueryErrorAlert, NotFoundState
   test/         MSW server, typed fixtures, renderRoute helper
@@ -148,6 +181,7 @@ src/
 | Kind of state       | Where it lives                                       |
 | ------------------- | ---------------------------------------------------- |
 | Server data         | TanStack Query cache (`voyageQueries.*` factories)   |
+| Who is signed in    | TanStack Query too: `['session']` from `/auth/me`    |
 | Shareable UI state  | URL (`?status=LOADING`), validated with the contract |
 | Ephemeral UI state  | Component state                                      |
 | Global client state | None yet; Zustand when a real case appears           |
@@ -159,10 +193,40 @@ src/
   message, instead of rendering `undefined` deep in a component.
 - Retry policy: 4xx responses are never retried (they are deterministic); network errors and 5xx get
   two retries.
-- Query keys are hierarchical (`['voyages', 'list', filters]`, `['voyages', 'detail', id]`), so
-  future mutations can invalidate precisely.
+- Query keys are hierarchical and, for protected data, start with the identity scope
+  (`['protected', '<userId>:<organizationId>', 'voyages', 'list', filters]`), so future
+  mutations can invalidate precisely and data never crosses identities (see below).
 - The details page validates the route parameter before fetching. A malformed id renders "not
   found" without a network request.
+
+### Authentication in the browser
+
+The session cookie is HttpOnly: the SPA never sees a token. It asks `GET /api/auth/me` who is
+signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/0007-cookie-sessions.md)).
+
+- **Protected routes** render inside `RequireAuth`. It shows a spinner until the server answers,
+  redirects to `/sign-in` (remembering the page) when there is no session, and otherwise provides
+  the identity through `IdentityContext`, keyed by identity. A change of identity therefore
+  discards the whole protected component tree.
+- **Identity-scoped cache.** Every protected query key starts with `useProtectedScope()`, i.e.
+  `['protected', '<userId>:<organizationId>']`. A component can only build keys for the identity
+  it renders under, so a previous identity's cached data is unreachable by construction, even for
+  a single frame and regardless of cleanup timing.
+- **Identity changes** all go through `switchIdentity`: sign-in, sign-out, a 401 on protected data,
+  or `/auth/me` reporting someone new. It first cancels every in-flight protected request (fetches
+  are made with the query's `AbortSignal`) and removes protected data nothing displays. It then
+  publishes the new identity. Queries still observed by the outgoing tree are removed the moment
+  that tree unmounts, by a query-cache subscription; they are not removed earlier, because a last
+  render would rebuild and refetch them.
+- **Sign-out** acts locally first (abort, purge, go to `/sign-in`) and then revokes the session on
+  the server, so nothing from the old identity remains on screen even if the network is down.
+- **Session end detected by the server.** A 401 on a query of the _current_ identity means the
+  session expired or was revoked. The client signs out locally. A late 401 from an earlier
+  identity's request is ignored.
+- **Other tabs.** Tabs share cookies, so a sign-in or sign-out in one tab changes every tab's
+  identity. Tabs notify each other on a `BroadcastChannel`. A receiving tab purges its protected
+  data immediately and resets the session query to "unknown" until the server answers. The
+  session is also re-checked whenever a tab regains focus.
 
 ### Presentation details that are correctness issues
 
@@ -174,16 +238,24 @@ src/
 
 ## Testing strategy
 
-| Layer            | Tool                       | Fakes                          | Purpose                                     |
-| ---------------- | -------------------------- | ------------------------------ | ------------------------------------------- |
-| Contract schemas | Vitest                     | none                           | Wire-format rules                           |
-| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, config        |
-| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, validation, errors, OpenAPI      |
-| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client |
-| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                      |
+| Layer            | Tool                       | Fakes                          | Purpose                                      |
+| ---------------- | -------------------------- | ------------------------------ | -------------------------------------------- |
+| Contract schemas | Vitest                     | none                           | Wire-format rules                            |
+| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, config         |
+| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, authorization, errors, docs |
+| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client  |
+| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                       |
 
 Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized against a dedicated
-`*_test` database that is truncated between tests.
+`*_test` database that is truncated between tests. Authorization tests sign in through the real
+endpoint and assert the participation rules against real rows: shared and private voyages,
+status filters, client-supplied organization ids, removed participation, and expired or revoked
+sessions.
+
+Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
+cross-tab changes run through the real router, query client and cache. They assert, among other
+things, that an in-flight request is aborted on sign-out and that a previous user's data never
+appears in the DOM after a switch (a `MutationObserver` watches for it).
 
 ## Operational concerns (current state)
 
@@ -199,15 +271,15 @@ Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized agai
 
 How later requirements land on the current structure:
 
-| Requirement              | Where it goes                                                                                                                                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Authentication           | `auth` module plus a guard that resolves the acting user and organization into a request context                                                                                                       |
-| Tenant isolation         | Every voyage query filters through `voyage_participants` (index on `(organization_id, voyage_id)` exists) ([ADR 0006](decisions/0006-participation-based-access.md)); Postgres RLS as defence in depth |
-| RBAC                     | Roles per organization membership; permission checks in services, not controllers                                                                                                                      |
-| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                |
-| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                               |
-| Audit trail              | `audit_events` written in the same transaction as the change                                                                                                                                           |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                          |
-| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                              |
-| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                           |
-| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                             |
+| Requirement              | Where it goes                                                                                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                             |
+| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                              |
+| Write authorization      | **Not started.** Arrives with the first business write: participant-role rules in the domain service plus user permissions on an organization membership ([domain model](domain-model.md#6-user-permissions-are-not-participant-roles)) |
+| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                 |
+| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                |
+| Audit trail              | `audit_events` written in the same transaction as the change                                                                                                                                                                            |
+| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                           |
+| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                               |
+| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                            |
+| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                              |

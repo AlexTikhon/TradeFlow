@@ -8,6 +8,13 @@ import {
   PrismaClient,
   type VoyageStatus,
 } from '../src/generated/prisma/client.js';
+import { hashPassword } from '../src/modules/auth/password.js';
+
+/**
+ * Every demo user signs in with this password. It is published in the README, so it must only
+ * ever be seeded into local or demo databases, never into an environment with real data.
+ */
+const DEMO_PASSWORD = 'tradeflow-demo';
 
 /** Deterministic UUIDv7-shaped ids: the 4th group identifies the entity kind. */
 const seedId = (kind: string, n: number) =>
@@ -291,7 +298,9 @@ async function seed(prisma: PrismaClient): Promise<void> {
   for (const { id, ...data } of organizations) {
     await prisma.organization.upsert({ where: { id }, update: data, create: { id, ...data } });
   }
-  for (const { id, ...data } of users) {
+  for (const { id, ...fields } of users) {
+    // A fresh salt on every run; the password itself stays the same.
+    const data = { ...fields, passwordHash: await hashPassword(DEMO_PASSWORD) };
     await prisma.user.upsert({ where: { id }, update: data, create: { id, ...data } });
   }
   for (const { id, ...data } of vessels) {
@@ -335,7 +344,8 @@ try {
   await seed(prisma);
   console.log(
     `Seeded ${organizations.length} organizations, ${users.length} users, ${vessels.length} vessels, ` +
-      `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages.`,
+      `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages. ` +
+      `Every user's password is "${DEMO_PASSWORD}".`,
   );
 } finally {
   await prisma.$disconnect();

@@ -47,4 +47,39 @@ describe('OpenAPI document', () => {
       expect(schema).not.toHaveProperty('$id');
     }
   });
+
+  it('documents the session cookie and which operations require it', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = { security?: Record<string, string[]>[]; responses: Record<string, unknown> };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { securitySchemes: Record<string, unknown> };
+    };
+
+    expect(document.components.securitySchemes.session).toEqual({
+      type: 'apiKey',
+      in: 'cookie',
+      name: 'tradeflow_session',
+      description: expect.any(String) as string,
+    });
+
+    const operation = (path: string, method: string) => document.paths[path]?.[method];
+    const protectedOperations = [
+      operation('/api/voyages', 'get'),
+      operation('/api/voyages/{voyageId}', 'get'),
+      operation('/api/auth/me', 'get'),
+    ];
+    for (const op of protectedOperations) {
+      expect(op?.security).toEqual([{ session: [] }]);
+      expect(op?.responses).toHaveProperty('401');
+    }
+
+    for (const op of [
+      operation('/api/auth/sign-in', 'post'),
+      operation('/api/auth/sign-out', 'post'),
+    ]) {
+      expect(op).toBeDefined();
+      expect(op?.security).toBeUndefined();
+    }
+  });
 });

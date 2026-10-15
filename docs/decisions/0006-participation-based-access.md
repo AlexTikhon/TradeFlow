@@ -1,6 +1,6 @@
 # 0006. Participation-based access to voyages
 
-- **Status:** Accepted. Data model in place; enforcement arrives with authentication (Milestone 2).
+- **Status:** Accepted. Enforced since Milestone 2 for every voyage endpoint.
 - **Date:** 2026-10-15
 
 ## Context
@@ -21,10 +21,15 @@ Access to a voyage, and to everything attached to it, is derived from **particip
 - `voyage_participants(organization_id, voyage_id)` is indexed for the access query.
 - Organizations carry no role. The role is per participation (see the
   [domain model](../domain-model.md#1-roles-belong-to-participation-not-to-organizations)).
-- When authentication lands, every voyage query takes the acting organization and filters with
-  `participants: { some: { organizationId } }`. Requests for a voyage the organization does not
-  participate in return **404, not 403**, so the existence of other parties' voyages is not
-  disclosed.
+- The acting organization comes from the authenticated session
+  ([ADR 0007](0007-cookie-sessions.md)), never from the request.
+- The rule is written once, as the Prisma predicate `accessibleVoyages(principal)` in
+  `modules/voyages/voyage-access.ts`. Every voyage query combines it with its own filters using
+  `AND`, so authorization happens **inside the database query**. A filter cannot widen it, and a
+  row the organization may not see is never loaded.
+- Requests for a voyage the organization does not participate in return **404, not 403**, with a
+  body identical to that for a nonexistent voyage, so the existence of other parties' voyages is
+  not disclosed.
 - Finer-grained visibility inside a voyage (contract-level confidentiality along the trade string)
   is layered on top, per object type.
 
@@ -38,13 +43,21 @@ Access to a voyage, and to everything attached to it, is derived from **particip
   synchronisation.
 - **Postgres RLS as the primary mechanism.** Strong guarantees, but policies over a join table,
   combined with Prisma's connection handling, add complexity. Kept as a candidate for defence in
-  depth once application-level scoping exists and is tested.
+  depth now that application-level scoping exists and is tested.
+- **Load, then check in code** (`findUnique` followed by an `if`). Easy to forget, and it reads
+  rows the caller may not see. Rejected in favour of the query predicate.
 
 ## Consequences
 
-- Isolation is one well-indexed join that is easy to test: integration tests will assert that a
-  non-participant gets 404 for every voyage-scoped endpoint.
-- Every new voyage-scoped query must apply the scope. To make that hard to forget, the scope will be
-  built by a single function (or a Prisma client extension) rather than repeated per query.
-- Removing a participant immediately revokes access. Audit records must therefore capture what an
+- Isolation is one well-indexed semi-join (`EXISTS` over `voyage_participants`) that is easy to
+  test. Integration tests against real PostgreSQL assert that each organization sees only its
+  voyages, that status filters and client-supplied organization ids cannot widen the scope, and
+  that a non-participant gets the same 404 as for a missing voyage.
+- Every new voyage-scoped query must use `accessibleVoyages`. Notices, documents and other
+  voyage children will reach their voyage through it rather than restating the rule.
+- Removing a participant revokes access on the very next request, because the predicate is
+  evaluated per query and nothing caches it. Audit records must therefore capture what an
   organization saw or did while it was a participant.
+- Participation decides **which voyages** an organization sees. It says nothing about **what a
+  given user may do** there; see the
+  [domain model](../domain-model.md#6-user-permissions-are-not-participant-roles).

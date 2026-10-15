@@ -1,6 +1,7 @@
 import DirectionsBoatOutlinedIcon from '@mui/icons-material/DirectionsBoatOutlined';
 import { AppBar, Box, Button, Container, Toolbar, Typography } from '@mui/material';
 import { NavLink, Outlet } from 'react-router';
+import { UserMenu } from '../../features/auth/components/UserMenu';
 
 export function AppLayout() {
   return (
@@ -21,6 +22,9 @@ export function AppLayout() {
             >
               Voyages
             </Button>
+          </Box>
+          <Box sx={{ ml: 'auto' }}>
+            <UserMenu />
           </Box>
         </Toolbar>
       </AppBar>

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { VoyageIdParamSchema } from '@tradeflow/contracts';
 import { Link as RouterLink, useParams } from 'react-router';
 import { ApiError } from '../../../shared/api/http-client';
+import { useProtectedScope } from '../../../shared/auth/identity';
 import { NotFoundState } from '../../../shared/ui/NotFoundState';
 import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
@@ -22,6 +23,7 @@ export function VoyageDetailsPage() {
   const { voyageId = '' } = useParams<'voyageId'>();
   // A malformed id can never exist: answer locally instead of sending a doomed request.
   const isValidId = VoyageIdParamSchema.safeParse(voyageId).success;
+  const scope = useProtectedScope();
 
   const {
     data: voyage,
@@ -29,7 +31,7 @@ export function VoyageDetailsPage() {
     isPending,
     refetch,
   } = useQuery({
-    ...voyageQueries.detail(voyageId),
+    ...voyageQueries.detail(scope, voyageId),
     enabled: isValidId,
   });
 

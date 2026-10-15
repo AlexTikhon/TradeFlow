@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { VoyageStatusSchema, type VoyageStatus } from '@tradeflow/contracts';
 import { useSearchParams } from 'react-router';
+import { useProtectedScope } from '../../../shared/auth/identity';
 import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { voyageQueries } from '../api/voyage.queries';
@@ -28,8 +29,9 @@ function useStatusFilter() {
 
 export function VoyageListPage() {
   const [status, setStatus] = useStatusFilter();
+  const scope = useProtectedScope();
   const { data, error, isPending, refetch } = useQuery(
-    voyageQueries.list(status ? { status } : {}),
+    voyageQueries.list(scope, status ? { status } : {}),
   );
 
   const count = data?.items.length;

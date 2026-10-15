@@ -39,13 +39,33 @@ model User {
   organizationId String   @map("organization_id") @db.Uuid
   email          String   @unique
   fullName       String   @map("full_name")
+  /// Argon2id hash in PHC string format. Null means the user has no password and cannot sign in.
+  passwordHash   String?  @map("password_hash")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  sessions     Session[]
 
   @@index([organizationId])
   @@map("users")
+}
+
+/// A signed-in browser session (ADR 0007). The browser holds an opaque random token in a cookie;
+/// only its SHA-256 digest is stored, so a copy of this table does not yield usable sessions.
+/// A session is valid while it is neither expired nor revoked.
+model Session {
+  id        String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash Bytes     @unique @map("token_hash")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +166,7 @@ enum ParticipantRole {
 }
 
 /// An organization taking part in a voyage in a given role.
-/// This is also the future access-control relation: an organization sees a voyage
+/// This is also the access-control relation (ADR 0006): an organization sees a voyage
 /// if and only if it participates in it.
 model VoyageParticipant {
   id             String          @id @default(dbgenerated("uuidv7()")) @db.Uuid

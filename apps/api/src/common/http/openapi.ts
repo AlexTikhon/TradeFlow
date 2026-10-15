@@ -8,15 +8,35 @@ type SchemaObjects = NonNullable<NonNullable<OpenAPIObject['components']>['schem
 /** A reference to a schema published from the contracts package. */
 export const schemaRef = (id: string) => ({ $ref: `#/components/schemas/${id}` });
 
+/** Name of the security scheme for the session cookie; routes reference it via `ApiSessionAuth`. */
+export const SESSION_SECURITY_SCHEME = 'session';
+
+export interface OpenApiOptions {
+  /** The session cookie's actual name, which differs between HTTP and HTTPS deployments. */
+  sessionCookieName: string;
+}
+
 /**
  * Builds the OpenAPI document. Routes come from Nest's controller metadata; schemas come from
  * the shared Zod contracts, so the document cannot drift from what the API actually validates.
  */
-export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
+export function createOpenApiDocument(
+  app: INestApplication,
+  { sessionCookieName }: OpenApiOptions,
+): OpenAPIObject {
   const config = new DocumentBuilder()
     .setTitle('TradeFlow API')
     .setDescription('Post-trade execution for bulk commodity shipments.')
-    .setVersion('0.1.0')
+    .setVersion('0.2.0')
+    .addCookieAuth(
+      sessionCookieName,
+      {
+        type: 'apiKey',
+        in: 'cookie',
+        description: 'Opaque session token set by POST /api/auth/sign-in (HttpOnly).',
+      },
+      SESSION_SECURITY_SCHEME,
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
@@ -38,8 +58,8 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
   return document;
 }
 
-export function setupOpenApi(app: INestApplication): void {
-  SwaggerModule.setup('api/docs', app, () => createOpenApiDocument(app), {
+export function setupOpenApi(app: INestApplication, options: OpenApiOptions): void {
+  SwaggerModule.setup('api/docs', app, () => createOpenApiDocument(app, options), {
     jsonDocumentUrl: 'api/docs/openapi.json',
   });
 }
