@@ -155,7 +155,7 @@ src/
   features/
     auth/
       api/          sign-in, sign-out, current user
-      session.ts    session query, switchIdentity, protected-data purge
+      session.ts    session query, sign-in/sign-out transitions, protected-data purge
       session-sync.ts  cross-tab identity sync (BroadcastChannel)
       components/   RequireAuth (protected-route boundary), UserMenu
       pages/        SignInPage
@@ -224,6 +224,26 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
   purges data. Requests that change the cookie (sign-in, sign-out) run one at a time, so a slow
   sign-out response cannot clear the cookie of a newer sign-in. The sign-in form stays disabled
   ("Finishing sign-out…") until the previous sign-out is answered.
+- **Sign-in owns the session** from the moment it starts until it resolves. Starting it begins a
+  generation (outdating checks already on their way), drops any previous identity's data and
+  sets the session to "nobody", so no protected content renders meanwhile. Checks made while it
+  is pending answer "nobody" without asking the server. Only the _latest_ sign-in intent may
+  publish an identity: an earlier queued sign-in that completes meanwhile publishes nothing, and
+  a sign-out overtakes every pending sign-in. Outcomes of the latest intent:
+  - _Success_: its identity is published (written to the cache directly, so cache and cookie
+    agree even when nothing observes the session).
+  - _Refused_ (or failed): the server is asked who is signed in and its answer is published,
+    then the error is reported. After an earlier queued sign-in succeeded that is that identity
+    (a refused sign-in revokes nothing); otherwise it is usually nobody. An unconfirmed sign-out
+    stays in force, so the answer is then "nobody" without asking.
+  - _Another tab changed the session_ while it was on its way: once its own response has set
+    the cookie, the server is asked again and its answer published.
+
+  These reconciliations fetch `/auth/me` directly and write the result; they do not rely on
+  invalidation, which leaves an unobserved session query stale instead of refreshed. If the
+  server cannot be reached, the session becomes "unknown" and is checked again by whatever
+  displays it next.
+
 - **Sign-out** acts locally first (abort, purge, go to `/sign-in`) and then revokes the session on
   the server, so nothing from the old identity remains on screen even if the network is down. If
   the server does not confirm, the sign-in page says so and offers a retry. Until then the tab

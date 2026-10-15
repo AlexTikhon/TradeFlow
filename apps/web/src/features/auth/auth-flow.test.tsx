@@ -309,6 +309,37 @@ describe('authentication', () => {
     ).not.toHaveLength(0);
   });
 
+  it('never shows the previous identity when its session check answers during a sign-in', async () => {
+    const { router, user, session, queryClient } = renderRoute('/sign-in', {
+      signedInAs: null,
+      accounts: [ana, claire],
+    });
+    serveScopedVoyages(session);
+    keepSessionObserved(queryClient);
+    await waitFor(() => {
+      expect(queryClient.getQueryData(['session'])).toBeNull();
+    });
+    // The cookie now belongs to Ana (another tab), and a re-check is on its way back with her.
+    session.current = ana;
+    const check = session.holdNext('me');
+    const staleCheck = queryClient.refetchQueries({ queryKey: ['session'] });
+    await check.received;
+    const signIn = session.holdNext('sign-in');
+    await signInWith(user, claire.user.email);
+    await signIn.received;
+    const anaShown = watchForText('Ana Souza');
+
+    check.release();
+    await staleCheck;
+
+    expect(router.state.location.pathname).toBe('/sign-in');
+    expect(queryClient.getQueryData(['session'])).toBeNull();
+    signIn.release();
+    expect(await screen.findByRole('link', { name: 'TF-CLAIRE-ONLY' })).toBeInTheDocument();
+    expect(screen.getByText('Claire Morel')).toBeInTheDocument();
+    expect(anaShown.seen).toBe(false);
+  });
+
   it('reports a failed sign-out instead of restoring the session, and retries it', async () => {
     const { router, user, session, queryClient } = renderRoute('/voyages');
     serveScopedVoyages(session);

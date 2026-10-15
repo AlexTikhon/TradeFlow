@@ -13,6 +13,11 @@ import { fetchCurrentUser, signIn, signOut } from './api/auth.api';
  * client: each one starts a new generation, and a check's answer counts only if no transition
  * started while it was on its way. Requests that change the session cookie (sign-in, sign-out)
  * run one at a time, so a slow sign-out response cannot clear the cookie of a newer sign-in.
+ *
+ * A sign-in owns the session from the moment it starts until it resolves: nobody is signed in
+ * locally meanwhile, and session checks answer "nobody" without asking. Only the latest sign-in
+ * intent may publish an identity. When that intent cannot be honoured as sent (refused, or
+ * overtaken by another tab), the client asks the server and adopts its answer.
  */
 
 const SESSION_KEY = ['session'] as const;
@@ -34,6 +39,8 @@ interface SessionControl {
   generation: number;
   signOut: SignOutState;
   pendingSignOut: SignOut | undefined;
+  /** Generation of the latest sign-in not yet resolved; it alone may publish an identity. */
+  signInIntent: number | undefined;
   /** Tail of the queue of requests that change the session cookie. */
   cookieQueue: Promise<unknown>;
   listeners: Set<() => void>;
@@ -48,6 +55,7 @@ function controlOf(queryClient: QueryClient): SessionControl {
       generation: 0,
       signOut: IDLE,
       pendingSignOut: undefined,
+      signInIntent: undefined,
       cookieQueue: Promise.resolve(),
       listeners: new Set(),
     };
@@ -83,14 +91,16 @@ export class StaleSessionCheckError extends Error {
  * Asks the server who is signed in. The answer is used only if no identity transition started
  * meanwhile; otherwise this rejects with `StaleSessionCheckError` and touches nothing. While a
  * sign-out is unfinished or unconfirmed the answer is "nobody", without asking: the user asked to
- * leave, and an identity the server still remembers must not come back on its own.
+ * leave, and an identity the server still remembers must not come back on its own. While a
+ * sign-in is pending the answer is also "nobody": the cookie is about to change, and whoever it
+ * belongs to now must not be shown.
  */
 export async function checkSession(
   queryClient: QueryClient,
   signal?: AbortSignal,
 ): Promise<CurrentUser | null> {
   const control = controlOf(queryClient);
-  if (control.signOut.status !== 'idle') return null;
+  if (control.signOut.status !== 'idle' || control.signInIntent !== undefined) return null;
   const generation = control.generation;
   const assertCurrent = () => {
     if (control.generation !== generation) throw new StaleSessionCheckError();
@@ -166,36 +176,85 @@ export async function switchIdentity(
   queryClient: QueryClient,
   next: CurrentUser | null,
 ): Promise<void> {
-  const control = controlOf(queryClient);
-  const generation = ++control.generation;
+  const generation = ++controlOf(queryClient).generation;
+  await publishIdentity(queryClient, generation, next);
+}
+
+/** The second half of a transition that started `generation`: see `switchIdentity`. */
+async function publishIdentity(
+  queryClient: QueryClient,
+  generation: number,
+  next: CurrentUser | null,
+): Promise<void> {
   await queryClient.cancelQueries({ queryKey: SESSION_KEY });
   if (!sameIdentity(queryClient.getQueryData(SESSION_KEY), next)) {
     await purgeProtectedData(queryClient);
   }
-  if (control.generation === generation) {
+  if (controlOf(queryClient).generation === generation) {
     queryClient.setQueryData(SESSION_KEY, next);
   }
 }
 
 /**
- * Signs in. Waits for any unfinished sign-out first, so its response (which clears the cookie)
- * cannot arrive after this sign-in's. The new identity is published only if no other transition
- * started meanwhile; otherwise the server is asked again. Rejects if the credentials are refused.
+ * Asks the server who is signed in and publishes the answer, whether or not anything observes
+ * the session (invalidating would only mark an unobserved query stale). It is a transition of
+ * its own, so checks already on their way are outdated. If the server cannot be reached, the
+ * session becomes "unknown" and is asked again by whatever displays it next.
+ */
+async function reconcileSession(queryClient: QueryClient): Promise<void> {
+  const control = controlOf(queryClient);
+  const generation = ++control.generation;
+  await queryClient.cancelQueries({ queryKey: SESSION_KEY });
+  try {
+    const identity = await checkSession(queryClient);
+    if (control.generation === generation) queryClient.setQueryData(SESSION_KEY, identity);
+  } catch (error) {
+    // A stale answer means a newer transition started; that one publishes.
+    if (!(error instanceof StaleSessionCheckError) && control.generation === generation) {
+      await queryClient.resetQueries({ queryKey: SESSION_KEY });
+    }
+  }
+}
+
+type SignInOutcome = { ok: true; identity: CurrentUser } | { ok: false; error: unknown };
+
+/**
+ * Signs in. The sign-in owns the session at once: older session checks are outdated, and nobody
+ * is signed in locally (the previous identity's data is dropped) until it resolves. The request
+ * waits for every earlier cookie-changing request, so their responses cannot land after its own.
+ *
+ * Only the latest sign-in publishes. An earlier one that completes meanwhile publishes nothing;
+ * one overtaken by a sign-out leaves the session to that sign-out. When the latest sign-in
+ * succeeds, its identity is published. When it is refused, or another tab changed the session
+ * while it was on its way, the server is asked who is signed in and its answer is published
+ * (after a refusal: whatever cookie an earlier request left, or nobody). Rejects with the
+ * sign-in's error once the session has settled.
  */
 export async function startSession(
   queryClient: QueryClient,
   credentials: SignInRequest,
 ): Promise<void> {
   const control = controlOf(queryClient);
-  const generation = control.generation;
-  const identity = await inCookieQueue(control, () => signIn(credentials));
-  if (control.generation !== generation) {
-    await queryClient.invalidateQueries({ queryKey: SESSION_KEY });
-    return;
+  const intent = ++control.generation;
+  control.signInIntent = intent;
+  const response = inCookieQueue(control, () => signIn(credentials)).then(
+    (identity): SignInOutcome => ({ ok: true, identity }),
+    (error: unknown): SignInOutcome => ({ ok: false, error }),
+  );
+  await publishIdentity(queryClient, intent, null);
+  const outcome = await response;
+
+  // A successful sign-in revoked whatever session this browser presented, confirmed or not.
+  if (outcome.ok && control.signOut.status === 'failed') setSignOutState(control, IDLE);
+  if (control.signInIntent === intent) {
+    control.signInIntent = undefined;
+    if (outcome.ok && control.generation === intent) {
+      await switchIdentity(queryClient, outcome.identity);
+    } else {
+      await reconcileSession(queryClient);
+    }
   }
-  // Signing in also revoked whatever session this browser presented, confirmed or not.
-  setSignOutState(control, IDLE);
-  await switchIdentity(queryClient, identity);
+  if (!outcome.ok) throw outcome.error;
 }
 
 /**
@@ -209,6 +268,8 @@ export function endSession(queryClient: QueryClient): SignOut {
   if (control.pendingSignOut) return control.pendingSignOut;
 
   setSignOutState(control, { status: 'pending' });
+  // Sign-ins still on their way are overtaken: their responses publish nothing.
+  control.signInIntent = undefined;
   const signedOutLocally = switchIdentity(queryClient, null);
   const settled = inCookieQueue(control, async () => {
     await signedOutLocally;
@@ -231,7 +292,8 @@ export function endSession(queryClient: QueryClient): SignOut {
  * Another tab signed in or out, so the shared cookie may now belong to someone else. Fails
  * closed: drops protected data at once and returns the session to "unknown" (not "stale"), so
  * nothing renders until the server has answered. An unconfirmed sign-out here is superseded,
- * since the server's answer now reflects that other tab's action.
+ * since the server's answer now reflects that other tab's action. A sign-in still on its way
+ * keeps ownership, and asks the server again once its own response has set the cookie.
  */
 export async function sessionChangedElsewhere(queryClient: QueryClient): Promise<void> {
   const control = controlOf(queryClient);

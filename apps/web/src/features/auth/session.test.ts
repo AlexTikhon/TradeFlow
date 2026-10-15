@@ -173,6 +173,131 @@ describe('session transitions', () => {
     expect(session.current).toBeNull();
   });
 
+  it('ignores a session check answering for another identity while a sign-in is pending', async () => {
+    // The cookie belongs to Ana (another tab signed in), and this tab is signing in as Claire.
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(null);
+    const check = session.holdNext('me');
+    const staleCheck = checkSession(queryClient, neverAborted());
+    await check.received;
+    const signIn = session.holdNext('sign-in');
+    const signingIn = startSession(queryClient, credentialsOf(claire));
+    await signIn.received;
+
+    check.release();
+    await expect(staleCheck).rejects.toBeInstanceOf(StaleSessionCheckError);
+    // A check made while the sign-in is pending does not ask the server for someone else.
+    await expect(queryClient.query({ ...sessionQuery, staleTime: 0 })).resolves.toBeNull();
+    expect(session.meRequests).toBe(1);
+    expect(sessionOf(queryClient)).toBeNull();
+
+    signIn.release();
+    await signingIn;
+    expect(sessionOf(queryClient)).toEqual(claire);
+  });
+
+  it('hides the current identity as soon as a sign-in starts', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
+    const signIn = session.holdNext('sign-in');
+
+    const signingIn = startSession(queryClient, credentialsOf(claire));
+    await signIn.received;
+
+    expect(sessionOf(queryClient)).toBeNull();
+    expect(queryClient.getQueryData(voyagesOf(ana))).toBeUndefined();
+    signIn.release();
+    await signingIn;
+    expect(sessionOf(queryClient)).toEqual(claire);
+  });
+
+  it('publishes the latest of two queued sign-ins, with nothing observing the session', async () => {
+    const session = serveSession(null, [ana, claire]);
+    const queryClient = signedInClient(null);
+    const first = session.holdNext('sign-in');
+    const second = session.holdNext('sign-in');
+
+    const asAna = startSession(queryClient, credentialsOf(ana));
+    const asClaire = startSession(queryClient, credentialsOf(claire));
+    await first.received;
+    first.release();
+    await asAna;
+
+    // Ana's sign-in completed, but a later sign-in owns the session: Ana is not published.
+    expect(sessionOf(queryClient)).toBeNull();
+    await second.received;
+    second.release();
+    await asClaire;
+
+    expect(session.log).toEqual([
+      'sign-in received',
+      'sign-in answered',
+      'sign-in received',
+      'sign-in answered',
+    ]);
+    expect(session.current).toEqual(claire);
+    expect(sessionOf(queryClient)).toEqual(claire);
+    expect(
+      queryClient.getQueryCache().find({ queryKey: sessionQuery.queryKey })?.getObserversCount(),
+    ).toBe(0);
+  });
+
+  it('settles on the server session when the latest sign-in fails after an earlier one succeeded', async () => {
+    const session = serveSession(null, [ana]);
+    const queryClient = signedInClient(null);
+    const first = session.holdNext('sign-in');
+    const second = session.holdNext('sign-in');
+
+    const asAna = startSession(queryClient, credentialsOf(ana));
+    const refused = startSession(queryClient, { ...credentialsOf(claire), password: 'wrong' });
+    await first.received;
+    first.release();
+    await asAna;
+    expect(sessionOf(queryClient)).toBeNull();
+    await second.received;
+    second.release();
+
+    // The refused sign-in rejects; the client then adopts what the server holds (Ana's cookie).
+    await expect(refused).rejects.toMatchObject({ status: 401 });
+    expect(session.current).toEqual(ana);
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(getSignOutState(queryClient).status).toBe('idle');
+  });
+
+  it('keeps an unconfirmed sign-out in force when the next sign-in is refused', async () => {
+    const session = serveSession(ana, [ana]);
+    const queryClient = signedInClient(ana);
+    session.failNextSignOut();
+    await endSession(queryClient).settled;
+
+    await expect(
+      startSession(queryClient, { ...credentialsOf(ana), password: 'wrong' }),
+    ).rejects.toMatchObject({ status: 401 });
+
+    // A refused sign-in revokes nothing, so the server still knows Ana; she must not come back.
+    expect(getSignOutState(queryClient).status).toBe('failed');
+    expect(sessionOf(queryClient)).toBeNull();
+    expect(session.meRequests).toBe(0);
+  });
+
+  it('re-asks the server when another tab changes the session during a sign-in, unobserved', async () => {
+    const session = serveSession(null, [ana, claire]);
+    const queryClient = signedInClient(null);
+    const signIn = session.holdNext('sign-in');
+    const signingIn = startSession(queryClient, credentialsOf(ana));
+    await signIn.received;
+
+    // Another tab signed in as Claire; this tab's sign-in response arrives afterwards.
+    session.current = claire;
+    await sessionChangedElsewhere(queryClient);
+    signIn.release();
+    await signingIn;
+
+    expect(session.current).toEqual(ana);
+    expect(sessionOf(queryClient)).toEqual(ana);
+  });
+
   it('a change in another tab aborts protected requests and outdates earlier session checks', async () => {
     const session = serveSession(ana, [ana, claire]);
     const queryClient = signedInClient(ana);
