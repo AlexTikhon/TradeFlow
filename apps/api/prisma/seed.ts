@@ -9,6 +9,7 @@ import {
   type VoyageStatus,
 } from '../src/generated/prisma/client.js';
 import { hashPassword } from '../src/modules/auth/password.js';
+import { toLinearTradeString } from '../src/modules/voyages/trade-string.js';
 
 /**
  * Every demo user signs in with this password. It is published in the README, so it must only
@@ -26,6 +27,10 @@ const VESSEL = (n: number) => seedId('8003', n);
 const COMMODITY = (n: number) => seedId('8004', n);
 const PORT = (n: number) => seedId('8005', n);
 const VOYAGE = (n: number) => seedId('8006', n);
+/** The `n`th participant of voyage `voyage`. */
+const PARTICIPANT = (voyage: number, n: number) => seedId('8007', voyage * 100 + n);
+/** The sale contract at `position` in voyage `voyage`'s trade string. */
+const CONTRACT = (voyage: number, position: number) => seedId('8008', voyage * 100 + position);
 
 const organizations = [
   { id: ORG(1), name: 'Cerrado Grãos Exportadora S.A.', countryCode: 'BR' },
@@ -175,7 +180,8 @@ const ports = [
 ] as const;
 
 interface VoyageSeed {
-  id: string;
+  /** Picks the voyage's id, and its participants' and contracts' ids. */
+  number: number;
   reference: string;
   status: VoyageStatus;
   vesselId: string;
@@ -185,11 +191,16 @@ interface VoyageSeed {
   dischargePortId: string;
   laycan: [start: string, end: string];
   participants: [organizationId: string, role: ParticipantRole][];
+  /**
+   * The trade string, as the organizations the cargo is sold through, exporter first: contract 1
+   * is the first organization's sale to the second, and so on. Empty: no contracts recorded yet.
+   */
+  tradeString: string[];
 }
 
 const voyages: VoyageSeed[] = [
   {
-    id: VOYAGE(1),
+    number: 1,
     reference: 'TF-2026-0001',
     status: 'IN_TRANSIT',
     vesselId: VESSEL(1),
@@ -206,9 +217,11 @@ const voyages: VoyageSeed[] = [
       [ORG(11), 'SURVEYOR'],
       [ORG(12), 'SHIPPING_AGENT'],
     ],
+    // Cerrado → Lacustra → Nordlys → Rhine Valley: two traders in the string.
+    tradeString: [ORG(1), ORG(4), ORG(5), ORG(7)],
   },
   {
-    id: VOYAGE(2),
+    number: 2,
     reference: 'TF-2026-0002',
     status: 'LOADING',
     vesselId: VESSEL(2),
@@ -224,9 +237,10 @@ const voyages: VoyageSeed[] = [
       [ORG(11), 'SURVEYOR'],
       [ORG(12), 'SHIPPING_AGENT'],
     ],
+    tradeString: [ORG(1), ORG(6), ORG(10)],
   },
   {
-    id: VOYAGE(3),
+    number: 3,
     reference: 'TF-2026-0003',
     status: 'PLANNED',
     vesselId: VESSEL(3),
@@ -241,9 +255,11 @@ const voyages: VoyageSeed[] = [
       [ORG(8), 'FINAL_BUYER'],
       [ORG(11), 'SURVEYOR'],
     ],
+    // Parties have joined, but no sale contracts are recorded yet: "not configured" in the UI.
+    tradeString: [],
   },
   {
-    id: VOYAGE(4),
+    number: 4,
     reference: 'TF-2026-0004',
     status: 'DISCHARGING',
     vesselId: VESSEL(4),
@@ -257,9 +273,10 @@ const voyages: VoyageSeed[] = [
       [ORG(5), 'TRADER'],
       [ORG(7), 'FINAL_BUYER'],
     ],
+    tradeString: [ORG(2), ORG(5), ORG(7)],
   },
   {
-    id: VOYAGE(5),
+    number: 5,
     reference: 'TF-2026-0005',
     status: 'PLANNED',
     vesselId: VESSEL(5),
@@ -275,9 +292,12 @@ const voyages: VoyageSeed[] = [
       [ORG(9), 'FINAL_BUYER'],
       [ORG(11), 'SURVEYOR'],
     ],
+    // Gulf Prairie → Meridian → Lacustra → Bohai. The traders' contract order is the reverse of
+    // their alphabetical order (the participant directory lists Lacustra first).
+    tradeString: [ORG(3), ORG(6), ORG(4), ORG(9)],
   },
   {
-    id: VOYAGE(6),
+    number: 6,
     reference: 'TF-2026-0006',
     status: 'COMPLETED',
     vesselId: VESSEL(6),
@@ -291,9 +311,10 @@ const voyages: VoyageSeed[] = [
       [ORG(5), 'TRADER'],
       [ORG(10), 'FINAL_BUYER'],
     ],
+    tradeString: [ORG(3), ORG(5), ORG(10)],
   },
   {
-    id: VOYAGE(7),
+    number: 7,
     reference: 'TF-2026-0007',
     status: 'CANCELLED',
     vesselId: VESSEL(4),
@@ -307,8 +328,51 @@ const voyages: VoyageSeed[] = [
       [ORG(6), 'TRADER'],
       [ORG(9), 'FINAL_BUYER'],
     ],
+    tradeString: [ORG(1), ORG(6), ORG(9)],
   },
 ];
+
+/**
+ * The rows for one seeded voyage, with fixed ids. Its trade string is checked with the same
+ * domain rules the API reads it with (toLinearTradeString throws on any violation).
+ */
+function planVoyage({ number, participants, tradeString, laycan, ...fields }: VoyageSeed) {
+  const id = VOYAGE(number);
+  const participantRows = participants.map(([organizationId, role], index) => ({
+    id: PARTICIPANT(number, index + 1),
+    voyageId: id,
+    organizationId,
+    role,
+  }));
+  const participantOf = (organizationId: string) => {
+    const row = participantRows.find((p) => p.organizationId === organizationId);
+    if (!row) {
+      throw new Error(
+        `${fields.reference}: ${organizationId} is in the trade string but not a participant`,
+      );
+    }
+    return { participantId: row.id, organizationId, role: row.role };
+  };
+  const { contracts } = toLinearTradeString(
+    tradeString.slice(1).map((buyer, index) => ({
+      position: index + 1,
+      seller: participantOf(tradeString[index] ?? ''),
+      buyer: participantOf(buyer),
+    })),
+  );
+  return {
+    id,
+    data: { ...fields, laycanStart: new Date(laycan[0]), laycanEnd: new Date(laycan[1]) },
+    participants: participantRows,
+    contracts: contracts.map(({ position, seller, buyer }) => ({
+      id: CONTRACT(number, position),
+      voyageId: id,
+      position,
+      sellerParticipantId: seller.participantId,
+      buyerParticipantId: buyer.participantId,
+    })),
+  };
+}
 
 async function seed(prisma: PrismaClient): Promise<void> {
   for (const { id, ...data } of organizations) {
@@ -329,23 +393,18 @@ async function seed(prisma: PrismaClient): Promise<void> {
     await prisma.port.upsert({ where: { id }, update: data, create: { id, ...data } });
   }
 
-  for (const { id, participants, laycan, ...fields } of voyages) {
-    const data = {
-      ...fields,
-      laycanStart: new Date(laycan[0]),
-      laycanEnd: new Date(laycan[1]),
-    };
-    // The seed owns these voyages, so their participant list is replaced wholesale.
+  // Plan every voyage before writing any, so a seed whose trade string breaks the domain rules
+  // fails before it changes anything.
+  const plans = voyages.map(planVoyage);
+  for (const { id, data, participants, contracts } of plans) {
+    // The seed owns these voyages, so their participants and trade string are replaced wholesale
+    // (contracts first: they reference the participants).
     await prisma.$transaction([
       prisma.voyage.upsert({ where: { id }, update: data, create: { id, ...data } }),
+      prisma.tradeContract.deleteMany({ where: { voyageId: id } }),
       prisma.voyageParticipant.deleteMany({ where: { voyageId: id } }),
-      prisma.voyageParticipant.createMany({
-        data: participants.map(([organizationId, role]) => ({
-          voyageId: id,
-          organizationId,
-          role,
-        })),
-      }),
+      prisma.voyageParticipant.createMany({ data: participants }),
+      prisma.tradeContract.createMany({ data: contracts }),
     ]);
   }
 
@@ -372,7 +431,8 @@ try {
   await seed(prisma);
   console.log(
     `Seeded ${organizations.length} organizations, ${users.length} users, ${vessels.length} vessels, ` +
-      `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages. ` +
+      `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages ` +
+      `(${voyages.filter((voyage) => voyage.tradeString.length > 0).length} with a trade string). ` +
       `Every user's password is "${DEMO_PASSWORD}".`,
   );
 } finally {

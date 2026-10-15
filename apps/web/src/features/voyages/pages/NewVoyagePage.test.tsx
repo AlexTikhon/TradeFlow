@@ -15,7 +15,7 @@ import {
   santos,
   soybeans,
 } from '../../../test/fixtures/reference-data';
-import { aVoyageDetail } from '../../../test/fixtures/voyages';
+import { aVoyageDetail, anEmptyTradeString } from '../../../test/fixtures/voyages';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
@@ -65,6 +65,10 @@ function serveVoyageList(items = [created]) {
       return HttpResponse.json(body);
     }),
     http.get(`*/api/voyages/${created.id}`, () => HttpResponse.json(created)),
+    // A new voyage has no sale contracts yet.
+    http.get(`*/api/voyages/${created.id}/trade-string`, () =>
+      HttpResponse.json(anEmptyTradeString()),
+    ),
   );
   return requests;
 }

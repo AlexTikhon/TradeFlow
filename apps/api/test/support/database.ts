@@ -63,6 +63,34 @@ export async function createVoyage(
   });
 }
 
+/**
+ * Records a trade string along `organizationIds`, from seller to buyer: contract 1 from the
+ * first to the second, and so on. Each organization must already participate in the voyage in
+ * one trade role. Writes rows directly, so the domain's chain rules are not checked.
+ */
+export async function createTradeString(
+  prisma: PrismaService,
+  voyageId: string,
+  organizationIds: string[],
+) {
+  const participants = await prisma.voyageParticipant.findMany({
+    where: { voyageId, role: { in: ['EXPORTER', 'TRADER', 'FINAL_BUYER'] } },
+  });
+  const participantOf = (organizationId: string) => {
+    const participant = participants.find((p) => p.organizationId === organizationId);
+    if (!participant) throw new Error(`${organizationId} is not a trade party on ${voyageId}`);
+    return participant.id;
+  };
+  await prisma.tradeContract.createMany({
+    data: organizationIds.slice(1).map((buyer, index) => ({
+      voyageId,
+      position: index + 1,
+      sellerParticipantId: participantOf(organizationIds[index] ?? ''),
+      buyerParticipantId: participantOf(buyer),
+    })),
+  });
+}
+
 /** Password of every user created by `createUser`. */
 export const TEST_PASSWORD = 'correct horse battery staple';
 // Hashing is deliberately slow; one hash serves every test user.

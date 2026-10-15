@@ -156,12 +156,14 @@ model Voyage {
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  vessel        Vessel              @relation(fields: [vesselId], references: [id], onDelete: Restrict)
-  commodity     Commodity           @relation(fields: [commodityId], references: [id], onDelete: Restrict)
-  loadPort      Port                @relation("VoyageLoadPort", fields: [loadPortId], references: [id], onDelete: Restrict)
-  dischargePort Port                @relation("VoyageDischargePort", fields: [dischargePortId], references: [id], onDelete: Restrict)
-  participants  VoyageParticipant[]
-  auditEvents   AuditEvent[]
+  vessel         Vessel              @relation(fields: [vesselId], references: [id], onDelete: Restrict)
+  commodity      Commodity           @relation(fields: [commodityId], references: [id], onDelete: Restrict)
+  loadPort       Port                @relation("VoyageLoadPort", fields: [loadPortId], references: [id], onDelete: Restrict)
+  dischargePort  Port                @relation("VoyageDischargePort", fields: [dischargePortId], references: [id], onDelete: Restrict)
+  participants   VoyageParticipant[]
+  /// The trade string, as its sale contracts (see TradeContract).
+  tradeContracts TradeContract[]
+  auditEvents    AuditEvent[]
 
   @@index([status, laycanStart])
   @@index([vesselId])
@@ -188,12 +190,52 @@ model VoyageParticipant {
   role           ParticipantRole
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  voyage       Voyage       @relation(fields: [voyageId], references: [id], onDelete: Cascade)
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  voyage       Voyage          @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  sales        TradeContract[] @relation("TradeContractSeller")
+  purchases    TradeContract[] @relation("TradeContractBuyer")
 
   @@unique([voyageId, organizationId, role])
+  // Target of the trade contracts' composite foreign keys, so a contract can only name
+  // participants of its own voyage.
+  @@unique([voyageId, id])
   @@index([organizationId, voyageId])
   @@map("voyage_participants")
+}
+
+// ---------------------------------------------------------------------------
+// Trade string
+// ---------------------------------------------------------------------------
+
+/// One sale contract in a voyage's trade string: the seller sells the cargo to the buyer.
+/// The string is the voyage's contracts in `position` order (1 = the exporter's sale), each
+/// buyer being the next contract's seller, ending at the final buyer. Rules about single rows
+/// are enforced by the database (here and in the migration SQL); rules about the chain as a
+/// whole live in the voyages module (`trade-string.ts`).
+///
+/// Topology only. Commercial terms and the parties' own contract references are confidential
+/// to the two counterparties and are deliberately not modelled yet (ADR 0010).
+model TradeContract {
+  id                  String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  voyageId            String   @map("voyage_id") @db.Uuid
+  /// 1-based place in the string. Positive (CHECK) and unique per voyage.
+  position            Int
+  sellerParticipantId String   @map("seller_participant_id") @db.Uuid
+  buyerParticipantId  String   @map("buyer_participant_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  voyage Voyage            @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  // Composite keys pin both counterparties to this contract's voyage. NO ACTION (checked at the
+  // end of the statement) lets a voyage deletion cascade to participants and contracts together,
+  // while still refusing to delete a participant that a contract names.
+  seller VoyageParticipant @relation("TradeContractSeller", fields: [voyageId, sellerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  buyer  VoyageParticipant @relation("TradeContractBuyer", fields: [voyageId, buyerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([voyageId, position])
+  // A participant sells at most once and buys at most once per voyage: the string cannot branch.
+  @@unique([voyageId, sellerParticipantId])
+  @@unique([voyageId, buyerParticipantId])
+  @@map("trade_contracts")
 }
 
 /// Hands out voyage reference numbers (`TF-<year>-<number>`), one row per year. Taking a number
@@ -227,7 +269,7 @@ model AuditEvent {
   actorOrganizationId String      @map("actor_organization_id") @db.Uuid
   voyageId            String      @map("voyage_id") @db.Uuid
   /// Set by the server when the event is written; never accepted from a client.
-  occurredAt         DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  occurredAt          DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
   /// Action-specific facts. For VOYAGE_CREATED: the voyage as created.
   payload             Json
 

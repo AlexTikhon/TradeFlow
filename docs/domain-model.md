@@ -16,7 +16,7 @@
 | **UN/LOCODE**    | 5-character location code (`BRSSZ` = Santos, `NLRTM` = Rotterdam).                                                                        |
 | **MT**           | Metric tonnes.                                                                                                                            |
 
-## Implemented (Milestones 1 to 3)
+## Implemented (Milestones 1 to 4)
 
 ```
                         ┌──────────────┐
@@ -25,31 +25,35 @@
                                │ 1
                                │
                                │ n
-                    ┌──────────┴──────────┐
-                    │  VoyageParticipant  │  role: EXPORTER | TRADER | FINAL_BUYER
-                    │                     │        | SURVEYOR | SHIPPING_AGENT
-                    └──────────┬──────────┘
-                               │ n
-                               │
-                               │ 1
- Vessel ◀── n:1 ──┐     ┌──────┴───────┐     ┌── n:1 ──▶ Commodity
-                  └─────│    Voyage    │─────┘
+                    ┌──────────┴──────────┐   seller (n:1)   ┌───────────────┐
+                    │  VoyageParticipant  │◀─────────────────│ TradeContract │
+                    │                     │◀─────────────────│  position     │
+                    └──────────┬──────────┘   buyer (n:1)    └───────┬───────┘
+                               │ n                                   │ n
+                               │                                     │
+                               │ 1                                   │ 1
+ Vessel ◀── n:1 ──┐     ┌──────┴───────┐                             │
+                  └─────│    Voyage    │◀────────────────────────────┘
+ Commodity ◀─ n:1 ──────│              │
  Port (load) ◀─ n:1 ────│              │──── n:1 ─▶ Port (discharge)
                         └──────────────┘
+
+ VoyageParticipant.role: EXPORTER | TRADER | FINAL_BUYER | SURVEYOR | SHIPPING_AGENT
 ```
 
-| Entity                   | Key fields                                                                                                                     | Notes                                 |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
-| `Organization`           | name, countryCode                                                                                                              | No role column, by design (see below) |
-| `User`                   | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)          | No password means cannot sign in      |
-| `Session`                | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                           | Valid while unexpired and unrevoked   |
-| `Vessel`                 | name, imoNumber (unique)                                                                                                       | Reference data shared by all tenants  |
-| `Commodity`              | code (unique), name                                                                                                            | Reference data                        |
-| `Port`                   | unLocode (unique), name, countryCode                                                                                           | Reference data                        |
-| `Voyage`                 | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end |                                       |
-| `VoyageParticipant`      | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                          | Also the access-control relation      |
-| `AuditEvent`             | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                          | Append-only; see ADR 0009             |
-| `VoyageReferenceCounter` | year, lastNumber                                                                                                               | Hands out `TF-<year>-<number>`        |
+| Entity                   | Key fields                                                                                                                     | Notes                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `Organization`           | name, countryCode                                                                                                              | No role column, by design (see below)                  |
+| `User`                   | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)          | No password means cannot sign in                       |
+| `Session`                | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                           | Valid while unexpired and unrevoked                    |
+| `Vessel`                 | name, imoNumber (unique)                                                                                                       | Reference data shared by all tenants                   |
+| `Commodity`              | code (unique), name                                                                                                            | Reference data                                         |
+| `Port`                   | unLocode (unique), name, countryCode                                                                                           | Reference data                                         |
+| `Voyage`                 | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end |                                                        |
+| `VoyageParticipant`      | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                          | Also the access-control relation                       |
+| `TradeContract`          | voyageId, position, sellerParticipantId, buyerParticipantId                                                                    | One sale in the trade string; topology only (ADR 0010) |
+| `AuditEvent`             | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                          | Append-only; see ADR 0009                              |
+| `VoyageReferenceCounter` | year, lastNumber                                                                                                               | Hands out `TF-<year>-<number>`                         |
 
 ### Creating a voyage (initial business rule)
 
@@ -78,6 +82,47 @@ non-terminal state. A new voyage always starts `PLANNED`. Transitions are not en
 no endpoint changes a status. They will live in the voyages module (and later `workflow`), not in
 the database.
 
+### Trade string
+
+The trade string is modelled as its **edges**, the sale contracts between adjacent parties, not
+as a list of nodes. The commercially meaningful object is the edge: notices will travel from a
+seller to its buyer under a specific contract, and confidentiality is per contract. The order of
+the parties follows from the contracts' positions; edge data could not be derived from nodes.
+
+```
+position:        1                 2                 3
+Cerrado ──sells to──▶ Lacustra ──sells to──▶ Nordlys ──sells to──▶ Rhine Valley
+EXPORTER              TRADER                 TRADER                FINAL_BUYER
+```
+
+A contract names two **participants** of its own voyage (the participant row carries the
+organization and its role). Rules are split by what can see them:
+
+| Rule                                                                 | Enforced by                        |
+| -------------------------------------------------------------------- | ---------------------------------- |
+| Position is positive and unique per voyage                           | Database (CHECK, unique index)     |
+| Seller and buyer differ                                              | Database (CHECK)                   |
+| Seller and buyer participate in the contract's voyage                | Database (composite foreign keys)  |
+| A participant sells at most once and buys at most once (no branches) | Database (unique indexes)          |
+| Positions run 1..n without gaps                                      | Domain (`voyages/trade-string.ts`) |
+| Each buyer is the next contract's seller                             | Domain                             |
+| No organization appears twice (no cycles, also across its roles)     | Domain                             |
+| Exporter sells first, final buyer buys last, traders in between      | Domain                             |
+| Surveyors and shipping agents are never counterparties               | Domain                             |
+
+The domain rules are a plain walk along the position-ordered contracts, not a graph library. An
+**empty** string is valid: a newly created voyage has no contracts. Not every trade party has to
+be in the string either: a trader may have joined before its contract is recorded.
+
+No endpoint records or edits contracts yet; the demo seed writes them, after checking them with
+the same domain rules. The API validates the stored chain again when it reads it, and answers a
+broken one with a generic 500 instead of presenting it as valid.
+
+**Visibility** ([ADR 0010](decisions/0010-trade-string-visibility.md)): every participant of the
+voyage, service providers included, may read the topology: parties in order and who sells to
+whom. Commercial terms and the parties' own contract references are not part of that view, and
+participation grants no access to them when they are added.
+
 ### Invariants enforced by the database
 
 - `quantity > 0`
@@ -89,6 +134,10 @@ the database.
 - `audit_events` is append-only (a trigger refuses `UPDATE` and `DELETE`), holds a JSON object
   payload, and has at most one `VOYAGE_CREATED` per voyage.
 - Reference counters: a four-digit year and a non-negative last number.
+- Trade contracts: `position > 0` and unique per voyage; `seller_participant_id <>
+buyer_participant_id`; both reference participants of the same voyage (foreign keys on
+  `(voyage_id, participant_id)`); each participant sells and buys at most once per voyage; a
+  participant named by a contract cannot be deleted.
 
 ## Modelling decisions
 
@@ -114,8 +163,9 @@ is therefore:
 enforced on every voyage query by a single predicate, with the organization taken from the
 signed-in session. See
 [ADR 0006](decisions/0006-participation-based-access.md). Visibility _within_ a voyage (for
-example, Trader B must not see the price Trader A paid the exporter) is a further refinement that
-arrives with the trade string.
+example, Trader B must not see the price Trader A paid the exporter) is a further refinement. The
+first rule of that kind is [ADR 0010](decisions/0010-trade-string-visibility.md): participants
+see who sells to whom, never contract terms.
 
 ### 3. Quantities are exact decimals, carried as strings
 
@@ -153,8 +203,8 @@ other. A trader's junior analyst sees every voyage the trader participates in bu
 allowed to accept notices. And when the organization is exporter on one voyage and buyer on
 another, its users' permissions do not change between the two.
 
-**Current state (Milestone 3).** Every signed-in user can read exactly the voyages their
-organization participates in. Users have one of two roles
+**Current state (Milestone 4).** Every signed-in user can read exactly the voyages their
+organization participates in, including each voyage's trade-string topology. Users have one of two roles
 ([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads; an **operator** may also
 create voyages for their organization. The role is on the user row, which is organization-scoped
 because a user belongs to exactly one organization, and it is read on every request. Creating a
@@ -165,24 +215,16 @@ organization.
 
 ## Proposed next (not implemented)
 
-### Trade string as edges, not nodes
+### Confidential contract data and recording the string
 
-The brief suggests `TradeStringNode`. I recommend modelling the **contracts between** adjacent
-parties instead:
+`TradeContract` holds topology only (see [Trade string](#trade-string)). Next steps, none built:
 
-```
-TradeContract
-  voyageId
-  position          1 = exporter's sale, 2 = next sale, ...
-  sellerParticipantId
-  buyerParticipantId
-  contractReference
-```
-
-The commercially meaningful object is the edge. Notices are sent from a seller to its buyer under
-a specific contract, documentary instructions flow from a buyer back to its seller, and
-confidentiality is per contract. Node order can be derived from the edges; edge data cannot be
-derived from nodes.
+- **Recording and editing the string** through the API, with the domain validation above run
+  inside the writing transaction and an audit event per change (ADR 0009). Who may do it (the
+  exporter's operators? each seller for its own sale?) is still open.
+- **Contract details** (each side's contract reference, terms) as a separate object visible only
+  to that contract's two counterparties, with its own endpoint and schema. ADR 0010 explicitly
+  does not cover it.
 
 ### Voyage versus cargo
 

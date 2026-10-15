@@ -68,7 +68,15 @@ src/
       voyage-access.ts          accessibleVoyages(principal): the one visibility predicate
       voyage-reference.ts       takeNextVoyageReference(tx): per-year counter, row-locked
       voyage.read-model.ts      Prisma select shapes + row → contract mapping
+      trade-string.ts           domain rules for a linear trade string (pure functions)
+      trade-string.read-model.ts  allowlisted select + stored contracts → topology
+      trade-string.service.ts   findForVoyage(principal, id): one query, access predicate inside
+      trade-string.controller.ts  GET /voyages/:voyageId/trade-string
 ```
+
+The trade string lives in the `voyages` module rather than a module of its own: its contracts
+reference voyage participants by composite key, and reading it goes through
+`accessibleVoyages`, which the module owns. It can move out once it has its own commands.
 
 ### Module boundaries
 
@@ -151,9 +159,29 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
 - **Invariants the database must guarantee are CHECK constraints**, added by hand to the migration
   because Prisma's schema language cannot express them: positive quantity, ordered laycan, distinct
   load and discharge ports, IMO / UN/LOCODE / country-code formats, lowercase emails.
-- Foreign keys use `RESTRICT` except voyage → participants (`CASCADE`), so reference data cannot be
-  deleted out from under a voyage, and audited rows cannot be deleted from under their events.
+- Foreign keys use `RESTRICT` except voyage → participants and voyage → trade contracts
+  (`CASCADE`), so reference data cannot be deleted out from under a voyage, and audited rows cannot
+  be deleted from under their events.
+- **Composite foreign keys keep children inside their voyage.** A trade contract references its
+  seller and buyer as `(voyage_id, participant_id)` → `voyage_participants(voyage_id, id)`, so a
+  contract cannot name a participant of another voyage, whoever writes it. Those keys are
+  `NO ACTION` (checked at the end of the statement): a voyage deletion cascades to participants
+  and contracts together, while deleting a participant a contract names is refused.
 - `audit_events` is append-only for every writer: a trigger refuses `UPDATE` and `DELETE`.
+
+### Reads scoped below the voyage: the trade string
+
+`GET /api/voyages/:voyageId/trade-string` is the first read of a voyage child:
+
+1. Guards and the UUID parameter check, as for the voyage itself.
+2. **One query** loads the voyage by id `AND accessibleVoyages(principal)`, selecting only its
+   contracts' positions and the counterparties' organizations and roles. No match (missing or not
+   a participant) is the same 404 as `GET /voyages/:voyageId`.
+3. The stored contracts go through the domain rules (`toLinearTradeString`). A chain that breaks
+   them is a data error: it is logged and answered with a generic 500, never shown as valid.
+4. The response is the topology only, `{ parties, edges }`
+   ([ADR 0010](decisions/0010-trade-string-visibility.md)). An integration test pins its exact
+   field set, so participant ids, contract ids or later columns cannot slip in.
 
 ### Writes (first one: `POST /api/voyages`)
 
@@ -198,10 +226,10 @@ src/
     voyages/
       api/          fetch functions + query option factories (query keys live here),
                     including reference data (vessels, commodities, ports) for the form
-      domain/       presentation rules for the domain (status labels, role grouping),
-                    canCreateVoyages(identity)
+      domain/       presentation rules for the domain (status labels, role grouping,
+                    trade-string steps in contract order), canCreateVoyages(identity)
       hooks/        useCreateVoyage: the mutation and what happens after it
-      components/   feature UI (table, filter, facts card, participants)
+      components/   feature UI (table, filter, facts card, trade string, participants)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
   shared/
@@ -238,6 +266,15 @@ src/
   for everyone but is fetched with a session, so it lives under the scope too.
 - The details page validates the route parameter before fetching. A malformed id renders "not
   found" without a network request.
+- **Trade string.** The details page fetches the voyage and its trade string in parallel; the
+  string's key nests under the voyage's detail key. The client additionally checks that every edge
+  connects listed parties (a failure is an `ApiContractError`). The card orders parties by the
+  contracts' positions, never by name, and degrades on its own: loading, an error with retry, or
+  "Trade string not configured" for a voyage without contracts, while the rest of the page stays.
+  It is an ordered list (`role="list"`, since list styling would drop the semantics in Safari)
+  with each sale read out as "Sells to … under Contract n"; parties stack vertically with
+  downward arrows on phones and sit in a row with arrows in the gaps from the `md` breakpoint.
+  Surveyors and shipping agents stay in the participant directory below it.
 - **Creating a voyage** (`/voyages/new`, offered only to operators; the API checks again). The
   form validates with the same `CreateVoyageRequestSchema` as the API and shows its messages per
   field; server field errors (400) land on the same fields, other failures in one alert, and the
@@ -318,13 +355,13 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
 
 ## Testing strategy
 
-| Layer            | Tool                       | Fakes                          | Purpose                                     |
-| ---------------- | -------------------------- | ------------------------------ | ------------------------------------------- |
-| Contract schemas | Vitest                     | none                           | Wire-format rules                           |
-| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, config        |
-| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs  |
-| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client |
-| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                      |
+| Layer            | Tool                       | Fakes                          | Purpose                                           |
+| ---------------- | -------------------------- | ------------------------------ | ------------------------------------------------- |
+| Contract schemas | Vitest                     | none                           | Wire-format rules                                 |
+| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, chain rules, config |
+| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs        |
+| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client       |
+| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                            |
 
 Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized against a dedicated
 `*_test` database that is truncated between tests. Authorization tests sign in through the real
@@ -332,7 +369,13 @@ endpoint and assert the participation and role rules against real rows: shared a
 voyages, status filters, client-supplied organization ids, removed participation, viewer versus
 operator (re-read on every request), atomic creation with its audit event, concurrent reference
 numbering, and expired or revoked
-sessions.
+sessions. The trade string is tested there too: topology for every participant and a 404 for
+outsiders, the exact response fields, a stored chain that breaks the domain rules, and the
+`trade_contracts` constraints, exercised with plain SQL inserts (cross-voyage counterparties,
+duplicate positions, self-sales, branches) so that the database alone is shown to refuse them.
+
+No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
+string included) is not covered automatically. Playwright is the planned answer.
 
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
 cross-tab changes run through the real router, query client and cache. They assert, among other
@@ -355,15 +398,16 @@ that arrives after a sign-out or after another tab signed in as someone else.
 
 How later requirements land on the current structure:
 
-| Requirement              | Where it goes                                                                                                                                                                                                                                              |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                |
-| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                 |
-| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations |
-| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                    |
-| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                   |
-| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                            |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                              |
-| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                  |
-| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                               |
-| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                 |
+| Requirement              | Where it goes                                                                                                                                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                                                |
+| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                                                 |
+| Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details |
+| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                 |
+| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                                                    |
+| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                   |
+| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                            |
+| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                              |
+| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                  |
+| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                                                               |
+| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                 |

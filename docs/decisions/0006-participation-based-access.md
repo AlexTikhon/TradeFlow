@@ -31,7 +31,9 @@ Access to a voyage, and to everything attached to it, is derived from **particip
   body identical to that for a nonexistent voyage, so the existence of other parties' voyages is
   not disclosed.
 - Finer-grained visibility inside a voyage (contract-level confidentiality along the trade string)
-  is layered on top, per object type.
+  is layered on top, per object type. The first such rule is
+  [ADR 0010](0010-trade-string-visibility.md): participants see the trade string's topology, but
+  not contract terms.
 
 ## Alternatives considered
 

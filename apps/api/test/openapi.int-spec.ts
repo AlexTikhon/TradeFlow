@@ -37,6 +37,7 @@ describe('OpenAPI document', () => {
       expect.arrayContaining([
         '/api/voyages',
         '/api/voyages/{voyageId}',
+        '/api/voyages/{voyageId}/trade-string',
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
@@ -73,6 +74,7 @@ describe('OpenAPI document', () => {
     const protectedOperations = [
       operation('/api/voyages', 'get'),
       operation('/api/voyages/{voyageId}', 'get'),
+      operation('/api/voyages/{voyageId}/trade-string', 'get'),
       operation('/api/auth/me', 'get'),
       operation('/api/voyages', 'post'),
       operation('/api/vessels', 'get'),
@@ -117,5 +119,36 @@ describe('OpenAPI document', () => {
       expect.arrayContaining(['vesselId', 'commodityId', 'quantity', 'loadPortId', 'laycan']),
     );
     expect(schema?.properties).not.toHaveProperty('organizationId');
+  });
+
+  it('documents the trade string as topology only, with its 404', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = { responses: Record<string, { content?: Record<string, unknown> }> };
+    type Schema = { properties?: Record<string, unknown>; enum?: string[] };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+
+    const operation = document.paths['/api/voyages/{voyageId}/trade-string']?.get;
+    expect(Object.keys(operation?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '400', '401', '404']),
+    );
+    expect(operation?.responses['200']?.content?.['application/json']).toEqual({
+      schema: { $ref: '#/components/schemas/TradeString' },
+    });
+
+    const { schemas } = document.components;
+    expect(Object.keys(schemas.TradeString?.properties ?? {}).sort()).toEqual(['edges', 'parties']);
+    expect(Object.keys(schemas.TradeStringEdge?.properties ?? {}).sort()).toEqual([
+      'buyerOrganizationId',
+      'position',
+      'sellerOrganizationId',
+    ]);
+    expect(Object.keys(schemas.TradeStringParty?.properties ?? {}).sort()).toEqual([
+      'organization',
+      'role',
+    ]);
+    expect(schemas.TradeRole?.enum).toEqual(['EXPORTER', 'TRADER', 'FINAL_BUYER']);
   });
 });

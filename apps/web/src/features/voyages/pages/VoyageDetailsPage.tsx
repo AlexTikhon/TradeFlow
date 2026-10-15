@@ -9,6 +9,7 @@ import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { voyageQueries } from '../api/voyage.queries';
 import { ParticipantsCard } from '../components/ParticipantsCard';
+import { TradeStringCard } from '../components/TradeStringCard';
 import { VoyageFacts } from '../components/VoyageFacts';
 import { VoyageStatusChip } from '../components/VoyageStatusChip';
 
@@ -32,6 +33,11 @@ export function VoyageDetailsPage() {
     refetch,
   } = useQuery({
     ...voyageQueries.detail(scope, voyageId),
+    enabled: isValidId,
+  });
+  // Fetched alongside the voyage, not after it.
+  const tradeString = useQuery({
+    ...voyageQueries.tradeString(scope, voyageId),
     enabled: isValidId,
   });
 
@@ -73,6 +79,11 @@ export function VoyageDetailsPage() {
           />
           <Stack spacing={3}>
             <VoyageFacts voyage={voyage} />
+            <TradeStringCard
+              tradeString={tradeString.data}
+              error={tradeString.error}
+              onRetry={() => void tradeString.refetch()}
+            />
             <ParticipantsCard participants={voyage.participants} />
           </Stack>
         </div>

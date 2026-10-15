@@ -1,7 +1,7 @@
 import { queryOptions } from '@tanstack/react-query';
 import type { ListVoyagesQuery } from '@tradeflow/contracts';
 import type { ProtectedScope } from '../../../shared/auth/identity';
-import { fetchVoyage, fetchVoyages } from './voyages.api';
+import { fetchTradeString, fetchVoyage, fetchVoyages } from './voyages.api';
 
 /**
  * Query key hierarchy for voyages. Voyage data is visible only to participating organizations,
@@ -20,5 +20,11 @@ export const voyageQueries = {
     queryOptions({
       queryKey: [...voyageQueries.all(scope), 'detail', voyageId] as const,
       queryFn: ({ signal }) => fetchVoyage(voyageId, signal),
+    }),
+  /** Nested under the voyage's detail key, so invalidating a voyage refreshes its string too. */
+  tradeString: (scope: ProtectedScope, voyageId: string) =>
+    queryOptions({
+      queryKey: [...voyageQueries.all(scope), 'detail', voyageId, 'trade-string'] as const,
+      queryFn: ({ signal }) => fetchTradeString(voyageId, signal),
     }),
 };

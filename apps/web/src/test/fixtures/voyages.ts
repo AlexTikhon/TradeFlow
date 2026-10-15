@@ -1,4 +1,9 @@
-import type { VoyageDetail, VoyageSummary } from '@tradeflow/contracts';
+import type {
+  TradeString,
+  TradeStringParty,
+  VoyageDetail,
+  VoyageSummary,
+} from '@tradeflow/contracts';
 
 /** Typed against the shared contract, so fixtures cannot drift from what the API returns. */
 export function aVoyageDetail(overrides: Partial<VoyageDetail> = {}): VoyageDetail {
@@ -65,6 +70,69 @@ export function aVoyageDetail(overrides: Partial<VoyageDetail> = {}): VoyageDeta
     ...overrides,
   };
 }
+
+/** Trade parties from the demo data, by short name. */
+export const tradeParties = {
+  cerrado: {
+    role: 'EXPORTER',
+    organization: {
+      id: '01990000-0000-7000-8001-000000000001',
+      name: 'Cerrado Grãos Exportadora S.A.',
+      countryCode: 'BR',
+    },
+  },
+  lacustra: {
+    role: 'TRADER',
+    organization: {
+      id: '01990000-0000-7000-8001-000000000004',
+      name: 'Lacustra Commodities SA',
+      countryCode: 'CH',
+    },
+  },
+  nordlys: {
+    role: 'TRADER',
+    organization: {
+      id: '01990000-0000-7000-8001-000000000005',
+      name: 'Nordlys Trading B.V.',
+      countryCode: 'NL',
+    },
+  },
+  meridian: {
+    role: 'TRADER',
+    organization: {
+      id: '01990000-0000-7000-8001-000000000006',
+      name: 'Meridian Agri Trading Pte. Ltd.',
+      countryCode: 'SG',
+    },
+  },
+  rhine: {
+    role: 'FINAL_BUYER',
+    organization: {
+      id: '01990000-0000-7000-8001-000000000007',
+      name: 'Rhine Valley Crushers GmbH',
+      countryCode: 'DE',
+    },
+  },
+} satisfies Record<string, TradeStringParty>;
+
+/**
+ * The trade string through `chain`, in order: contract 1 from the first party to the second, and
+ * so on. Defaults to the string of `aVoyageDetail()`: Cerrado → Lacustra → Rhine Valley.
+ */
+export function aTradeString(
+  chain: TradeStringParty[] = [tradeParties.cerrado, tradeParties.lacustra, tradeParties.rhine],
+): TradeString {
+  return {
+    parties: chain,
+    edges: chain.slice(1).map((buyer, index) => ({
+      position: index + 1,
+      sellerOrganizationId: chain[index]?.organization.id ?? '',
+      buyerOrganizationId: buyer.organization.id,
+    })),
+  };
+}
+
+export const anEmptyTradeString = (): TradeString => ({ parties: [], edges: [] });
 
 export function aVoyageSummary(overrides: Partial<VoyageSummary> = {}): VoyageSummary {
   const { participants: _participants, createdAt: _createdAt, ...summary } = aVoyageDetail();

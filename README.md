@@ -18,23 +18,24 @@ approvals and an audit trail.
 > problems, but it is not a clone of any commercial product, and all organizations and people in the
 > demo data are fictional.
 
-## Status: Milestone 3 (first business write: create a voyage)
+## Status: Milestone 4 (trade string, read-only)
 
-| Area    | Delivered                                                                                                                                                                          |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth    | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                                             |
-| Access  | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                                        |
-| Roles   | `VIEWER` (read) and `OPERATOR` (read and create) per user, read on every request and checked in the creating service ([ADR 0008](docs/decisions/0008-user-roles.md))               |
-| Writes  | `POST /api/voyages`: starts `PLANNED`, creator's organization becomes `EXPORTER`, server-assigned `TF-<year>-<number>`, one audit event in the same transaction                    |
-| API     | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                    |
-| Web     | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details, and a creation form for operators; cache partitioned by identity and purged on every change |
-| Data    | PostgreSQL 18 schema with DB-enforced invariants, append-only audit events, and an idempotent demo seed (7 voyages, 12 organizations, 14 users)                                    |
-| Quality | Strict TypeScript, type-aware ESLint, Prettier, 185 automated tests (authorization and transactions tested against real PostgreSQL), GitHub Actions CI                             |
+| Area    | Delivered                                                                                                                                                                                                                                                                   |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth    | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                                                                                                                                      |
+| Access  | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                                                                                                                                 |
+| Roles   | `VIEWER` (read) and `OPERATOR` (read and create) per user, read on every request and checked in the creating service ([ADR 0008](docs/decisions/0008-user-roles.md))                                                                                                        |
+| Writes  | `POST /api/voyages`: starts `PLANNED`, creator's organization becomes `EXPORTER`, server-assigned `TF-<year>-<number>`, one audit event in the same transaction                                                                                                             |
+| Trade   | Sale contracts stored as edges (`trade_contracts`), row rules in the database, chain rules (linear, exporter → traders → final buyer) in the domain; every participant sees the topology, never contract terms ([ADR 0010](docs/decisions/0010-trade-string-visibility.md)) |
+| API     | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `GET /api/voyages/:voyageId/trade-string`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                  |
+| Web     | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order, and a creation form for operators; cache partitioned by identity and purged on every change                                            |
+| Data    | PostgreSQL 18 schema with DB-enforced invariants, append-only audit events, and an idempotent demo seed (7 voyages, 6 of them with a trade string, 12 organizations, 14 users)                                                                                              |
+| Quality | Strict TypeScript, type-aware ESLint, Prettier, 261 automated tests (authorization, transactions and constraints tested against real PostgreSQL), GitHub Actions CI                                                                                                         |
 
-Only voyage creation writes data. Editing voyages, adding participants, the trade string,
-notices, documents, an audit timeline in the UI, real-time updates and AI features are
-**intentionally not built yet**. See [Roadmap](#roadmap) and the
-[domain model](docs/domain-model.md#creating-a-voyage-initial-business-rule).
+Only voyage creation writes data; trade strings come from the seed and are read-only. Recording
+or editing a trade string, editing voyages, adding participants, notices, documents, an audit
+timeline in the UI, real-time updates and AI features are **intentionally not built yet**. See
+[Roadmap](#roadmap) and the [domain model](docs/domain-model.md#trade-string).
 
 ## Architecture at a glance
 
@@ -122,6 +123,11 @@ accounts show how visibility follows participation, and what each user role may 
 Operators see **New voyage** on the voyage list. A voyage they create gets the next reference
 (the seed's last is TF-2026-0007) and is visible to their organization only, as its exporter.
 
+Each voyage's details page draws its **trade string**. Worth a look as Claire Morel (Lacustra):
+TF-2026-0001 runs through two traders; on TF-2026-0005 Meridian sells to Lacustra, the reverse of
+the alphabetical order the participant list uses; TF-2026-0003 has no contracts yet and shows
+"Trade string not configured". Pieter Bakker (surveyor) sees the same strings, but is never in one.
+
 API docs are at <http://localhost:3000/api/docs>.
 
 > The demo password is public. Never run the seed against a database holding real users.
@@ -148,8 +154,11 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
 
 - **contracts**: schema behaviour (decimal strings, UUIDs, enums), including the create-voyage
   rules: exact quantities within `DECIMAL(14,3)`, ordered laycan, distinct ports, no extra fields.
+  The trade-string schema accepts only trade roles and positive positions.
 - **api, unit**: pure mapping logic (decimal precision, calendar dates, participant ordering),
-  password hashing, session tokens and cookies, and config validation.
+  the trade-string chain rules (gaps, disconnected contracts, branches, cycles, wrong roles at
+  either end or in between, service providers as counterparties, empty strings), password hashing,
+  session tokens and cookies, and config validation.
 - **api, integration**: boots the real Nest application against the real `tradeflow_test`
   database and asserts every response against the shared Zod contract. The global setup applies
   migrations and **refuses to run against a database whose name does not end in `_test`**.
@@ -158,13 +167,22 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
   client-supplied organization ids, removed participation, 404 for non-participants). Voyage
   creation is tested there too: 401 and 403, roles re-read on every request, validation without
   partial writes, exactly one audit event, rollback when the audit write fails, and unique,
-  consecutive references under concurrent creation.
+  consecutive references under concurrent creation. The trade string: ordered topology for every
+  participant, the same 404 for outsiders as for a missing voyage, exactly the topology fields in
+  the response, a 500 for a stored chain that breaks the domain rules, and the `trade_contracts`
+  constraints hit with plain SQL (cross-voyage counterparties, duplicate positions, self-sales,
+  branches).
 - **web**: renders the real route tree with real providers. Only the network is faked, by MSW, and
   unhandled requests fail the test. Auth flows run against a stateful fake of the auth API,
   including sign-out during an in-flight request, switching users, and a change made in another
   tab. The voyage form is tested for success, validation, failures, viewers, and a response that
-  arrives after the identity changed. The suite runs in `America/Sao_Paulo` time so date-shifting
-  bugs show up.
+  arrives after the identity changed. The trade string is tested for contract order with several
+  traders (against both name and response order), the empty state, its own error and retry, and a
+  response whose edges name unlisted parties. The suite runs in `America/Sao_Paulo` time so
+  date-shifting bugs show up.
+- **Not covered:** nothing runs in a real browser yet (web tests use jsdom), so layout, including
+  the responsive trade string, is not verified automatically. Playwright end-to-end tests are
+  planned.
 
 ## Roadmap
 
@@ -172,7 +190,10 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
    voyage access. Still open: sign-in rate limiting, SSO.
    **First business write (done, Milestone 3).** Voyage creation with viewer/operator roles,
    transactional audit events and server-assigned references.
-2. **Trade string.** Ordered sale contracts between adjacent parties.
+2. **Trade string (read-only, Milestone 4).** Ordered sale contracts between adjacent parties,
+   validated as a linear chain and visible to participants as topology. Next: recording and
+   editing it through the API, and contract details visible only to each contract's two
+   counterparties.
 3. **Notices and documentary instructions.** Versioned, directional business objects with
    optimistic concurrency and an audit trail.
 4. **Documents.** Object storage, versions, access checks.
