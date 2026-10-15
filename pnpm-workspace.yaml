@@ -1,0 +1,19 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Dependency install scripts are denied by default; each allowance is deliberate.
+allowBuilds:
+  '@prisma/engines': true # Prisma CLI engine binaries
+  prisma: true
+  '@swc/core': true # native binary used to compile Nest decorators in tests
+  esbuild: true # native binary used by tsx (seed script)
+  '@scarf/scarf': false # install-time telemetry pulled in by swagger-ui-dist
+  msw: false # only copies a browser service worker; we use MSW in Node tests only
+
+# Auto-installed peers (Prisma Studio -> react, Vitest -> jsdom) would otherwise resolve to the
+# newest publish and bypass pnpm's release-age quarantine. Pinning also guarantees one React copy.
+overrides:
+  react: 19.3.0
+  react-dom: 19.3.0
+  jsdom: 30.1.2

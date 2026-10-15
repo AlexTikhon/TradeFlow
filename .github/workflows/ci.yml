@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tradeflow
+          POSTGRES_PASSWORD: tradeflow
+          POSTGRES_DB: tradeflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tradeflow -d tradeflow_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      TEST_DATABASE_URL: postgresql://tradeflow:tradeflow@localhost:5432/tradeflow_test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

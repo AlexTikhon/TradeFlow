@@ -1,0 +1,24 @@
+name: tradeflow
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: tradeflow
+      POSTGRES_PASSWORD: tradeflow
+      POSTGRES_DB: tradeflow
+    ports:
+      # 5433 on the host so a locally installed Postgres on 5432 does not conflict.
+      - '5433:5432'
+    volumes:
+      # Postgres 18 images keep data under /var/lib/postgresql/<major>/docker.
+      - postgres-data:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tradeflow -d tradeflow']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:
