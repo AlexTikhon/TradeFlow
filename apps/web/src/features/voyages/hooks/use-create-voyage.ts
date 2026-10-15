@@ -18,8 +18,8 @@ import { createVoyage } from '../api/voyages.api';
  *
  * A 401 means the session the request was sent under has ended. If it is still the current
  * session, the client signs out locally; if a transition has happened since (even back to the
- * same user), the 401 is about a session that is already gone and changes nothing. The write is
- * never retried.
+ * same user), or a session check has adopted another identity, the 401 is about a session that is
+ * already gone and changes nothing. The write is never retried.
  */
 export function useCreateVoyage() {
   const queryClient = useQueryClient();

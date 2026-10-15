@@ -440,6 +440,75 @@ describe('NewVoyagePage', () => {
       // Only the sign-out Ana asked for reached the server.
       expect(session.signOutRequests).toBe(1);
     });
+
+    it('does not sign out another user a session check adopted without any notification', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ hold: true, respond: unauthenticated });
+      const { router, user, session, queryClient } = renderRoute('/voyages/new', {
+        accounts: [ana, claire],
+      });
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      // The cookie now belongs to Claire, and no other tab says so: only a session check finds out.
+      session.current = claire;
+      await queryClient.refetchQueries({ queryKey: ['session'] });
+      expect(
+        await screen.findByText(/Lacustra Commodities SA will be the exporter/),
+      ).toBeInTheDocument();
+      await screen.findAllByRole('option', { name: 'Santos (BRSSZ)' });
+      const claireScope = `${claire.user.id}:${claire.organization.id}`;
+      const claireQueries = protectedQueries(queryClient).map((query) => query.queryHash);
+      expect(claireQueries).not.toEqual([]);
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.queryKey[1]).toBe(claireScope);
+      }
+
+      creation.release();
+      await waitFor(() => {
+        expect(failedMutations(queryClient)).toHaveLength(1);
+      });
+
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.getByText('Claire Morel')).toBeInTheDocument();
+      expect(screen.getByRole('form', { name: 'New voyage' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(protectedQueries(queryClient).map((query) => query.queryHash)).toEqual(claireQueries);
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.state.isInvalidated).toBe(false);
+      }
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('still ends the session after a session check confirmed the same user', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ hold: true, respond: unauthenticated });
+      const { router, user, session, queryClient } = renderRoute('/voyages/new');
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      // The tab checks the session while the request is in flight: still Ana.
+      const checksBefore = session.meRequests;
+      await queryClient.refetchQueries({ queryKey: ['session'] });
+      expect(session.meRequests).toBe(checksBefore + 1);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      // Then her session expires on the server, and her request is refused.
+      session.current = null;
+      creation.release();
+
+      expect(
+        await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+      ).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe('/sign-in');
+      expect(queryClient.getQueryData(['session'])).toBeNull();
+      await waitFor(() => {
+        expect(protectedQueries(queryClient)).toEqual([]);
+      });
+      expect(session.signOutRequests).toBe(0);
+    });
   });
 
   it('does not offer creation to a viewer', async () => {

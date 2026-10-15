@@ -201,25 +201,37 @@ async function publishIdentity(
 }
 
 /**
- * The session as it stands now. It changes with every identity transition, including signing out
- * and back in as the same user, so it tells sessions apart where identities cannot. Capture it
- * when sending a request whose 401 must be attributed to the session it was sent under.
+ * The session as it stands now: the transition it belongs to and the identity published for it.
+ * The generation changes with every identity transition, including signing out and back in as
+ * the same user, so it tells sessions apart where identities cannot. The identity also changes
+ * when a session check adopts someone else (the cookie changed behind this tab's back with no
+ * notification), which is not a transition of its own. Capture it when sending a request whose
+ * 401 must be attributed to the session it was sent under.
  */
-export type SessionEpoch = number & { readonly __brand: 'SessionEpoch' };
+export interface SessionEpoch {
+  readonly generation: number;
+  readonly identity: CurrentUser | null | undefined;
+}
 
 export function currentSessionEpoch(queryClient: QueryClient): SessionEpoch {
-  return controlOf(queryClient).generation as SessionEpoch;
+  return {
+    generation: controlOf(queryClient).generation,
+    identity: queryClient.getQueryData<CurrentUser | null>(SESSION_KEY),
+  };
 }
 
 /**
  * A request sent during `epoch` was answered 401: that session has ended (expired, or revoked
  * elsewhere). Signs out locally, like a 401 on protected data: requests are aborted, data dropped,
  * and the auth boundary sends the user to sign in. Nothing is sent to the server, which has ended
- * the session already. If any transition started since the request was sent, the 401 speaks for
- * a session that is already gone, and the current one (whoever it belongs to) is left alone.
+ * the session already. If any transition started since the request was sent, or a session check
+ * has since adopted another identity, the 401 speaks for a session that is already gone, and the
+ * current one (whoever it belongs to) is left alone.
  */
 export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpoch): Promise<void> {
-  if (controlOf(queryClient).generation !== epoch) return;
+  const control = controlOf(queryClient);
+  const current = queryClient.getQueryData<CurrentUser | null>(SESSION_KEY);
+  if (control.generation !== epoch.generation || !sameIdentity(current, epoch.identity)) return;
   await switchIdentity(queryClient, null);
 }
 

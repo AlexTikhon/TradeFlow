@@ -6,9 +6,11 @@ import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../test/fixtures/au
 import { serveSession } from '../../test/msw-server';
 import {
   checkSession,
+  currentSessionEpoch,
   endSession,
   getSignOutState,
   sessionChangedElsewhere,
+  sessionExpired,
   sessionQuery,
   StaleSessionCheckError,
   startSession,
@@ -329,5 +331,63 @@ describe('session transitions', () => {
     await expect(staleCheck).rejects.toBeInstanceOf(StaleSessionCheckError);
     expect(sessionOf(queryClient)).toEqual(claire);
     expect(queryClient.getQueryData(voyagesOf(claire))).toEqual(['TF-CLAIRE-ONLY']);
+  });
+});
+
+describe('a 401 attributed to the session it was sent under', () => {
+  const revalidate = (queryClient: QueryClient) =>
+    queryClient.query({ ...sessionQuery, staleTime: 0 });
+
+  it('ends that session while it is still the current one', async () => {
+    serveSession(null);
+    const queryClient = signedInClient(ana);
+    queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
+    const epoch = currentSessionEpoch(queryClient);
+
+    await sessionExpired(queryClient, epoch);
+
+    expect(sessionOf(queryClient)).toBeNull();
+    expect(queryClient.getQueryData(voyagesOf(ana))).toBeUndefined();
+  });
+
+  it('still ends it after a session check confirmed the same identity', async () => {
+    const session = serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+    session.current = null;
+    await sessionExpired(queryClient, epoch);
+
+    expect(sessionOf(queryClient)).toBeNull();
+  });
+
+  it('leaves alone another identity a session check adopted since, without a transition', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    // The cookie changed behind this tab's back, and nothing announced it.
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    queryClient.setQueryData(voyagesOf(claire), ['TF-CLAIRE-ONLY']);
+    await sessionExpired(queryClient, epoch);
+
+    expect(sessionOf(queryClient)).toEqual(claire);
+    expect(queryClient.getQueryData(voyagesOf(claire))).toEqual(['TF-CLAIRE-ONLY']);
+  });
+
+  it('leaves alone the same user after they signed out and back in', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    await endSession(queryClient).settled;
+    await startSession(queryClient, credentialsOf(ana));
+    queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
+    await sessionExpired(queryClient, epoch);
+
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(queryClient.getQueryData(voyagesOf(ana))).toEqual(['TF-ANA-ONLY']);
   });
 });
