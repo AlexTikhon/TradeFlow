@@ -4,10 +4,14 @@ import {
   ContractDocumentSchema,
   DocumentFileSchema,
   documentEntityTag,
+  type DocumentReview,
+  DocumentReviewSchema,
   DocumentVersionNumberParamSchema,
   type DocumentVersion,
   DocumentVersionSchema,
   MAX_DOCUMENT_BYTES,
+  REJECTION_REASON_MAX_LENGTH,
+  ReviewDocumentVersionRequestSchema,
 } from './documents.js';
 
 // This package is compiled without DOM or Node types; Node provides `File` at runtime.
@@ -28,7 +32,15 @@ const version = (number: number): DocumentVersion => ({
   sha256: 'a'.repeat(64),
   uploadedAt: '2026-10-16T09:00:00.000Z',
   uploadedBy: { name: 'Ana Souza', organization: seller },
+  review: null,
 });
+
+const rejection: DocumentReview = {
+  decision: 'REJECTED',
+  reason: 'The consignee does not match the instructions.',
+  reviewedAt: '2026-10-16T10:00:00.000Z',
+  reviewedBy: { name: 'Claire Morel', organization: buyer },
+};
 
 const document: ContractDocument = {
   id: '01990000-0000-7000-800b-000000000001',
@@ -42,8 +54,10 @@ const document: ContractDocument = {
   },
   revisionNumber: 1,
   documentType: 'BILL_OF_LADING',
+  // Three uploads and one review: version 2 was rejected, version 3 is pending.
+  version: 4,
   currentVersion: version(3),
-  previousVersions: [version(2), version(1)],
+  previousVersions: [{ ...version(2), review: rejection }, version(1)],
 };
 
 const pdf = (size: number, type = 'application/pdf') =>
@@ -86,10 +100,28 @@ describe('ContractDocumentSchema', () => {
     expect(
       ContractDocumentSchema.safeParse({
         ...document,
+        version: 1,
         currentVersion: version(1),
         previousVersions: [],
       }).success,
     ).toBe(true);
+  });
+
+  it('counts every upload and every review in the version', () => {
+    const approved: DocumentVersion = {
+      ...version(3),
+      review: { ...rejection, decision: 'APPROVED', reason: null },
+    };
+    expect(
+      ContractDocumentSchema.safeParse({ ...document, version: 5, currentVersion: approved })
+        .success,
+    ).toBe(true);
+    for (const wrong of [3, 5]) {
+      const result = ContractDocumentSchema.safeParse({ ...document, version: wrong });
+      expect(result.error?.issues.map(({ path, message }) => [path, message])).toEqual([
+        [['version'], 'The version counts every upload and every review'],
+      ]);
+    }
   });
 
   it.each<[string, Partial<ContractDocument>]>([
@@ -99,6 +131,49 @@ describe('ContractDocumentSchema', () => {
     ['a document type nobody requires', { documentType: 'PACKING_LIST' as 'BILL_OF_LADING' }],
   ])('refuses %s', (_case, change) => {
     expect(ContractDocumentSchema.safeParse({ ...document, ...change }).success).toBe(false);
+  });
+});
+
+describe('ReviewDocumentVersionRequestSchema', () => {
+  it('accepts an approval, and a rejection with its reason trimmed', () => {
+    expect(ReviewDocumentVersionRequestSchema.parse({ decision: 'APPROVED' })).toEqual({
+      decision: 'APPROVED',
+    });
+    expect(
+      ReviewDocumentVersionRequestSchema.parse({ decision: 'REJECTED', reason: '  Wrong port. ' }),
+    ).toEqual({ decision: 'REJECTED', reason: 'Wrong port.' });
+    expect(
+      ReviewDocumentVersionRequestSchema.safeParse({
+        decision: 'REJECTED',
+        reason: 'x'.repeat(REJECTION_REASON_MAX_LENGTH),
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each<[string, unknown]>([
+    ['a rejection without a reason', { decision: 'REJECTED' }],
+    ['a blank reason', { decision: 'REJECTED', reason: ' \n\t ' }],
+    ['a reason over 1000 characters', { decision: 'REJECTED', reason: 'x'.repeat(1001) }],
+    ['an approval with a reason', { decision: 'APPROVED', reason: 'Fine.' }],
+    ['another decision', { decision: 'PENDING' }],
+    ['a reviewer named by the client', { decision: 'APPROVED', reviewedBy: 'someone' }],
+    ['a time chosen by the client', { decision: 'APPROVED', reviewedAt: '2026-10-16T10:00:00Z' }],
+    ['no decision', {}],
+  ])('refuses %s', (_case, body) => {
+    expect(ReviewDocumentVersionRequestSchema.safeParse(body).success).toBe(false);
+  });
+});
+
+describe('DocumentReviewSchema', () => {
+  it('pairs a rejection with a reason, and an approval with none', () => {
+    expect(DocumentReviewSchema.safeParse(rejection).success).toBe(true);
+    expect(
+      DocumentReviewSchema.safeParse({ ...rejection, decision: 'APPROVED', reason: null }).success,
+    ).toBe(true);
+    expect(DocumentReviewSchema.safeParse({ ...rejection, reason: null }).success).toBe(false);
+    expect(DocumentReviewSchema.safeParse({ ...rejection, decision: 'APPROVED' }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -113,7 +188,7 @@ describe('DocumentVersionNumberParamSchema', () => {
 });
 
 describe('documentEntityTag', () => {
-  it('is the strong entity tag of the current version number', () => {
-    expect(documentEntityTag(3)).toBe('"3"');
+  it('is the strong entity tag of the document version', () => {
+    expect(documentEntityTag(4)).toBe('"4"');
   });
 });

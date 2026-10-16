@@ -29,13 +29,73 @@ import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import type { DocumentTarget } from '../api/documents.api';
 import { DOCUMENT_LABELS } from '../domain/documentary-instructions';
 import {
+  canReviewDocuments,
   canUploadDocuments,
+  decisionVerb,
   findDocument,
   formatFileSize,
+  REVIEW_STATUS_LABELS,
+  type ReviewStatus,
+  reviewStatusOf,
   shortChecksum,
 } from '../domain/documents';
 import { useDownloadDocument } from '../hooks/use-document-commands';
+import { DocumentReviewForm } from './DocumentReviewForm';
 import { DocumentUploadForm } from './DocumentUploadForm';
+
+const STATUS_COLORS = {
+  PENDING: 'warning',
+  APPROVED: 'success',
+  REJECTED: 'error',
+  NOT_REVIEWED: 'default',
+} as const satisfies Record<ReviewStatus, string>;
+
+interface ReviewLineProps {
+  version: DocumentVersion;
+  status: ReviewStatus;
+  buyerName: string;
+}
+
+/** The decision on one version, or why there is none, under what was uploaded. */
+function ReviewLine({ version, status, buyerName }: ReviewLineProps) {
+  const { review } = version;
+  if (!review) {
+    return (
+      <Typography variant="caption" color="text.secondary" component="p">
+        {status === 'PENDING' ? `Pending review by ${buyerName}` : 'Not reviewed'}
+      </Typography>
+    );
+  }
+  const verb = decisionVerb(review);
+  return (
+    <Box>
+      <Typography
+        variant="caption"
+        component="p"
+        color={review.decision === 'REJECTED' ? 'error' : 'success.main'}
+      >
+        {verb.charAt(0).toUpperCase() + verb.slice(1)} by {review.reviewedBy.name} (
+        {review.reviewedBy.organization.name}) on {formatInstant(review.reviewedAt)}
+      </Typography>
+      {review.reason && (
+        <Typography
+          variant="body2"
+          aria-label={`Reason for rejecting version ${version.number}`}
+          sx={{
+            mt: 0.5,
+            pl: 1,
+            borderLeft: 2,
+            borderColor: 'error.light',
+            overflowWrap: 'anywhere',
+            whiteSpace: 'pre-line',
+          }}
+        >
+          {review.reason}
+        </Typography>
+      )}
+    </Box>
+  );
+}
 
 function describeDownloadFailure(error: Error): string {
   if (error instanceof ApiError && error.status === 404) {
@@ -47,12 +107,22 @@ function describeDownloadFailure(error: Error): string {
 interface VersionLineProps {
   version: DocumentVersion;
   label: string;
+  /** Whether it can still be decided on: the latest file, under the current revision. */
+  reviewable: boolean;
+  buyerName: string;
   downloading: boolean;
   onDownload: () => void;
 }
 
-/** One version: what was uploaded, by whom and when, and a way to get it. */
-function VersionLine({ version, label, downloading, onDownload }: VersionLineProps) {
+/** One version: what was uploaded, by whom and when, the decision on it, and a way to get it. */
+function VersionLine({
+  version,
+  label,
+  reviewable,
+  buyerName,
+  downloading,
+  onDownload,
+}: VersionLineProps) {
   const { uploadedBy } = version;
   return (
     <Stack
@@ -68,6 +138,11 @@ function VersionLine({ version, label, downloading, onDownload }: VersionLinePro
           Uploaded {formatInstant(version.uploadedAt)} by {uploadedBy.name} (
           {uploadedBy.organization.name}) · SHA-256 {shortChecksum(version.sha256)}
         </Typography>
+        <ReviewLine
+          version={version}
+          status={reviewStatusOf(version, reviewable)}
+          buyerName={buyerName}
+        />
       </Box>
       <Button
         size="small"
@@ -87,22 +162,38 @@ function VersionLine({ version, label, downloading, onDownload }: VersionLinePro
 interface DocumentItemProps {
   target: DocumentTarget;
   document: ContractDocument | null;
+  /** The contract's buyer, who reviews it. */
+  buyerName: string;
+  /** Whether it is under the revision in force: only then can it be uploaded or decided on. */
+  current: boolean;
   /** Whether the user may upload it: the current revision, the seller's operator. */
   uploads: boolean;
   /** Whether to say that an operator could upload it: the current revision, the seller. */
   explainUploads: boolean;
+  /** Whether the user may decide on it: the current revision, the buyer's operator. */
+  reviews: boolean;
+  /** Whether to say that an operator could decide on it: the current revision, the buyer. */
+  explainReviews: boolean;
   onReviewLatest: () => Promise<unknown>;
 }
 
-/** One required document: its current version, earlier ones, and the upload form if allowed. */
+/**
+ * One required document: its current version and its status, earlier versions with the
+ * decisions made on them, and the upload or review form if the user may use one.
+ */
 function DocumentItem({
   target,
   document,
+  buyerName,
+  current,
   uploads,
   explainUploads,
+  reviews,
+  explainReviews,
   onReviewLatest,
 }: DocumentItemProps) {
   const label = DOCUMENT_LABELS[target.documentType];
+  const status = document && reviewStatusOf(document.currentVersion, current);
   const { download, error, pending } = useDownloadDocument(target.voyageId);
   const downloadVersion = (version: DocumentVersion) => {
     download({ target, versionNumber: version.number, fileName: version.fileName });
@@ -128,14 +219,18 @@ function DocumentItem({
             size="small"
             variant="outlined"
             label={document ? `Version ${document.currentVersion.number}` : 'Not uploaded yet'}
-            color={document ? 'success' : 'default'}
           />
+          {status && (
+            <Chip size="small" label={REVIEW_STATUS_LABELS[status]} color={STATUS_COLORS[status]} />
+          )}
         </Stack>
 
         {document && (
           <VersionLine
             version={document.currentVersion}
             label={label}
+            reviewable={current}
+            buyerName={buyerName}
             downloading={isDownloading(document.currentVersion)}
             onDownload={() => {
               downloadVersion(document.currentVersion);
@@ -164,6 +259,8 @@ function DocumentItem({
                     <VersionLine
                       version={version}
                       label={label}
+                      reviewable={false}
+                      buyerName={buyerName}
                       downloading={isDownloading(version)}
                       onDownload={() => {
                         downloadVersion(version);
@@ -175,6 +272,23 @@ function DocumentItem({
             </AccordionDetails>
           </Accordion>
         )}
+
+        {document &&
+          (reviews ? (
+            <DocumentReviewForm
+              target={target}
+              label={label}
+              latest={document}
+              onReviewLatest={onReviewLatest}
+            />
+          ) : (
+            explainReviews &&
+            status === 'PENDING' && (
+              <Typography variant="body2" color="text.secondary">
+                An operator in your organization can approve or reject it.
+              </Typography>
+            )
+          ))}
 
         {uploads ? (
           <DocumentUploadForm
@@ -243,6 +357,7 @@ export function RevisionDocuments({
   if (shown.length === 0) return null;
 
   const uploads = current && canUploadDocuments(identity, contract);
+  const reviews = current && canReviewDocuments(identity, contract);
   return (
     <Box component="section" aria-labelledby={headingId}>
       <Typography variant="subtitle2" component="h4" id={headingId} sx={{ mb: 1 }}>
@@ -251,8 +366,8 @@ export function RevisionDocuments({
       {current && (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
           {contract.side === 'SELLER'
-            ? `Present each document revision ${revision.number} requires. Uploads go to ${contract.buyer.name} only.`
-            : `What ${contract.seller.name} presents against revision ${revision.number}.`}
+            ? `Present each document revision ${revision.number} requires. Uploads go to ${contract.buyer.name} only, who approves or rejects each version.`
+            : `What ${contract.seller.name} presents against revision ${revision.number}. Each latest version is approved, or rejected with a reason, by your organization.`}
         </Typography>
       )}
       {documents.error && (
@@ -281,8 +396,12 @@ export function RevisionDocuments({
               documentType: type,
             }}
             document={presented(type)}
+            buyerName={contract.buyer.name}
+            current={current}
             uploads={uploads}
             explainUploads={current && contract.side === 'SELLER'}
+            reviews={reviews}
+            explainReviews={current && contract.side === 'BUYER'}
             onReviewLatest={() => documents.refetch()}
           />
         ))}

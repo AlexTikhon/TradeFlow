@@ -1,8 +1,10 @@
 import {
   applyDecorators,
+  Body,
   Controller,
   Get,
   Headers,
+  HttpCode,
   HttpStatus,
   Logger,
   NotFoundException,
@@ -45,6 +47,8 @@ import {
   RevisionNumberParamSchema,
   type RequiredDocumentType,
   REQUIRED_DOCUMENT_TYPES,
+  type ReviewDocumentVersionRequest,
+  ReviewDocumentVersionRequestSchema,
   VoyageIdParamSchema,
 } from '@tradeflow/contracts';
 import type { Request, Response } from 'express';
@@ -55,7 +59,11 @@ import {
   type SingleFileLimits,
 } from '../../common/http/multipart-file.js';
 import { schemaRef } from '../../common/http/openapi.js';
-import { writePrecondition } from '../../common/http/preconditions.js';
+import {
+  PreconditionRequiredException,
+  versionsFromIfMatch,
+  writePrecondition,
+} from '../../common/http/preconditions.js';
 import { toProblemDetails } from '../../common/http/problem-details.filter.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
@@ -67,6 +75,16 @@ const voyageIdPipe = () => new ZodValidationPipe(VoyageIdParamSchema);
 const contractIdPipe = () => new ZodValidationPipe(ContractIdParamSchema);
 const revisionNumberPipe = () => new ZodValidationPipe(RevisionNumberParamSchema);
 const documentTypePipe = () => new ZodValidationPipe(DocumentTypeParamSchema);
+const versionNumberPipe = () => new ZodValidationPipe(DocumentVersionNumberParamSchema);
+
+const ETAG_HEADER = {
+  ETag: {
+    description:
+      'The document’s new version, e.g. `"4"`: it counts uploads and reviews. Send it back in ' +
+      'If-Match with the next replacement or review.',
+    schema: { type: 'string' },
+  },
+} as const;
 
 const DOCUMENT_PATH =
   'contracts/:contractId/documentary-instructions/revisions/:revisionNumber/documents/:documentType';
@@ -112,8 +130,9 @@ export class DocumentsController {
     summary: 'List the documents under your contracts on a voyage',
     description:
       'Only documents under contracts your organization is the seller or the buyer of, viewers ' +
-      'included: in contract order, newest instruction revision first, each with every version. ' +
-      'Documents of superseded revisions are included. Other participants get an empty list.',
+      'included: in contract order, newest instruction revision first, each with its version ' +
+      'and every file version with the decision made on it. Documents of superseded revisions ' +
+      'are included. Other participants get an empty list.',
   })
   @ApiOkResponse({ schema: schemaRef('DocumentListResponse') })
   @ApiNotFoundResponse({
@@ -139,15 +158,16 @@ export class DocumentsController {
       'documentary instructions requires. The body is `multipart/form-data` with exactly one ' +
       `part, the PDF in \`${DOCUMENT_FILE_FIELD}\`: at most 10 MiB, and it must start like a PDF ` +
       'file whatever its name or declared type. Conditional: `If-None-Match: *` for the first ' +
-      'version, `If-Match` with the current version to replace it. Every version is kept. The ' +
-      'uploader and the time come from the session and the server; the storage location is ' +
-      "the server's and never derived from the file name.",
+      'version, `If-Match` with the document’s version (which counts uploads and reviews) to ' +
+      'replace it. Every version is kept, with the decision made on it; the new one starts ' +
+      'pending review. The uploader and the time come from the session and the server; the ' +
+      "storage location is the server's and never derived from the file name.",
   })
   @ApiDocumentParams()
   @ApiHeader({
     name: 'If-Match',
     required: false,
-    description: 'The entity tag of the version this upload replaces, e.g. `"2"`.',
+    description: 'The entity tag of the document version this upload is based on, e.g. `"3"`.',
   })
   @ApiHeader({
     name: 'If-None-Match',
@@ -171,11 +191,11 @@ export class DocumentsController {
   })
   @ApiCreatedResponse({
     description:
-      'The version was stored. `Location` points at its content; `ETag` names it for the next ' +
-      'replacement.',
+      'The version was stored. `Location` points at its content; `ETag` is the document’s new ' +
+      'version, for the next replacement or review.',
     schema: schemaRef('ContractDocument'),
     headers: {
-      ETag: { description: 'The new current version, e.g. `"3"`.', schema: { type: 'string' } },
+      ...ETAG_HEADER,
       Location: { description: 'The new version’s content.', schema: { type: 'string' } },
     },
   })
@@ -196,8 +216,8 @@ export class DocumentsController {
   })
   @ApiPreconditionFailedResponse({
     description:
-      'The document changed since the version in If-Match, has no version yet, or (with ' +
-      'If-None-Match: *) already has one. Nothing was stored.',
+      'The document changed (a new file or a decision) since the version in If-Match, has no ' +
+      'version yet, or (with If-None-Match: *) already has one. Nothing was stored.',
     schema: schemaRef('ProblemDetails'),
   })
   @ApiPayloadTooLargeResponse({
@@ -238,10 +258,94 @@ export class DocumentsController {
     if (!document) {
       throw new NotFoundException(CONTRACT_NOT_FOUND);
     }
-    const versionNumber = document.currentVersion.number;
     response.status(HttpStatus.CREATED);
-    response.location(contentPath(target, versionNumber));
-    response.setHeader('ETag', documentEntityTag(versionNumber));
+    response.location(contentPath(target, document.currentVersion.number));
+    response.setHeader('ETag', documentEntityTag(document.version));
+    return document;
+  }
+
+  @Post(`${DOCUMENT_PATH}/versions/:versionNumber/review`)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Approve or reject one version of a document',
+    description:
+      "Operators of the contract's buyer only. Decides on exactly this file version, which must " +
+      'be the latest one, under the current revision of the documentary instructions. A ' +
+      'rejection needs a reason. Once per version and final: a decision is never changed or ' +
+      'reopened; a replacement from the seller starts pending and is reviewed on its own. ' +
+      'Conditional: `If-Match` must carry the document’s version as you read it. Who decided, ' +
+      'for which organization and when come from the session and the server.',
+  })
+  @ApiDocumentParams()
+  @ApiParam({ name: 'versionNumber', schema: { type: 'integer', minimum: 1 } })
+  @ApiHeader({
+    name: 'If-Match',
+    required: true,
+    description: 'The entity tag of the document version you read, e.g. `"3"`.',
+  })
+  @ApiBody({ schema: schemaRef('ReviewDocumentVersionRequest') })
+  @ApiOkResponse({
+    description: 'Decided.',
+    schema: schemaRef('ContractDocument'),
+    headers: ETAG_HEADER,
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Your role does not allow reviewing documents, your organization is the seller under this ' +
+      'contract, or the request was cross-site',
+    schema: schemaRef('ProblemDetails'),
+  })
+  @ApiNotFoundResponse({
+    description: `${NOT_VISIBLE}, no such revision, document or version, or the revision does not require this document`,
+    schema: schemaRef('ProblemDetails'),
+  })
+  @ApiConflictResponse({
+    description:
+      'The version has been replaced by a newer one, already has a decision, or its revision ' +
+      'has been superseded',
+    schema: schemaRef('ProblemDetails'),
+  })
+  @ApiPreconditionFailedResponse({
+    description:
+      'The document changed (a new file or a decision) since the version in If-Match. Nothing ' +
+      'was recorded.',
+    schema: schemaRef('ProblemDetails'),
+  })
+  @ApiResponse({
+    status: HttpStatus.PRECONDITION_REQUIRED,
+    description:
+      'The review does not name the document version it is based on (no If-Match, or `*`)',
+    schema: schemaRef('ProblemDetails'),
+  })
+  async review(
+    @CurrentPrincipal() principal: Principal,
+    @Param('voyageId', voyageIdPipe()) voyageId: string,
+    @Param('contractId', contractIdPipe()) contractId: string,
+    @Param('revisionNumber', revisionNumberPipe()) revisionNumber: number,
+    @Param('documentType', documentTypePipe()) documentType: RequiredDocumentType,
+    @Param('versionNumber', versionNumberPipe()) versionNumber: number,
+    @Body(new ZodValidationPipe(ReviewDocumentVersionRequestSchema))
+    body: ReviewDocumentVersionRequest,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<ContractDocument> {
+    const expectedVersions = versionsFromIfMatch(ifMatch);
+    if (!expectedVersions) {
+      throw new PreconditionRequiredException(
+        'Send If-Match with the version of the document you reviewed.',
+      );
+    }
+    const document = await this.documents.review(
+      principal,
+      { voyageId, contractId, revisionNumber, documentType },
+      versionNumber,
+      body,
+      expectedVersions,
+    );
+    if (!document) {
+      throw new NotFoundException(CONTRACT_NOT_FOUND);
+    }
+    response.setHeader('ETag', documentEntityTag(document.version));
     return document;
   }
 
@@ -251,7 +355,8 @@ export class DocumentsController {
     description:
       'The bytes exactly as uploaded, as an attachment (never displayed inline), named with the ' +
       'file name they were uploaded with. For users of the contract’s seller and buyer, viewers ' +
-      'included. Bytes that no longer match their checksum are never served.',
+      'included. Bytes that no longer match their checksum are never served. Not conditional: ' +
+      'a file version never changes, so it carries no entity tag.',
   })
   @ApiDocumentParams()
   @ApiParam({ name: 'versionNumber', schema: { type: 'integer', minimum: 1 } })
@@ -280,8 +385,7 @@ export class DocumentsController {
     @Param('contractId', contractIdPipe()) contractId: string,
     @Param('revisionNumber', revisionNumberPipe()) revisionNumber: number,
     @Param('documentType', documentTypePipe()) documentType: RequiredDocumentType,
-    @Param('versionNumber', new ZodValidationPipe(DocumentVersionNumberParamSchema))
-    versionNumber: number,
+    @Param('versionNumber', versionNumberPipe()) versionNumber: number,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ): Promise<StreamableFile> {

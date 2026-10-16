@@ -1,6 +1,7 @@
 # 0013. Documents: private PDF versions per instruction revision, received outside the transaction (MVP)
 
-- **Status:** Accepted
+- **Status:** Accepted. The concurrency token is amended by [ADR 0014](0014-document-review.md):
+  uploads are conditional on the document's version, which counts reviews as well as uploads.
 - **Date:** 2026-10-16
 
 ## Context
@@ -215,6 +216,7 @@ connection rather than ending a short response normally.
 - Downloads read each file twice (check, then serve), bounded by the 10 MiB limit.
 - The web client downloads through `fetch` and a blob, so a 401 signs out like any other request;
   files are held in memory while they are saved, again bounded by the limit.
-- No virus scanning, no approval or rejection by the buyer, no deletion: none is in this slice.
+- No virus scanning, no deletion: neither is in this slice. Approval and rejection by the buyer
+  came next ([ADR 0014](0014-document-review.md)).
 - The demo seed removes documents on its own voyages when it re-seeds, and their bytes after its
   transaction commits.

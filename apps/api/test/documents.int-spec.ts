@@ -409,6 +409,7 @@ describe('Documents', () => {
         },
         revisionNumber: 1,
         documentType: 'BILL_OF_LADING',
+        version: 1,
         currentVersion: {
           number: 1,
           fileName: 'bill-of-lading.pdf',
@@ -417,6 +418,7 @@ describe('Documents', () => {
           sha256: sha256(bytes).toString('hex'),
           uploadedAt: expect.any(String) as string,
           uploadedBy: actor(s.exporter),
+          review: null,
         },
         previousVersions: [],
       });
@@ -447,6 +449,7 @@ describe('Documents', () => {
           sizeBytes: bytes.length,
           sha256: sha256(bytes).toString('hex'),
           uploadedAt: document.currentVersion.uploadedAt,
+          version: 1,
         },
       });
     });
@@ -541,7 +544,7 @@ describe('Documents', () => {
         'replaces a version that is no longer current',
         (s) => replace(s.exporter.operator.cookie, s, 7),
         412,
-        'The document has changed since the version you sent; it is now at version 1. Review the latest version before replacing it.',
+        'The document has changed since the version you sent; it is now at version 1. Review its latest file and any decision on it before replacing it.',
       ],
       [
         'replaces a document that has no version yet',
@@ -1410,10 +1413,22 @@ describe('Documents', () => {
         sql(`UPDATE documents SET document_type = 'PHYTOSANITARY_CERTIFICATE'`),
       ).rejects.toThrow(/what a document belongs to cannot change/);
       await expect(
-        sql('UPDATE documents SET current_version_number = current_version_number + 2'),
+        sql(
+          'UPDATE documents SET version = version + 1, current_version_number = current_version_number + 2',
+        ),
       ).rejects.toThrow(/versions are numbered one after another/);
       await expect(
         sql('UPDATE documents SET current_version_number = current_version_number + 1'),
+      ).rejects.toThrow(/every change advances the version by exactly one/);
+      await expect(
+        sql(
+          'UPDATE documents SET version = version + 2, current_version_number = current_version_number + 1',
+        ),
+      ).rejects.toThrow(/every change advances the version by exactly one/);
+      await expect(
+        sql(
+          'UPDATE documents SET version = version + 1, current_version_number = current_version_number + 1',
+        ),
       ).rejects.toThrow(/the current version 2 does not exist/);
       await expect(
         insertDirectly(s, { type: 'PHYTOSANITARY_CERTIFICATE', withVersion: false }),
@@ -1443,7 +1458,7 @@ describe('Documents', () => {
       // Nor a new version of a document of the superseded revision.
       await expect(
         ctx.prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`UPDATE documents SET current_version_number = 2`;
+          await tx.$executeRaw`UPDATE documents SET version = 2, current_version_number = 2`;
           await tx.$executeRaw`
             INSERT INTO document_versions (document_id, version_number, storage_key, file_name,
               media_type, size_bytes, sha256, uploaded_by_user_id, uploaded_by_organization_id,

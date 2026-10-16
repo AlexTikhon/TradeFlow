@@ -16,8 +16,10 @@ import {
   type CounterpartyContract,
   DOCUMENT_MEDIA_TYPE,
   type DocumentListResponse,
+  type DocumentReviewDecision,
   MAX_DOCUMENT_BYTES,
   type RequiredDocumentType,
+  type ReviewDocumentVersionRequest,
 } from '@tradeflow/contracts';
 import type { FileConsumer, FilePart } from '../../common/http/multipart-file.js';
 import type { WritePrecondition } from '../../common/http/preconditions.js';
@@ -44,7 +46,12 @@ import {
   UploadInspection,
 } from './document-rules.js';
 import { byRevisionThenType, documentSelect, toDocument } from './document.read-model.js';
-import { advanceDocumentVersion, createDocument, type DocumentKey } from './document.writes.js';
+import {
+  advanceDocumentVersion,
+  advanceForReview,
+  createDocument,
+  type DocumentKey,
+} from './document.writes.js';
 
 /** One document: a document type required by one revision of a contract's instructions. */
 export interface DocumentTarget {
@@ -78,9 +85,13 @@ interface ReceivedPdf {
 export const CONTRACT_NOT_FOUND = 'Contract was not found.';
 
 /**
- * Document use cases (ADR 0013). Each takes the acting principal. Reads are scoped in the
- * database exactly as for documentary instructions: documents are loaded only under contracts
+ * Document use cases (ADR 0013, ADR 0014). Each takes the acting principal. Reads are scoped in
+ * the database exactly as for documentary instructions: documents are loaded only under contracts
  * the voyages module resolved for the principal's organization as a counterparty.
+ *
+ * Every change to a document, an upload or a review, is one conditional write on the document's
+ * version (`document.writes.ts`), committed with its row and its audit event. A review is a plain
+ * transaction: share-lock the instruction, make the conditional write, record the decision.
  *
  * An upload crosses two stores that cannot commit together, so it runs in steps:
  *
@@ -145,10 +156,12 @@ export class DocumentsService {
 
   /**
    * Adds a version: the first one (creating the document) when the precondition is `absent`,
-   * the next one when it names the current version. Only an operator of the contract's seller
-   * may, and only for the current revision of the instructions, for a document type it requires.
-   * Null when the contract cannot be found for the principal's organization. The uploader and
-   * time come from the session and the server's clock.
+   * the next one when it names the document's current version (which counts reviews too, so a
+   * replacement is always based on the latest decision). Only an operator of the contract's
+   * seller may, and only for the current revision of the instructions, for a document type it
+   * requires. Null when the contract cannot be found for the principal's organization. The
+   * uploader and time come from the session and the server's clock. The new file starts pending
+   * review.
    */
   async upload(
     principal: Principal,
@@ -183,6 +196,99 @@ export class DocumentsService {
       throw error;
     }
     return this.commit(principal, target, precondition, { ...received, storageKey });
+  }
+
+  /**
+   * Records the buyer's decision on file version `versionNumber`: approved, or rejected with a
+   * reason. Only an operator of the contract's buyer may; only on the document's latest file
+   * version, under the current revision of the instructions; once; and only at a document
+   * version the client names. Null when the contract cannot be found for the principal's
+   * organization. The reviewer, their organization and the time come from the session and the
+   * server's clock.
+   */
+  async review(
+    principal: Principal,
+    target: DocumentTarget,
+    versionNumber: number,
+    request: ReviewDocumentVersionRequest,
+    expectedVersions: number[],
+  ): Promise<ContractDocument | null> {
+    requireOperator(principal, 'review documents');
+
+    return this.prisma.$transaction(async (tx) => {
+      const contract = await this.contracts.findForVoyage(
+        principal,
+        target.voyageId,
+        target.contractId,
+        tx,
+      );
+      if (!contract) {
+        return null;
+      }
+      requireBuyer(contract);
+      // Share-locked until commit: no revision can supersede this one meanwhile, and one given
+      // while this waited is seen here.
+      const revision = checkOpen(
+        await this.revisions.lock(tx, contract.id, target.revisionNumber),
+        target,
+        REVIEWED_UNDER_CURRENT,
+      );
+
+      const at = new Date();
+      const documentKey = key(contract, target);
+      const document = await advanceForReview(tx, {
+        ...documentKey,
+        versionNumber,
+        expectedVersions,
+        at,
+      });
+      if (!document) {
+        // Read only to explain the refusal; the conditional write already decided it.
+        throw whyNotReviewed(
+          await reviewStateOf(tx, documentKey, versionNumber),
+          versionNumber,
+          expectedVersions,
+        );
+      }
+
+      const reason = request.decision === 'REJECTED' ? request.reason : null;
+      await tx.documentReview.create({
+        data: {
+          documentId: document.id,
+          versionNumber,
+          decision: request.decision,
+          reason,
+          reviewedByUserId: principal.userId,
+          reviewedByOrganizationId: principal.organizationId,
+          reviewedAt: at,
+        },
+        select: { id: true },
+      });
+      // The decision is about these exact bytes: the event names their checksum.
+      const file = await tx.documentVersion.findUniqueOrThrow({
+        where: { documentId_versionNumber: { documentId: document.id, versionNumber } },
+        select: { sha256: true },
+      });
+      await this.audit.record(tx, {
+        action: 'DOCUMENT_VERSION_REVIEWED',
+        actor: principal,
+        voyageId: target.voyageId,
+        payload: {
+          documentId: document.id,
+          contractId: contract.id,
+          instructionId: revision.instructionId,
+          revisionNumber: target.revisionNumber,
+          documentType: target.documentType,
+          versionNumber,
+          sha256: Buffer.from(file.sha256).toString('hex'),
+          decision: request.decision,
+          reason,
+          reviewedAt: at.toISOString(),
+          version: document.version,
+        },
+      });
+      return readWritten(tx, document.id, contract);
+    });
   }
 
   /**
@@ -332,7 +438,7 @@ export class DocumentsService {
         if (!document) {
           // Read only to explain the refusal; the conditional write already decided it.
           throw new PreconditionFailedException(
-            whyStale(precondition, await currentVersionOf(tx, documentKey)),
+            whyStale(precondition, await currentStateOf(tx, documentKey)),
           );
         }
 
@@ -368,13 +474,10 @@ export class DocumentsService {
             sizeBytes: file.sizeBytes,
             sha256: file.sha256.toString('hex'),
             uploadedAt: at.toISOString(),
+            version: document.version,
           },
         });
-        const written = await tx.document.findUniqueOrThrow({
-          where: { id: document.id },
-          select: documentSelect,
-        });
-        const response = toDocument(written, contract);
+        const response = await readWritten(tx, document.id, contract);
         // Everything above failed, if at all, before COMMIT was sent: a certain rollback.
         committing = true;
         return response;
@@ -409,11 +512,11 @@ export class DocumentsService {
     documentKey: DocumentKey,
     precondition: WritePrecondition,
   ): Promise<void> {
-    const current = await currentVersionOf(this.prisma, documentKey);
+    const current = await currentStateOf(this.prisma, documentKey);
     const holds =
       precondition.kind === 'absent'
         ? current === null
-        : current !== null && precondition.versions.includes(current);
+        : current !== null && precondition.versions.includes(current.version);
     if (!holds) {
       throw new PreconditionFailedException(whyStale(precondition, current));
     }
@@ -432,13 +535,40 @@ function requireSeller(contract: CounterpartyContract): void {
   }
 }
 
+function requireBuyer(contract: CounterpartyContract): void {
+  if (contract.side !== 'BUYER') {
+    throw new ForbiddenException('Only the buyer under a contract may review its documents.');
+  }
+}
+
+/**
+ * The document as this transaction left it, for a reader already resolved as a party to
+ * `contract`. Read before commit while the row is still locked, so the response (and its ETag)
+ * is exactly the version this write produced, with every file and decision behind it.
+ */
+async function readWritten(
+  tx: Prisma.TransactionClient,
+  documentId: string,
+  contract: CounterpartyContract,
+): Promise<ContractDocument> {
+  const row = await tx.document.findUniqueOrThrow({
+    where: { id: documentId },
+    select: documentSelect,
+  });
+  return toDocument(row, contract);
+}
+
+const PRESENTED_AGAINST_CURRENT = 'documents are presented against the current revision';
+const REVIEWED_UNDER_CURRENT = 'only documents of the current revision are reviewed';
+
 /**
  * The revision, if it accepts documents of the target's type: it exists, it is the current
- * revision, and it requires that type.
+ * revision, and it requires that type. `rule` says why a superseded revision is refused.
  */
 function checkOpen(
   revision: RevisionForDocuments | null,
   target: DocumentTarget,
+  rule = PRESENTED_AGAINST_CURRENT,
 ): RevisionForDocuments {
   if (!revision) {
     throw new NotFoundException('Revision was not found.');
@@ -446,7 +576,7 @@ function checkOpen(
   if (revision.revisionNumber < revision.currentRevisionNumber) {
     throw new ConflictException(
       `Revision ${revision.revisionNumber} has been superseded by revision ` +
-        `${revision.currentRevisionNumber}; documents are presented against the current revision.`,
+        `${revision.currentRevisionNumber}; ${rule}.`,
     );
   }
   if (!revision.requiredDocuments.includes(target.documentType)) {
@@ -457,32 +587,100 @@ function checkOpen(
   return revision;
 }
 
-async function currentVersionOf(
+const documentWhere = ({ contractId, revisionNumber, documentType }: DocumentKey) => ({
+  tradeContractId_revisionNumber_documentType: {
+    tradeContractId: contractId,
+    revisionNumber,
+    documentType,
+  },
+});
+
+/** The document's version and latest file version number, or null when it has none yet. */
+async function currentStateOf(
   db: Prisma.TransactionClient,
-  { contractId, revisionNumber, documentType }: DocumentKey,
-): Promise<number | null> {
-  const document = await db.document.findUnique({
-    where: {
-      tradeContractId_revisionNumber_documentType: {
-        tradeContractId: contractId,
-        revisionNumber,
-        documentType,
-      },
-    },
-    select: { currentVersionNumber: true },
+  documentKey: DocumentKey,
+): Promise<{ version: number; currentVersionNumber: number } | null> {
+  return db.document.findUnique({
+    where: documentWhere(documentKey),
+    select: { version: true, currentVersionNumber: true },
   });
-  return document?.currentVersionNumber ?? null;
 }
 
-function whyStale(precondition: WritePrecondition, current: number | null): string {
+interface ReviewState {
+  version: number;
+  currentVersionNumber: number;
+  /** The decision already recorded on the file version asked about, if any. */
+  decision: DocumentReviewDecision | null;
+}
+
+async function reviewStateOf(
+  tx: Prisma.TransactionClient,
+  documentKey: DocumentKey,
+  versionNumber: number,
+): Promise<ReviewState | null> {
+  const document = await tx.document.findUnique({
+    where: documentWhere(documentKey),
+    select: {
+      version: true,
+      currentVersionNumber: true,
+      versions: {
+        where: { versionNumber },
+        select: { review: { select: { decision: true } } },
+      },
+    },
+  });
+  return (
+    document && {
+      version: document.version,
+      currentVersionNumber: document.currentVersionNumber,
+      decision: document.versions[0]?.review?.decision ?? null,
+    }
+  );
+}
+
+const DOCUMENT_VERSION_NOT_FOUND = 'Document version was not found.';
+
+const changedSince = (version: number, before: string) =>
+  `The document has changed since the version you sent; it is now at version ${version}. ` +
+  `Review its latest file and any decision on it before ${before}.`;
+
+function whyStale(
+  precondition: WritePrecondition,
+  current: { version: number; currentVersionNumber: number } | null,
+): string {
   if (precondition.kind === 'absent') {
     return current === null
       ? 'The document could not be created.'
-      : `This document already has version ${current}. Review it, then upload a replacement with If-Match: "${current}".`;
+      : `This document already has version ${current.currentVersionNumber}. Review it, then upload a replacement with If-Match: "${current.version}".`;
   }
   return current === null
     ? 'This document has no version yet. Upload the first one with If-None-Match: *.'
-    : `The document has changed since the version you sent; it is now at version ${current}. Review the latest version before replacing it.`;
+    : changedSince(current.version, 'replacing it');
+}
+
+/**
+ * Why a review changed nothing, judged from the document as it is now. When the version matches
+ * and the file version is the latest, the only remaining reason is an existing decision.
+ */
+function whyNotReviewed(
+  current: ReviewState | null,
+  versionNumber: number,
+  expectedVersions: number[],
+) {
+  if (!current || versionNumber > current.currentVersionNumber) {
+    return new NotFoundException(DOCUMENT_VERSION_NOT_FOUND);
+  }
+  if (!expectedVersions.includes(current.version)) {
+    return new PreconditionFailedException(changedSince(current.version, 'deciding'));
+  }
+  if (versionNumber < current.currentVersionNumber) {
+    return new ConflictException(
+      `Version ${versionNumber} has been replaced by version ${current.currentVersionNumber}; only the latest version can be reviewed.`,
+    );
+  }
+  return new ConflictException(
+    `Version ${versionNumber} has already been ${current.decision?.toLowerCase() ?? 'reviewed'}; a decision is final.`,
+  );
 }
 
 /** Size and SHA-256 of everything `content` yields. */

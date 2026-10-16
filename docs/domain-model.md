@@ -16,6 +16,7 @@
 | **Revision**                 | One complete, unchangeable version of a contract's documentary instructions, numbered 1, 2, 3.                                            |
 | **Document**                 | What the seller presents for one document type that one revision of the instructions requires (a bill of lading, a certificate).          |
 | **Document version**         | One uploaded file of a document, numbered 1, 2, 3. A replacement is a new version; none is ever changed or removed.                       |
+| **Review**                   | The buyer's decision on one exact document version: approved, or rejected with a reason. Final; a replacement is reviewed anew.           |
 | **Consignee**                | The party a bill of lading is made out to (often "to order of" a bank); it may take delivery of the cargo.                                |
 | **Notify party**             | Whom the carrier notifies when the vessel arrives; usually the buyer or its agent.                                                        |
 | **Counterparty**             | The seller or the buyer under a given sale contract.                                                                                      |
@@ -59,27 +60,30 @@
                                                           1 ──── n DocumentVersion
                                                                    (uploaded by the seller; immutable;
                                                                     bytes in private storage)
+                                                                   1 ──── 0..1 DocumentReview
+                                                                   (by the buyer; immutable)
 ```
 
-| Entity                                  | Key fields                                                                                                                                       | Notes                                                         |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| `Organization`                          | name, countryCode                                                                                                                                | No role column, by design (see below)                         |
-| `User`                                  | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)                            | No password means cannot sign in                              |
-| `Session`                               | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                                             | Valid while unexpired and unrevoked                           |
-| `Vessel`                                | name, imoNumber (unique)                                                                                                                         | Reference data shared by all tenants                          |
-| `Commodity`                             | code (unique), name                                                                                                                              | Reference data                                                |
-| `Port`                                  | unLocode (unique), name, countryCode                                                                                                             | Reference data                                                |
-| `Voyage`                                | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end                   |                                                               |
-| `VoyageParticipant`                     | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                                            | Also the access-control relation                              |
-| `TradeContract`                         | voyageId, position, sellerParticipantId, buyerParticipantId                                                                                      | One sale in the trade string; topology only (ADR 0010)        |
-| `Notice`                                | voyageId, tradeContractId, type, status, estimatedArrivalAt, acknowledgementDueAt, message, issuer and issuedAt, acknowledger and acknowledgedAt | Counterparties only; issued content immutable (ADR 0011)      |
-| `DocumentaryInstruction`                | voyageId, tradeContractId (unique), version, currentRevisionNumber                                                                               | Counterparties only; changes by conditional update (ADR 0012) |
-| `DocumentaryInstructionRevision`        | instructionId, revisionNumber, consignee, notifyParty, requirements (JSON), author and createdAt                                                 | Immutable                                                     |
-| `DocumentaryInstructionAcknowledgement` | instructionId, revisionNumber (unique together), acknowledger and acknowledgedAt                                                                 | Immutable; at most one per revision                           |
-| `Document`                              | voyageId, tradeContractId, instructionId, revisionNumber, documentType (unique with contract and revision), currentVersionNumber                 | Counterparties only; changes by conditional update (ADR 0013) |
-| `DocumentVersion`                       | documentId, versionNumber, storageKey (server-generated), fileName, mediaType, sizeBytes, sha256, uploader and uploadedAt                        | Immutable; bytes in private document storage                  |
-| `AuditEvent`                            | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                                            | Append-only; see ADR 0009                                     |
-| `VoyageReferenceCounter`                | year, lastNumber                                                                                                                                 | Hands out `TF-<year>-<number>`                                |
+| Entity                                  | Key fields                                                                                                                                       | Notes                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `Organization`                          | name, countryCode                                                                                                                                | No role column, by design (see below)                                   |
+| `User`                                  | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)                            | No password means cannot sign in                                        |
+| `Session`                               | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                                             | Valid while unexpired and unrevoked                                     |
+| `Vessel`                                | name, imoNumber (unique)                                                                                                                         | Reference data shared by all tenants                                    |
+| `Commodity`                             | code (unique), name                                                                                                                              | Reference data                                                          |
+| `Port`                                  | unLocode (unique), name, countryCode                                                                                                             | Reference data                                                          |
+| `Voyage`                                | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end                   |                                                                         |
+| `VoyageParticipant`                     | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                                            | Also the access-control relation                                        |
+| `TradeContract`                         | voyageId, position, sellerParticipantId, buyerParticipantId                                                                                      | One sale in the trade string; topology only (ADR 0010)                  |
+| `Notice`                                | voyageId, tradeContractId, type, status, estimatedArrivalAt, acknowledgementDueAt, message, issuer and issuedAt, acknowledger and acknowledgedAt | Counterparties only; issued content immutable (ADR 0011)                |
+| `DocumentaryInstruction`                | voyageId, tradeContractId (unique), version, currentRevisionNumber                                                                               | Counterparties only; changes by conditional update (ADR 0012)           |
+| `DocumentaryInstructionRevision`        | instructionId, revisionNumber, consignee, notifyParty, requirements (JSON), author and createdAt                                                 | Immutable                                                               |
+| `DocumentaryInstructionAcknowledgement` | instructionId, revisionNumber (unique together), acknowledger and acknowledgedAt                                                                 | Immutable; at most one per revision                                     |
+| `Document`                              | voyageId, tradeContractId, instructionId, revisionNumber, documentType (unique with contract and revision), version, currentVersionNumber        | Counterparties only; changes by conditional update (ADR 0013, ADR 0014) |
+| `DocumentVersion`                       | documentId, versionNumber, storageKey (server-generated), fileName, mediaType, sizeBytes, sha256, uploader and uploadedAt                        | Immutable; bytes in private document storage                            |
+| `DocumentReview`                        | documentId, versionNumber (unique together), decision (`APPROVED` \| `REJECTED`), reason, reviewer and reviewedAt                                | Immutable; at most one per version (ADR 0014)                           |
+| `AuditEvent`                            | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                                            | Append-only; see ADR 0009                                               |
+| `VoyageReferenceCounter`                | year, lastNumber                                                                                                                                 | Hands out `TF-<year>-<number>`                                          |
 
 ### Creating a voyage (initial business rule)
 
@@ -241,7 +245,16 @@ contract, in answer to its documentary instructions ([ADR 0013](decisions/0013-d
 ```
             seller's operator               seller's operator              seller's operator
  (none) ──── uploads version 1 ────▶ v1 ──── replaces it ────▶ v2 ──── ... ────▶ vn
-             (If-None-Match: *)              (If-Match: "1")
+             (If-None-Match: *)              (If-Match: "<version>")
+
+ each file version, while it is the latest under the current revision:
+
+                    buyer's operator approves
+   pending ─────────────────────────────────────▶ approved   (final)
+      │             buyer's operator rejects, with a reason
+      ├─────────────────────────────────────────▶ rejected   (final)
+      │             replaced first, or its revision superseded
+      └─────────────────────────────────────────▶ not reviewed
 
  revision n of the instructions is superseded by revision n+1:
    the documents of revision n stay, read-only; revision n+1 starts with none
@@ -252,20 +265,31 @@ contract, in answer to its documentary instructions ([ADR 0013](decisions/0013-d
   takes documents, and only of the types it requires.
 - **Versions, never edits.** Each upload is a new version, numbered 1, 2, 3 without gaps, with its
   bytes, file name, size, SHA-256, uploader and time. A replacement leaves every earlier version
-  exactly as it was. Every write names the version it replaces (HTTP `If-Match`;
-  `If-None-Match: *` for the first) and fails with 412 if another upload came first.
-- **Who:** users of the contract's seller and buyer list and download them, viewers included; an
-  `OPERATOR` of the seller uploads. The organization must be a counterparty and still participate.
-  Everyone else gets the same 404 as for a document that does not exist.
+  exactly as it was.
+- **Decisions on exact files** ([ADR 0014](decisions/0014-document-review.md)). An operator of the
+  buyer approves or rejects the latest file, giving a reason for a rejection. A decision is made
+  once and never changed; it stays with the file it was made on when the seller replaces it, and
+  the replacement starts pending.
+- **One version for every change.** The document's `version` advances with each upload and each
+  decision (the file number counts uploads only). Every upload and decision names the version it
+  is based on (HTTP `If-Match`; `If-None-Match: *` for the first upload) and fails with 412 if
+  anything happened since: a new file, or a decision.
+- **Who:** users of the contract's seller and buyer list and download them and read the
+  decisions, viewers included; an `OPERATOR` of the seller uploads; an `OPERATOR` of the buyer
+  decides. The organization must be a counterparty and still participate. Everyone else gets the
+  same 404 as for a document that does not exist.
 - **People, times, sizes and checksums** come from the session, the server's clock and the bytes
-  the server received, never from the request. The file name is the client's, kept for display.
+  the server received, never from the request. The file name and a rejection's reason are the
+  client's, kept for display.
 
 **MVP business rules** (project-specific starting points, not settled commercial practice):
 
 1. **PDF only**, judged by the file's content (it must start with `%PDF-`), **1 byte to 10 MiB**.
 2. **A new revision asks for every document again**, even those whose requirement did not change.
-3. **Nothing is approved, rejected or deleted yet.** The buyer reads and downloads; reviewing what
-   was presented is a later step.
+3. **Only the latest file of a document under the current revision can be decided on**, once and
+   for good: approved, or rejected with a reason of 1 to 1000 characters.
+4. **The seller may replace any file**, an approved one included; the buyer decides again.
+5. **Nothing is deleted**, and no decision is amended or reopened.
 
 ### Invariants enforced by the database
 
@@ -307,6 +331,12 @@ buyer_participant_id`; both reference participants of the same voyage (foreign k
   `application/pdf`, its size 1 byte to 10 MiB, its SHA-256 32 bytes. A revision, instruction or
   contract with documents cannot be deleted. Audit events allow one `DOCUMENT_VERSION_UPLOADED`
   per document version.
+- Document reviews: one per file version, only of the document's latest file while its revision
+  is current, never updated; a rejection has a reason of 1 to 1000 characters that is not blank,
+  an approval none. Every change advances the document's version by exactly one, and at commit
+  the version equals its uploads plus its reviews. Audit events allow one
+  `DOCUMENT_VERSION_REVIEWED` per file version, and one upload or review event per document
+  version.
 
 ## Modelling decisions
 
@@ -372,13 +402,13 @@ other. A trader's junior analyst sees every voyage the trader participates in bu
 allowed to accept notices. And when the organization is exporter on one voyage and buyer on
 another, its users' permissions do not change between the two.
 
-**Current state (Milestone 7).** Every signed-in user can read exactly the voyages their
+**Current state (Milestone 8).** Every signed-in user can read exactly the voyages their
 organization participates in, including each voyage's trade-string topology, and the notices,
 documentary instructions and documents under the contracts their organization is a party to.
 Users have one of two roles ([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads
 (and downloads); an **operator** may also create voyages for their organization, issue or
-acknowledge notices, give, revise or acknowledge documentary instructions, and upload documents
-for it. The role is on
+acknowledge notices, give, revise or acknowledge documentary instructions, and upload or review
+documents for it. The role is on
 the user row, which is organization-scoped because a user belongs to exactly one organization,
 and it is read on every request. Creating a voyage needs no participant role, since the voyage
 does not exist yet; the creator becomes its exporter. Notice commands are the first commands on
@@ -386,7 +416,7 @@ existing voyages and check both layers in their service: the organization's side
 contract (a domain rule: only the seller issues, only the buyer acknowledges), and the user's
 role within their organization. Documentary instructions check the same two layers, with the
 sides reversed: the buyer writes, the seller acknowledges. Documents check them again: the seller
-uploads. An upload is checked once more as it commits, against the user's role and organization
+uploads, the buyer decides. An upload is checked once more as it commits, against the user's role and organization
 as they are then, since its bytes take time to arrive.
 
 ## Proposed next (not implemented)

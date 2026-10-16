@@ -7,8 +7,9 @@ import {
   DocumentListResponseSchema,
   documentEntityTag,
   type RequiredDocumentType,
+  type ReviewDocumentVersionRequest,
 } from '@tradeflow/contracts';
-import { getBlob, getJson, postFile } from '../../../shared/api/http-client';
+import { getBlob, getJson, postFile, postJson } from '../../../shared/api/http-client';
 
 /** One document: a document type required by one revision of a contract's instructions. */
 export interface DocumentTarget {
@@ -34,10 +35,11 @@ export function fetchDocuments(
 }
 
 /**
- * Uploads `file` as the document's next version. `basedOnVersion` is the version the user chose
- * to replace (`If-Match`); null means there was none, and the upload succeeds only if there
- * still is none (`If-None-Match: *`). Either way the server answers 412 rather than replace a
- * version the user has not seen.
+ * Uploads `file` as the document's next file version. `basedOnVersion` is the document version
+ * (which counts uploads and reviews) the user saw when they chose to replace it (`If-Match`);
+ * null means there was no document, and the upload succeeds only if there still is none
+ * (`If-None-Match: *`). Either way the server answers 412 rather than replace a file, or pass
+ * over a decision, the user has not seen.
  */
 export function uploadDocumentVersion(
   target: DocumentTarget,
@@ -50,6 +52,27 @@ export function uploadDocumentVersion(
         ? { 'If-None-Match': '*' }
         : { 'If-Match': documentEntityTag(basedOnVersion) },
   });
+}
+
+/**
+ * Approves or rejects file version `versionNumber`, at the document version `basedOnVersion` the
+ * user saw (`If-Match`). The server answers 412 if anything changed since (a new file, or
+ * someone else's decision), and 409 if the version is no longer the latest or already decided.
+ */
+export function reviewDocumentVersion(
+  target: DocumentTarget,
+  versionNumber: number,
+  decision: ReviewDocumentVersionRequest,
+  basedOnVersion: number,
+): Promise<ContractDocument> {
+  return postJson(
+    `${versionsPath(target)}/${versionNumber}/review`,
+    decision,
+    ContractDocumentSchema,
+    {
+      headers: { 'If-Match': documentEntityTag(basedOnVersion) },
+    },
+  );
 }
 
 /** The bytes of version `versionNumber`, fetched with the session. */

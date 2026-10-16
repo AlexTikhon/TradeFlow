@@ -18,7 +18,14 @@ import { type SubmitEvent, useState } from 'react';
 import { ApiError } from '../../../shared/api/http-client';
 import { formatInstant } from '../../../shared/lib/format';
 import type { DocumentTarget } from '../api/documents.api';
-import { formatFileSize } from '../domain/documents';
+import {
+  basisOf,
+  changeSince,
+  decisionVerb,
+  type DocumentBasis,
+  type DocumentChange,
+  formatFileSize,
+} from '../domain/documents';
 import {
   isPreconditionFailure,
   isSuperseded,
@@ -46,13 +53,45 @@ function describeFailure(error: Error): string {
   return 'The file could not be uploaded. Please try again.';
 }
 
+/** What happened since the user chose their file, as the warning above the form says it. */
+function ChangeNotice({ change, label }: { change: DocumentChange; label: string }) {
+  if (change.kind === 'none') return null;
+  const { latest } = change;
+  if (change.kind === 'decided') {
+    const { review } = change;
+    return (
+      <>
+        <AlertTitle>
+          Version {latest.number} was {decisionVerb(review)}
+        </AlertTitle>
+        <Typography variant="body2" sx={{ overflowWrap: 'anywhere', whiteSpace: 'pre-line' }}>
+          {review.reviewedBy.name} ({review.reviewedBy.organization.name}) {decisionVerb(review)}{' '}
+          version {latest.number} of the {label.toLowerCase()} on {formatInstant(review.reviewedAt)}
+          , after you chose your file{review.reason ? `: “${review.reason}”.` : '.'} Your file is
+          kept; choose whether it replaces version {latest.number}.
+        </Typography>
+      </>
+    );
+  }
+  return (
+    <>
+      <AlertTitle>A new version was uploaded</AlertTitle>
+      <Typography variant="body2">
+        Version {latest.number} ({latest.fileName}) was uploaded by {latest.uploadedBy.name} on{' '}
+        {formatInstant(latest.uploadedAt)}, after you chose your file. Your file is kept; review
+        that version, then choose whether yours replaces it.
+      </Typography>
+    </>
+  );
+}
+
 interface DocumentUploadFormProps {
   target: DocumentTarget;
   /** The document type as people read it, e.g. "Bill of lading". */
   label: string;
   /**
    * The document as the page has it now (null while it has no version). This follows the cache,
-   * so it moves on when the list is refreshed; the version the user chose to replace does not.
+   * so it moves on when the list is refreshed; what the user chose to replace does not.
    */
   latest: ContractDocument | null;
   /** Fetches the latest documents, for the user to review after a conflict. */
@@ -60,11 +99,12 @@ interface DocumentUploadFormProps {
 }
 
 /**
- * The seller's upload of one document. Choosing a file remembers which version it would replace
- * (its basis), which is what the upload sends in If-Match. If someone uploads a version meanwhile
- * (a 412, or a refresh that shows it) the chosen file is kept and the newer version is shown; the
- * user must explicitly choose to replace it. On any failure the file stays chosen, and nothing
- * is sent again on its own.
+ * The seller's upload of one document. Choosing a file remembers the document as it was then (its
+ * basis): its version, sent in If-Match, and its latest file. If the document moves on meanwhile
+ * (a 412, or a refresh that shows it) the chosen file is kept and the change is shown, told apart:
+ * a new file someone uploaded, or the buyer's decision on the latest one. The user must explicitly
+ * choose to replace what is there now. On any failure the file stays chosen, and nothing is sent
+ * again on its own.
  */
 export function DocumentUploadForm({
   target,
@@ -74,15 +114,16 @@ export function DocumentUploadForm({
 }: DocumentUploadFormProps) {
   const { upload, error, isPending, reset } = useUploadDocument(target.voyageId);
   const [file, setFile] = useState<File | null>(null);
-  const [basis, setBasis] = useState<number | null>(null);
+  const [basis, setBasis] = useState<DocumentBasis | null>(null);
   const [fileError, setFileError] = useState<string>();
   const [uploaded, setUploaded] = useState<number | null>(null);
   const [inputKey, setInputKey] = useState(0);
   const [reviewing, setReviewing] = useState(false);
 
-  const latestVersion = latest?.currentVersion.number ?? null;
-  // While a chosen file waits, a version that appears meanwhile must be seen before it is replaced.
-  const stale = file !== null && !isPending && latestVersion !== basis;
+  // While a chosen file waits, a file or a decision that appears meanwhile must be seen before the
+  // chosen file replaces it.
+  const change = changeSince(basis, latest);
+  const stale = file !== null && !isPending && change.kind !== 'none';
   const conflict = isPreconditionFailure(error);
   const formError = error && !conflict ? describeFailure(error) : undefined;
   const inputId = `${target.contractId}-${target.revisionNumber}-${target.documentType}-file`;
@@ -99,7 +140,7 @@ export function DocumentUploadForm({
     }
     setFileError(undefined);
     setFile(chosen);
-    setBasis(latestVersion);
+    setBasis(basisOf(latest));
   };
 
   const reviewLatest = async () => {
@@ -114,7 +155,7 @@ export function DocumentUploadForm({
   const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!file || stale) return;
-    upload({ target, file, basedOnVersion: basis }, (document) => {
+    upload({ target, file, basedOnVersion: basis?.version ?? null }, (document) => {
       setFile(null);
       setInputKey((key) => key + 1);
       setUploaded(document.currentVersion.number);
@@ -131,20 +172,16 @@ export function DocumentUploadForm({
     >
       {stale && latest && (
         <Alert severity="warning" role="region" aria-label={`Latest version of ${label}`}>
-          <AlertTitle>A new version was uploaded</AlertTitle>
           <Stack spacing={1.5}>
-            <Typography variant="body2">
-              Version {latest.currentVersion.number} ({latest.currentVersion.fileName}) was uploaded
-              by {latest.currentVersion.uploadedBy.name} on{' '}
-              {formatInstant(latest.currentVersion.uploadedAt)}, after you chose your file. Your
-              file is kept; review that version, then choose whether yours replaces it.
-            </Typography>
+            <Box>
+              <ChangeNotice change={change} label={label} />
+            </Box>
             <Box>
               <Button
                 variant="outlined"
                 color="inherit"
                 onClick={() => {
-                  setBasis(latestVersion);
+                  setBasis(basisOf(latest));
                   reset();
                 }}
               >
@@ -170,7 +207,8 @@ export function DocumentUploadForm({
           }
         >
           <AlertTitle>Not uploaded</AlertTitle>
-          Someone uploaded a version of this document after you chose your file. Your file is kept.
+          The document changed after you chose your file: a new version was uploaded, or the buyer
+          decided on the latest one. Your file is kept.
         </Alert>
       )}
 
@@ -225,7 +263,7 @@ export function DocumentUploadForm({
           disabled={!file || isPending || stale}
           startIcon={isPending ? <CircularProgress size={18} color="inherit" /> : null}
         >
-          {basis === null ? 'Upload' : `Upload as version ${basis + 1}`}
+          {basis === null ? 'Upload' : `Upload as version ${basis.fileVersion + 1}`}
         </Button>
       </Stack>
       {fileError && (
@@ -235,7 +273,9 @@ export function DocumentUploadForm({
       )}
       <Typography variant="caption" color="text.secondary">
         PDF only, at most 10 MiB.
-        {latest ? ' A replacement becomes a new version; every earlier version is kept.' : ''}
+        {latest
+          ? ' A replacement becomes a new version for the buyer to review; every earlier version, and the decision on it, is kept.'
+          : ''}
       </Typography>
     </Stack>
   );

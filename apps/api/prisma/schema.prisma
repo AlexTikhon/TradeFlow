@@ -35,6 +35,7 @@ model Organization {
   instructionRevisions DocumentaryInstructionRevision[]
   instructionAcks      DocumentaryInstructionAcknowledgement[]
   documentVersions     DocumentVersion[]
+  documentReviews      DocumentReview[]
 
   @@map("organizations")
 }
@@ -68,6 +69,7 @@ model User {
   instructionRevisions DocumentaryInstructionRevision[]
   instructionAcks      DocumentaryInstructionAcknowledgement[]
   documentVersions     DocumentVersion[]
+  documentReviews      DocumentReview[]
 
   @@index([organizationId])
   @@map("users")
@@ -438,12 +440,15 @@ enum DocumentType {
 /// A document the seller presents under one sale contract (ADR 0013), for one document type that
 /// one exact revision of the contract's documentary instructions requires. At most one per
 /// (contract, revision, type); owned by the documents module. Its content lives in immutable
-/// versions; this row says which version is current and is the concurrency token.
+/// versions, the buyer's decisions in immutable reviews (ADR 0014); this row says which version
+/// is current and carries the concurrency version.
 ///
-/// `currentVersionNumber` advances by exactly one with each upload, by one conditional UPDATE.
-/// Triggers accept a document, and each new version, only while its revision is the
-/// instruction's current revision and requires that type; a deferred constraint trigger
-/// requires the current version to exist at commit.
+/// `version` advances by exactly one on every change (an upload or a review) and is the entity
+/// tag clients send in `If-Match`. `currentVersionNumber` counts uploads only: it advances by one
+/// with each upload. Every change is one conditional UPDATE of this row. Triggers accept a
+/// document, each new version and each review only while its revision is the instruction's
+/// current revision; deferred constraint triggers require the current version to exist, and the
+/// version to equal uploads plus reviews, at commit.
 model Document {
   id                   String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
   voyageId             String       @map("voyage_id") @db.Uuid
@@ -451,6 +456,7 @@ model Document {
   instructionId        String       @map("instruction_id") @db.Uuid
   revisionNumber       Int          @map("revision_number")
   documentType         DocumentType @map("document_type")
+  version              Int          @default(1)
   currentVersionNumber Int          @default(1) @map("current_version_number")
   createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt            DateTime     @default(now()) @map("updated_at") @db.Timestamptz(3)
@@ -493,13 +499,50 @@ model DocumentVersion {
   /// Set by the API from its clock; never accepted from a client.
   uploadedAt               DateTime @map("uploaded_at") @db.Timestamptz(3)
 
-  document               Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  uploadedByUser         User         @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
-  uploadedByOrganization Organization @relation(fields: [uploadedByOrganizationId], references: [id], onDelete: Restrict)
+  document               Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  uploadedByUser         User            @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  uploadedByOrganization Organization    @relation(fields: [uploadedByOrganizationId], references: [id], onDelete: Restrict)
+  review                 DocumentReview?
 
   @@unique([documentId, versionNumber])
   @@index([uploadedByUserId])
   @@map("document_versions")
+}
+
+/// What the buyer decided about a document version (ADR 0014).
+enum DocumentReviewDecision {
+  APPROVED
+  REJECTED
+
+  @@map("document_review_decision")
+}
+
+/// The buyer's decision on one exact file version. At most one per version (unique): a decision
+/// is terminal, never updated (trigger) and never reopened. Only the document's current version,
+/// under the instruction's current revision, can be reviewed (trigger). A replacement starts
+/// without a review; decisions on earlier versions stay attached to them. Reviewer, organization
+/// and time come from the server, never the request.
+model DocumentReview {
+  id                       String                 @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  documentId               String                 @map("document_id") @db.Uuid
+  versionNumber            Int                    @map("version_number")
+  decision                 DocumentReviewDecision
+  /// Required for a rejection (1 to 1000 characters, not blank), absent for an approval (CHECK).
+  reason                   String?
+  reviewedByUserId         String                 @map("reviewed_by_user_id") @db.Uuid
+  reviewedByOrganizationId String                 @map("reviewed_by_organization_id") @db.Uuid
+  /// Set by the API from its clock; never accepted from a client.
+  reviewedAt               DateTime               @map("reviewed_at") @db.Timestamptz(3)
+
+  // The exact file version decided on. Cascades only so the demo seed can remove its documents
+  // wholesale, as versions cascade from documents; no endpoint deletes anything.
+  documentVersion        DocumentVersion @relation(fields: [documentId, versionNumber], references: [documentId, versionNumber], onDelete: Cascade, onUpdate: NoAction)
+  reviewedByUser         User            @relation(fields: [reviewedByUserId], references: [id], onDelete: Restrict)
+  reviewedByOrganization Organization    @relation(fields: [reviewedByOrganizationId], references: [id], onDelete: Restrict)
+
+  @@unique([documentId, versionNumber])
+  @@index([reviewedByUserId])
+  @@map("document_reviews")
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +556,7 @@ enum AuditAction {
   DOCUMENTARY_INSTRUCTION_REVISED
   DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED
   DOCUMENT_VERSION_UPLOADED
+  DOCUMENT_VERSION_REVIEWED
 
   @@map("audit_action")
 }
@@ -535,7 +579,9 @@ model AuditEvent {
   /// the new version. DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: the instruction, its contract, the
   /// revision acknowledged, when, and the new version. DOCUMENT_VERSION_UPLOADED: the document,
   /// its contract, instruction revision and type, and the version as stored (number, file name,
-  /// media type, size, SHA-256, time).
+  /// media type, size, SHA-256, time), and since ADR 0014 the document's new version.
+  /// DOCUMENT_VERSION_REVIEWED: the document, its contract, instruction revision and type, the
+  /// file version decided on and its SHA-256, the decision, the reason, when, and the new version.
   payload             Json
 
   actorUser         User         @relation(fields: [actorUserId], references: [id], onDelete: Restrict)

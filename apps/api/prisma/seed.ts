@@ -527,9 +527,9 @@ async function seed(prisma: PrismaClient, storage: DocumentStorage): Promise<voi
     // wholesale (documents, notices and documentary instructions first: documents reference the
     // instruction revisions, and all of them reference the contracts, which reference the
     // participants). Documents, notices and instructions given through the API on a seeded voyage
-    // go too (a document takes its versions with it, an instruction its revisions and
-    // acknowledgements); their audit events stay. Nothing of this is seeded: the demo starts
-    // without any. The documents' stored bytes are removed once their rows are gone.
+    // go too (a document takes its versions and their reviews with it, an instruction its
+    // revisions and acknowledgements); their audit events stay. Nothing of this is seeded: the
+    // demo starts without any. The documents' stored bytes are removed once their rows are gone.
     const storageKeys = (
       await prisma.documentVersion.findMany({
         where: { document: { voyageId: id } },

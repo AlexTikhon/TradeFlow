@@ -52,6 +52,7 @@ describe('OpenAPI document', () => {
         '/api/voyages/{voyageId}/documents',
         '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}/versions',
         '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}/versions/{versionNumber}/content',
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}/versions/{versionNumber}/review',
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
@@ -104,6 +105,7 @@ describe('OpenAPI document', () => {
       operation('/api/voyages/{voyageId}/documents', 'get'),
       operation(`${DOCUMENT}/versions`, 'post'),
       operation(`${DOCUMENT}/versions/{versionNumber}/content`, 'get'),
+      operation(`${DOCUMENT}/versions/{versionNumber}/review`, 'post'),
       operation('/api/auth/me', 'get'),
       operation('/api/voyages', 'post'),
       operation('/api/vessels', 'get'),
@@ -382,6 +384,7 @@ describe('OpenAPI document', () => {
       'fileName',
       'mediaType',
       'number',
+      'review',
       'sha256',
       'sizeBytes',
       'uploadedAt',
@@ -396,7 +399,57 @@ describe('OpenAPI document', () => {
       'id',
       'previousVersions',
       'revisionNumber',
+      'version',
       'voyageId',
+    ]);
+  });
+
+  it('documents reviews: a closed decision body, If-Match on the document version, and every refusal', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      parameters?: { name: string; in: string; required?: boolean }[];
+      requestBody?: { required?: boolean; content: Record<string, { schema: unknown }> };
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+    };
+    type Schema = {
+      properties?: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+      enum?: string[];
+      oneOf?: Schema[];
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+    const review = document.paths[`${DOCUMENT}/versions/{versionNumber}/review`]?.post;
+    const header = (name: string) =>
+      review?.parameters?.find((parameter) => parameter.in === 'header' && parameter.name === name);
+
+    expect(review?.requestBody?.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/ReviewDocumentVersionRequest',
+    });
+    expect(Object.keys(review?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '400', '401', '403', '404', '409', '412', '428']),
+    );
+    expect(header('If-Match')?.required).toBe(true);
+    expect(review?.responses['200']?.headers).toHaveProperty('ETag');
+
+    const { schemas } = document.components;
+    // Approve, or reject with a reason: nothing else, and never who or when.
+    const variants = schemas.ReviewDocumentVersionRequest?.oneOf ?? [];
+    expect(variants.map((variant) => Object.keys(variant.properties ?? {}).sort())).toEqual([
+      ['decision'],
+      ['decision', 'reason'],
+    ]);
+    for (const variant of variants) expect(variant.additionalProperties).toBe(false);
+    expect(variants[1]?.required?.sort()).toEqual(['decision', 'reason']);
+    expect(schemas.DocumentReviewDecision?.enum).toEqual(['APPROVED', 'REJECTED']);
+    expect(Object.keys(schemas.DocumentReview?.properties ?? {}).sort()).toEqual([
+      'decision',
+      'reason',
+      'reviewedAt',
+      'reviewedBy',
     ]);
   });
 });

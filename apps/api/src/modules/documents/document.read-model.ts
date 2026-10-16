@@ -2,6 +2,7 @@ import {
   type ContractDocument,
   type CounterpartyContract,
   DOCUMENT_MEDIA_TYPE,
+  type DocumentReview,
   type DocumentVersion,
   REQUIRED_DOCUMENT_TYPES,
 } from '@tradeflow/contracts';
@@ -11,7 +12,9 @@ import type { Prisma } from '../../generated/prisma/client.js';
  * Read model for documents: exactly which columns are loaded, and how rows become the API
  * contract. The storage key is never part of a response. The contract a document belongs to is
  * not joined here: the voyages module resolves it, for the reader, through
- * `CounterpartyContracts`. Uploaders are read through the versions' own actor relations.
+ * `CounterpartyContracts`. Uploaders and reviewers are read through the versions' and reviews'
+ * own actor relations. A document, its versions and their reviews are read in the caller's
+ * transaction, so the version a response carries describes exactly the files and decisions in it.
  */
 
 const organizationSelect = { select: { id: true, name: true, countryCode: true } } as const;
@@ -25,6 +28,15 @@ const versionSelect = {
   uploadedAt: true,
   uploadedByUser: { select: { fullName: true } },
   uploadedByOrganization: organizationSelect,
+  review: {
+    select: {
+      decision: true,
+      reason: true,
+      reviewedAt: true,
+      reviewedByUser: { select: { fullName: true } },
+      reviewedByOrganization: organizationSelect,
+    },
+  },
 } satisfies Prisma.DocumentVersionSelect;
 
 export const documentSelect = {
@@ -33,6 +45,7 @@ export const documentSelect = {
   tradeContractId: true,
   revisionNumber: true,
   documentType: true,
+  version: true,
   currentVersionNumber: true,
   versions: { select: versionSelect, orderBy: { versionNumber: 'desc' } },
 } satisfies Prisma.DocumentSelect;
@@ -40,6 +53,17 @@ export const documentSelect = {
 export type DocumentRow = Prisma.DocumentGetPayload<{ select: typeof documentSelect }>;
 
 type VersionRow = DocumentRow['versions'][number];
+type ReviewRow = NonNullable<VersionRow['review']>;
+
+function toReview(row: ReviewRow): DocumentReview {
+  return {
+    decision: row.decision,
+    // A CHECK constraint pairs a rejection with its reason and an approval with none.
+    reason: row.reason,
+    reviewedAt: row.reviewedAt.toISOString(),
+    reviewedBy: { name: row.reviewedByUser.fullName, organization: row.reviewedByOrganization },
+  };
+}
 
 function toVersion(row: VersionRow): DocumentVersion {
   if (row.mediaType !== DOCUMENT_MEDIA_TYPE) {
@@ -54,6 +78,7 @@ function toVersion(row: VersionRow): DocumentVersion {
     sha256: Buffer.from(row.sha256).toString('hex'),
     uploadedAt: row.uploadedAt.toISOString(),
     uploadedBy: { name: row.uploadedByUser.fullName, organization: row.uploadedByOrganization },
+    review: row.review && toReview(row.review),
   };
 }
 
@@ -70,6 +95,7 @@ export function toDocument(row: DocumentRow, contract: CounterpartyContract): Co
     contract,
     revisionNumber: row.revisionNumber,
     documentType: row.documentType,
+    version: row.version,
     currentVersion: toVersion(current),
     previousVersions: previous.map(toVersion),
   };

@@ -1,5 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { ContractDocument, DocumentListResponse } from '@tradeflow/contracts';
+import type {
+  ContractDocument,
+  DocumentListResponse,
+  ReviewDocumentVersionRequest,
+} from '@tradeflow/contracts';
 import { ApiError } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
 import { saveFile } from '../../../shared/lib/save-file';
@@ -12,6 +16,7 @@ import {
 import {
   type DocumentTarget,
   downloadDocumentVersion,
+  reviewDocumentVersion,
   uploadDocumentVersion,
 } from '../api/documents.api';
 import { voyageQueries } from '../api/voyage.queries';
@@ -27,8 +32,11 @@ import { voyageQueries } from '../api/voyage.queries';
  *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
  *   no completion callback, and a download is not saved: even if the same user has signed back
  *   in meanwhile, and even if the component that issued it has unmounted.
- * - Uploads are never retried automatically. A 412 (someone uploaded a version since the user
- *   chose what to replace) is reported, never resolved by re-sending against the newer version.
+ * - Uploads and reviews are never retried automatically. A 412 (someone uploaded a file, or made
+ *   a decision, since the user's draft was based) is reported, never resolved by re-sending
+ *   against the newer version: only the user, having seen it, may base a write on it.
+ * - The cache keeps the newest document by its version, which counts uploads and decisions: a
+ *   response for an older version never overwrites a newer one already shown.
  */
 
 function useDocumentCache(voyageId: string) {
@@ -49,12 +57,12 @@ function useDocumentCache(voyageId: string) {
       queryClient.invalidateQueries({
         queryKey: voyageQueries.documentaryInstructions(scope, voyageId).queryKey,
       }),
-    /** Puts `document` in the list, unless the list holds a newer version of it. */
+    /** Puts `document` in the list, unless the list holds it at the same or a newer version. */
     store: (document: ContractDocument) => {
       queryClient.setQueryData<DocumentListResponse>(queryKey, (list) => {
         if (!list) return list;
         const existing = list.items.find((item) => item.id === document.id);
-        if (existing && existing.currentVersion.number >= document.currentVersion.number) {
+        if (existing && existing.version >= document.version) {
           return list;
         }
         return {
@@ -73,15 +81,18 @@ type InSession<T> = T & { epoch: SessionEpoch };
 export interface UploadDocument {
   target: DocumentTarget;
   file: File;
-  /** The version the user chose to replace; null when there was none. */
+  /** The document version the user chose to replace; null when there was no document. */
   basedOnVersion: number | null;
 }
 
-/** Someone uploaded a version since the user chose what to replace (or the first one). */
+/** The document changed (a new file or a decision) since the user's draft was based on it. */
 export const isPreconditionFailure = (error: unknown): boolean =>
   error instanceof ApiError && error.status === 412;
 
-/** The instructions have a newer revision: documents now go against that one. */
+/**
+ * For an upload: the instructions have a newer revision, documents now go against that one. For
+ * a review, also: the version was replaced, or already decided.
+ */
 export const isSuperseded = (error: unknown): boolean =>
   error instanceof ApiError && error.status === 409;
 
@@ -122,6 +133,62 @@ export function useUploadDocument(voyageId: string) {
 
   return {
     upload,
+    error: mutation.error,
+    isPending: mutation.isPending,
+    reset: mutation.reset,
+  };
+}
+
+export interface ReviewDocument {
+  target: DocumentTarget;
+  /** The file version decided on. */
+  versionNumber: number;
+  decision: ReviewDocumentVersionRequest;
+  /** The document version the user saw when they started deciding (If-Match). */
+  basedOnVersion: number;
+}
+
+/**
+ * Approves or rejects one file version. On a 412 or 409 the documents are refreshed so the user
+ * sees what changed (a new file, or someone else's decision), and on a 409 the instructions too
+ * (a new revision); deciding again is the user's choice, and only when there is still something
+ * to decide.
+ */
+export function useReviewDocument(voyageId: string) {
+  const cache = useDocumentCache(voyageId);
+
+  const mutation = useMutation({
+    mutationFn: ({ target, versionNumber, decision, basedOnVersion }: InSession<ReviewDocument>) =>
+      sendForCurrentSession(cache.queryClient, () =>
+        reviewDocumentVersion(target, versionNumber, decision, basedOnVersion),
+      ),
+    // Runs even if the form has unmounted meanwhile: the list must show the decision.
+    onSuccess: (document, { epoch }) => {
+      if (!cache.stillCurrent(epoch)) return;
+      cache.store(document);
+      void cache.refresh();
+    },
+    onError: (error, { epoch }) => {
+      if (!cache.stillCurrent(epoch)) return;
+      if (isPreconditionFailure(error) || isSuperseded(error)) void cache.refresh();
+      if (isSuperseded(error)) void cache.refreshInstructions();
+    },
+  });
+
+  const review = (variables: ReviewDocument, onReviewed: (document: ContractDocument) => void) => {
+    mutation.mutate(
+      { ...variables, epoch: cache.epoch() },
+      {
+        // Only while the form is still mounted, and still in the same session.
+        onSuccess: (document, { epoch }) => {
+          if (cache.stillCurrent(epoch)) onReviewed(document);
+        },
+      },
+    );
+  };
+
+  return {
+    review,
     error: mutation.error,
     isPending: mutation.isPending,
     reset: mutation.reset,
