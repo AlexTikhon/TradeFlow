@@ -278,6 +278,9 @@ DO NOTHING` or `UPDATE ... WHERE version = ANY($expected) ... RETURNING`. No row
   only to choose that answer.
 - The new revision or acknowledgement row, the audit event and the response read happen in the
   same transaction, so the returned `ETag` is the version this write produced.
+- A read (`GET` of one instruction, or the list) runs its queries in one `REPEATABLE READ`
+  transaction: the contract's visibility, the version, the revisions and their acknowledgements
+  come from one snapshot, so a change committed part-way through cannot mix two versions.
 
 Integration tests make every race real: a test holds the contested row's lock (the instruction,
 or for creation the contract row that each insert's foreign-key check needs), waits until both

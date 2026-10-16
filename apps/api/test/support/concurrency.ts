@@ -5,20 +5,33 @@ import type { PrismaService } from '../../src/infrastructure/prisma/prisma.servi
  * Real races against PostgreSQL. A test holds a row lock in a transaction of its own, starts the
  * competing requests, waits until they are all blocked on that lock (so each has passed every
  * check before it and none can commit yet), then releases them together.
+ *
+ * The holder can also commit a change of its own as it releases. A read stopped part-way, by a
+ * table lock on a table it has not loaded yet, then goes on only after that change committed:
+ * between the statements it already ran and the ones still to come.
  */
 
+/** A change made in the holding transaction, so that it commits as the lock is released. */
+export type Change = (tx: Prisma.TransactionClient) => Promise<unknown>;
+
 export interface HeldLock {
-  /** Ends the holding transaction, letting the blocked statements run. */
-  release(): Promise<void>;
+  /**
+   * Ends the holding transaction, letting the blocked statements run. With `change`, first makes
+   * it in that transaction, so it has committed before any of them goes on.
+   */
+  release(change?: Change): Promise<void>;
 }
 
-/** Runs `lock` (a `SELECT ... FOR UPDATE`) in a transaction kept open until `release()`. */
+/**
+ * Runs `lock` (a `SELECT ... FOR UPDATE`, or a `LOCK TABLE`) in a transaction kept open until
+ * `release()`.
+ */
 export async function holdLock(
   prisma: PrismaService,
   lock: (tx: Prisma.TransactionClient) => Promise<unknown>,
 ): Promise<HeldLock> {
-  let release: () => void = () => undefined;
-  const released = new Promise<void>((resolve) => {
+  let release: (change: Change | undefined) => void = () => undefined;
+  const released = new Promise<Change | undefined>((resolve) => {
     release = resolve;
   });
   let locked: () => void = () => undefined;
@@ -29,15 +42,16 @@ export async function holdLock(
     async (tx) => {
       await lock(tx);
       locked();
-      await released;
+      const change = await released;
+      await change?.(tx);
     },
     { timeout: 10_000 },
   );
   // If taking the lock fails, fail here instead of waiting forever.
   await Promise.race([lockTaken, holder]);
   return {
-    release: async () => {
-      release();
+    release: async (change) => {
+      release(change);
       await holder;
     },
   };

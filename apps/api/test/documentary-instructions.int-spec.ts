@@ -10,8 +10,19 @@ import {
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { UserRole } from '../src/generated/prisma/client.js';
+import type { Principal } from '../src/modules/auth/principal.js';
+import { DocumentaryInstructionsService } from '../src/modules/documentary-instructions/documentary-instructions.service.js';
+import {
+  advanceForAcknowledgement,
+  advanceToNextRevision,
+} from '../src/modules/documentary-instructions/instruction.writes.js';
 import { signIn } from './support/auth.js';
-import { failAuditWrites, holdLock, waitForLockWaiters } from './support/concurrency.js';
+import {
+  type Change,
+  failAuditWrites,
+  holdLock,
+  waitForLockWaiters,
+} from './support/concurrency.js';
 import {
   createOrganization,
   createReferenceData,
@@ -1017,6 +1028,168 @@ describe('Documentary instructions', () => {
           'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
         ]);
       }
+    });
+  });
+
+  describe('reading while a change commits part-way through the read', () => {
+    const service = () => ctx.app.get(DocumentaryInstructionsService);
+
+    const principalOf = async (party: {
+      user: { id: string; organizationId: string; role: UserRole };
+    }) => {
+      const session = await ctx.prisma.session.findFirstOrThrow({
+        where: { userId: party.user.id },
+      });
+      return {
+        sessionId: session.id,
+        userId: party.user.id,
+        organizationId: party.user.organizationId,
+        role: party.user.role,
+      } satisfies Principal;
+    };
+
+    /**
+     * Starts `read` with `table` locked against every reader, so it runs until its first statement
+     * on that table and waits there; commits `change` in the locking transaction; then lets the
+     * read finish. What it loaded before the wait is from before the change, the rest after.
+     */
+    async function midRead<T>(table: string, change: Change, read: () => Promise<T>): Promise<T> {
+      const lock = await holdLock(ctx.prisma, (tx) =>
+        tx.$executeRawUnsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`),
+      );
+      const result = read();
+      // Awaited below, once the read can finish; a failure is reported there.
+      result.catch(() => undefined);
+      try {
+        await waitForLockWaiters(ctx.prisma, 1);
+      } catch (error) {
+        await lock.release();
+        throw error;
+      }
+      await lock.release(change);
+      return result;
+    }
+
+    /** Revision 2, written as a revision through the API writes it. */
+    const revision =
+      (s: Scenario): Change =>
+      async (tx) => {
+        const at = new Date();
+        const instruction = await advanceToNextRevision(tx, {
+          contractId: s.c1,
+          expectedVersions: [1],
+          at,
+        });
+        if (!instruction) throw new Error('Expected the instructions at version 1');
+        await tx.documentaryInstructionRevision.create({
+          data: {
+            instructionId: instruction.id,
+            revisionNumber: instruction.currentRevisionNumber,
+            consignee: secondContent.consignee,
+            notifyParty: null,
+            requirements: secondContent.requirements,
+            createdByUserId: s.trader.operator.user.id,
+            createdByOrganizationId: s.trader.organization.id,
+            createdAt: at,
+          },
+        });
+      };
+
+    /** The exporter's acknowledgement of revision 1, written as the API writes it. */
+    const acknowledgement =
+      (s: Scenario): Change =>
+      async (tx) => {
+        const at = new Date();
+        const instruction = await advanceForAcknowledgement(tx, {
+          contractId: s.c1,
+          revisionNumber: 1,
+          expectedVersions: [1],
+          at,
+        });
+        if (!instruction) throw new Error('Expected revision 1 unacknowledged, at version 1');
+        await tx.documentaryInstructionAcknowledgement.create({
+          data: {
+            instructionId: instruction.id,
+            revisionNumber: 1,
+            acknowledgedByUserId: s.exporter.operator.user.id,
+            acknowledgedByOrganizationId: s.exporter.organization.id,
+            acknowledgedAt: at,
+          },
+        });
+      };
+
+    /** Each read path, as the trader's viewer, giving the instructions under contract 1. */
+    const reads: [
+      string,
+      (s: Scenario, principal: Principal) => Promise<DocumentaryInstruction>,
+    ][] = [
+      [
+        'findForContract()',
+        async (s, principal) => {
+          const instruction = await service().findForContract(principal, s.voyage.id, s.c1);
+          if (!instruction) throw new Error('Expected the instructions to be found');
+          return instruction;
+        },
+      ],
+      [
+        'GET .../contracts/:contractId/documentary-instructions',
+        async (s) => {
+          const response = await read(s.trader.viewer.cookie, s.voyage.id, s.c1).expect(200);
+          const instruction = DocumentaryInstructionSchema.parse(response.body);
+          // The entity tag names the version of the body it came with.
+          expect(response.headers.etag).toBe(`"${instruction.version}"`);
+          return instruction;
+        },
+      ],
+      [
+        'list()',
+        async (s, principal) => {
+          const items = (await service().list(principal, s.voyage.id))?.items ?? [];
+          expect(items).toHaveLength(1);
+          return items[0] as DocumentaryInstruction;
+        },
+      ],
+      [
+        'GET .../documentary-instructions',
+        async (s) => {
+          const response = await http()
+            .get(listPath(s.voyage.id))
+            .set('Cookie', s.trader.viewer.cookie)
+            .expect(200);
+          const { items } = DocumentaryInstructionListResponseSchema.parse(response.body);
+          expect(items).toHaveLength(1);
+          return items[0] as DocumentaryInstruction;
+        },
+      ],
+    ];
+
+    describe.each<[string, string, (s: Scenario) => Change]>([
+      [
+        'a revision commits after the instruction is loaded, before its revisions',
+        'documentary_instruction_revisions',
+        revision,
+      ],
+      [
+        'an acknowledgement commits after the instruction is loaded, before its acknowledgements',
+        'documentary_instruction_acknowledgements',
+        acknowledgement,
+      ],
+    ])('when %s', (_, table, change) => {
+      it.each(reads)(
+        '%s returns them entirely as before or entirely as after',
+        async (_, readAs) => {
+          const s = await scenario();
+          await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+          const principal = await principalOf(s.trader.viewer);
+          const before = await readAs(s, principal);
+
+          const during = await midRead(table, change(s), () => readAs(s, principal));
+
+          const after = await readAs(s, principal);
+          expect([before.version, after.version]).toEqual([1, 2]);
+          expect([before, after]).toContainEqual(during);
+        },
+      );
     });
   });
 

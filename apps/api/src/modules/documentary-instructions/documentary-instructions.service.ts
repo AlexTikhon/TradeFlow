@@ -12,7 +12,7 @@ import type {
   DocumentaryInstructionListResponse,
 } from '@tradeflow/contracts';
 import { RequestValidationException } from '../../common/http/request-validation.exception.js';
-import type { Prisma } from '../../generated/prisma/client.js';
+import { Prisma } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
@@ -46,6 +46,7 @@ export interface PutResult {
  * Documentary instruction use cases (ADR 0012). Each takes the acting principal. Reads are scoped
  * in the database: instructions are loaded only under contracts the voyages module resolved for
  * the principal's organization as a counterparty, so another participant's request finds nothing.
+ * Each read takes the contracts and the instructions from one snapshot (`readSnapshot`).
  * Commands check the user's role and the organization's side of the contract here, then make
  * one conditional write (`instruction.writes.ts`) and record its audit event in the same
  * transaction. A failed precondition changes nothing and records nothing.
@@ -67,24 +68,26 @@ export class DocumentaryInstructionsService {
     principal: Principal,
     voyageId: string,
   ): Promise<DocumentaryInstructionListResponse | null> {
-    const contracts = await this.contracts.listForVoyage(principal, voyageId);
-    if (!contracts) {
-      return null;
-    }
-    const rows =
-      contracts.length === 0
-        ? []
-        : await this.prisma.documentaryInstruction.findMany({
-            where: { voyageId, tradeContractId: { in: contracts.map(({ id }) => id) } },
-            select: instructionSelect,
-          });
-    const byContract = new Map(rows.map((row) => [row.tradeContractId, row]));
-    return {
-      items: contracts.flatMap((contract) => {
-        const row = byContract.get(contract.id);
-        return row ? [toInstruction(row, contract)] : [];
-      }),
-    };
+    return this.readSnapshot(async (tx) => {
+      const contracts = await this.contracts.listForVoyage(principal, voyageId, tx);
+      if (!contracts) {
+        return null;
+      }
+      const rows =
+        contracts.length === 0
+          ? []
+          : await tx.documentaryInstruction.findMany({
+              where: { voyageId, tradeContractId: { in: contracts.map(({ id }) => id) } },
+              select: instructionSelect,
+            });
+      const byContract = new Map(rows.map((row) => [row.tradeContractId, row]));
+      return {
+        items: contracts.flatMap((contract) => {
+          const row = byContract.get(contract.id);
+          return row ? [toInstruction(row, contract)] : [];
+        }),
+      };
+    });
   }
 
   /**
@@ -96,15 +99,31 @@ export class DocumentaryInstructionsService {
     voyageId: string,
     contractId: string,
   ): Promise<DocumentaryInstruction | null> {
-    const contract = await this.contracts.findForVoyage(principal, voyageId, contractId);
-    if (!contract) {
-      return null;
-    }
-    const row = await this.prisma.documentaryInstruction.findUnique({
-      where: { tradeContractId: contract.id },
-      select: instructionSelect,
+    return this.readSnapshot(async (tx) => {
+      const contract = await this.contracts.findForVoyage(principal, voyageId, contractId, tx);
+      if (!contract) {
+        return null;
+      }
+      const row = await tx.documentaryInstruction.findUnique({
+        where: { tradeContractId: contract.id },
+        select: instructionSelect,
+      });
+      return row && toInstruction(row, contract);
     });
-    return row && toInstruction(row, contract);
+  }
+
+  /**
+   * Runs a read's queries in one REPEATABLE READ transaction, so they all see the snapshot taken
+   * by its first: the contract's visibility, the instruction's version, its revisions and their
+   * acknowledgements as of one moment. Prisma loads each relation in a statement of its own,
+   * and under READ COMMITTED each would see whatever had committed by then; a change committed
+   * between them would mix two versions (and an ETag that does not describe the body). A
+   * read-only transaction cannot fail serialization, so there is nothing to retry.
+   */
+  private readSnapshot<T>(read: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return this.prisma.$transaction(read, {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+    });
   }
 
   /**
