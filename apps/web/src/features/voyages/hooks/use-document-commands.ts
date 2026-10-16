@@ -3,7 +3,12 @@ import type { ContractDocument, DocumentListResponse } from '@tradeflow/contract
 import { ApiError } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
 import { saveFile } from '../../../shared/lib/save-file';
-import { sendForCurrentSession } from '../../auth/session';
+import {
+  currentSessionEpoch,
+  isCurrentSession,
+  type SessionEpoch,
+  sendForCurrentSession,
+} from '../../auth/session';
 import {
   type DocumentTarget,
   downloadDocumentVersion,
@@ -17,8 +22,11 @@ import { voyageQueries } from '../api/voyage.queries';
  *
  * - A 401 for the session the request was sent under signs out locally; a 401 that speaks for a
  *   session already replaced changes nothing (`sendForCurrentSession`).
- * - A response that arrives after that identity is gone writes nothing to the cache, and a
- *   download is not saved.
+ * - Each command is tied to the session it was issued in (its epoch, captured when issued and
+ *   carried in its own variables, so overlapping commands never share one). A response that
+ *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
+ *   no completion callback, and a download is not saved: even if the same user has signed back
+ *   in meanwhile, and even if the component that issued it has unmounted.
  * - Uploads are never retried automatically. A 412 (someone uploaded a version since the user
  *   chose what to replace) is reported, never resolved by re-sending against the newer version.
  */
@@ -30,7 +38,11 @@ function useDocumentCache(voyageId: string) {
   const { queryKey } = voyageQueries.documents(scope, voyageId);
   return {
     queryClient,
-    stillSignedIn: () => isCurrentIdentity(queryClient, identity),
+    /** The session as it stands now, to tie a command to. */
+    epoch: () => currentSessionEpoch(queryClient),
+    /** Whether the session `epoch` was taken in is still current, for this card's identity. */
+    stillCurrent: (epoch: SessionEpoch) =>
+      isCurrentSession(queryClient, epoch) && isCurrentIdentity(queryClient, identity),
     refresh: () => queryClient.invalidateQueries({ queryKey }),
     /** The instructions too: a 409 means they moved on to a new revision. */
     refreshInstructions: () =>
@@ -55,6 +67,9 @@ function useDocumentCache(voyageId: string) {
   };
 }
 
+/** A command and the session it was issued in. */
+type InSession<T> = T & { epoch: SessionEpoch };
+
 export interface UploadDocument {
   target: DocumentTarget;
   file: File;
@@ -75,18 +90,18 @@ export function useUploadDocument(voyageId: string) {
   const cache = useDocumentCache(voyageId);
 
   const mutation = useMutation({
-    mutationFn: ({ target, file, basedOnVersion }: UploadDocument) =>
+    mutationFn: ({ target, file, basedOnVersion }: InSession<UploadDocument>) =>
       sendForCurrentSession(cache.queryClient, () =>
         uploadDocumentVersion(target, file, basedOnVersion),
       ),
     // Runs even if the form has unmounted meanwhile: the list must show the new version.
-    onSuccess: (document) => {
-      if (!cache.stillSignedIn()) return;
+    onSuccess: (document, { epoch }) => {
+      if (!cache.stillCurrent(epoch)) return;
       cache.store(document);
       void cache.refresh();
     },
-    onError: (error) => {
-      if (isSuperseded(error) && cache.stillSignedIn()) {
+    onError: (error, { epoch }) => {
+      if (isSuperseded(error) && cache.stillCurrent(epoch)) {
         void cache.refresh();
         void cache.refreshInstructions();
       }
@@ -94,12 +109,15 @@ export function useUploadDocument(voyageId: string) {
   });
 
   const upload = (variables: UploadDocument, onUploaded: (document: ContractDocument) => void) => {
-    mutation.mutate(variables, {
-      // Only while the form is still mounted, and still for the same identity.
-      onSuccess: (document) => {
-        if (cache.stillSignedIn()) onUploaded(document);
+    mutation.mutate(
+      { ...variables, epoch: cache.epoch() },
+      {
+        // Only while the form is still mounted, and still in the same session.
+        onSuccess: (document, { epoch }) => {
+          if (cache.stillCurrent(epoch)) onUploaded(document);
+        },
       },
-    });
+    );
   };
 
   return {
@@ -117,26 +135,26 @@ export interface DownloadDocument {
 }
 
 /**
- * Downloads one version with the session, and saves it only if the identity that asked is still
- * the one signed in. A plain link would also carry the cookie, but its 401 would land the user
+ * Downloads one version with the session, and saves it only if the session it was asked in is
+ * still the current one. A plain link would also carry the cookie, but its 401 would land the user
  * on an error page instead of signing them out.
  */
 export function useDownloadDocument(voyageId: string) {
   const cache = useDocumentCache(voyageId);
 
   const mutation = useMutation({
-    mutationFn: ({ target, versionNumber }: DownloadDocument) =>
+    mutationFn: ({ target, versionNumber }: InSession<DownloadDocument>) =>
       sendForCurrentSession(cache.queryClient, () =>
         downloadDocumentVersion(target, versionNumber),
       ),
-    onSuccess: (blob, { fileName }) => {
-      if (cache.stillSignedIn()) saveFile(blob, fileName);
+    onSuccess: (blob, { fileName, epoch }) => {
+      if (cache.stillCurrent(epoch)) saveFile(blob, fileName);
     },
   });
 
   return {
     download: (variables: DownloadDocument) => {
-      mutation.mutate(variables);
+      mutation.mutate({ ...variables, epoch: cache.epoch() });
     },
     error: mutation.error,
     /** The version being downloaded, if any. */

@@ -222,6 +222,19 @@ export function currentSessionEpoch(queryClient: QueryClient): SessionEpoch {
 }
 
 /**
+ * Whether `epoch` is still the session as it stands: no transition has started since, and no
+ * session check has adopted another identity. False once the user has signed out, even if the
+ * same user has signed back in since. A session check that only confirms the identity changes
+ * nothing. Gate on it every side effect of a response to an operation started during `epoch`.
+ */
+export function isCurrentSession(queryClient: QueryClient, epoch: SessionEpoch): boolean {
+  const current = queryClient.getQueryData<CurrentUser | null>(SESSION_KEY);
+  return (
+    controlOf(queryClient).generation === epoch.generation && sameIdentity(current, epoch.identity)
+  );
+}
+
+/**
  * A request sent during `epoch` was answered 401: that session has ended (expired, or revoked
  * elsewhere). Signs out locally, like a 401 on protected data: requests are aborted, data dropped,
  * and the auth boundary sends the user to sign in. Nothing is sent to the server, which has ended
@@ -230,9 +243,7 @@ export function currentSessionEpoch(queryClient: QueryClient): SessionEpoch {
  * current one (whoever it belongs to) is left alone.
  */
 export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpoch): Promise<void> {
-  const control = controlOf(queryClient);
-  const current = queryClient.getQueryData<CurrentUser | null>(SESSION_KEY);
-  if (control.generation !== epoch.generation || !sameIdentity(current, epoch.identity)) return;
+  if (!isCurrentSession(queryClient, epoch)) return;
   await switchIdentity(queryClient, null);
 }
 

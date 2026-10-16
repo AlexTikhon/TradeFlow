@@ -9,6 +9,7 @@ import {
   currentSessionEpoch,
   endSession,
   getSignOutState,
+  isCurrentSession,
   sessionChangedElsewhere,
   sessionExpired,
   sessionQuery,
@@ -389,5 +390,71 @@ describe('a 401 attributed to the session it was sent under', () => {
 
     expect(sessionOf(queryClient)).toEqual(ana);
     expect(queryClient.getQueryData(voyagesOf(ana))).toEqual(['TF-ANA-ONLY']);
+  });
+});
+
+describe('whether the session an operation started in is still the current one', () => {
+  const revalidate = (queryClient: QueryClient) =>
+    queryClient.query({ ...sessionQuery, staleTime: 0 });
+
+  it('holds while nothing changed, and after a session check confirmed the same identity', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    expect(isCurrentSession(queryClient, epoch)).toBe(true);
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+    expect(isCurrentSession(queryClient, epoch)).toBe(true);
+  });
+
+  it('no longer holds once the same user has signed out and back in', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    await endSession(queryClient).settled;
+    expect(isCurrentSession(queryClient, epoch)).toBe(false);
+    await startSession(queryClient, credentialsOf(ana));
+
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(isCurrentSession(queryClient, epoch)).toBe(false);
+  });
+
+  it('no longer holds after another tab went to someone else and back', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    session.current = claire;
+    await sessionChangedElsewhere(queryClient);
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    session.current = ana;
+    await sessionChangedElsewhere(queryClient);
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+
+    expect(isCurrentSession(queryClient, epoch)).toBe(false);
+  });
+
+  it('no longer holds once a session check adopted another identity, without a transition', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+
+    expect(isCurrentSession(queryClient, epoch)).toBe(false);
+  });
+
+  it('keeps each epoch to itself: an older one stays stale beside a newer, current one', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const before = currentSessionEpoch(queryClient);
+    await switchIdentity(queryClient, null);
+    await switchIdentity(queryClient, ana);
+    const after = currentSessionEpoch(queryClient);
+
+    expect(isCurrentSession(queryClient, before)).toBe(false);
+    expect(isCurrentSession(queryClient, after)).toBe(true);
   });
 });

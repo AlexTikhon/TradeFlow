@@ -1,15 +1,16 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   type ContractDocument,
   type CounterpartyContractListResponse,
+  type CurrentUser,
   type DocumentaryInstruction,
   MAX_DOCUMENT_BYTES,
   type ProblemDetails,
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
+import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import { anInstruction, aRevision } from '../../../test/fixtures/documentary-instructions';
 import {
   aDocument,
@@ -183,6 +184,12 @@ const chooseFile = async (user: User, item: Item, file: File) => {
 const protectedQueries = (queryClient: Rendered['queryClient']) =>
   queryClient.getQueryCache().findAll({ queryKey: ['protected'] });
 
+const pendingMutations = (queryClient: Rendered['queryClient']) =>
+  queryClient
+    .getMutationCache()
+    .getAll()
+    .filter((mutation) => mutation.state.status === 'pending');
+
 const settledMutations = (queryClient: Rendered['queryClient']) =>
   queryClient
     .getMutationCache()
@@ -205,6 +212,43 @@ function anotherTab(queryClient: Rendered['queryClient']) {
     stopSync();
   });
   return channel;
+}
+
+async function signOut(user: User) {
+  await user.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(await screen.findByRole('heading', { name: 'Sign in to TradeFlow' })).toBeVisible();
+}
+
+/**
+ * Signs in on the sign-in page, then opens the voyage page again. (Where sign-in lands depends
+ * on whether the sign-out's redirect remembered the page, which these tests do not rely on.)
+ */
+async function signIn({ user, router }: Pick<Rendered, 'user' | 'router'>, identity: CurrentUser) {
+  await user.type(await screen.findByLabelText(/Email/), identity.user.email);
+  await user.type(screen.getByLabelText(/Password/), TEST_PASSWORD);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(await screen.findByText(identity.user.fullName)).toBeInTheDocument();
+  await act(() => router.navigate(page));
+}
+
+/** Another tab signed in as `identity`; waits until this tab has adopted it. */
+async function anotherTabSignsInAs(
+  tab: BroadcastChannel,
+  { session, queryClient }: Pick<Rendered, 'session' | 'queryClient'>,
+  identity: CurrentUser,
+) {
+  session.current = identity;
+  tab.postMessage(SESSION_CHANGED);
+  await waitFor(() => {
+    expect(queryClient.getQueryData(['session'])).toEqual(identity);
+  });
+}
+
+/** Waits until every request still on its way has been answered and handled. */
+async function allAnswered(queryClient: Rendered['queryClient']) {
+  await waitFor(() => {
+    expect(pendingMutations(queryClient)).toEqual([]);
+  });
 }
 
 /** What the browser was asked to save: object URLs made, and the links clicked. */
@@ -743,6 +787,186 @@ describe('Documents on the voyage page', () => {
 
       expect(create).not.toHaveBeenCalled();
       expect(saved).toEqual([]);
+    });
+  });
+  describe('when the session is replaced while a request is in flight, even by the same user', () => {
+    /** Ana's document list in the session now current: what a stale response must not touch. */
+    const anasDocuments = (queryClient: Rendered['queryClient']) =>
+      queryClient
+        .getQueryCache()
+        .findAll({ queryKey: ['protected', `${ana.user.id}:${ana.organization.id}`] })
+        .filter((query) => query.queryKey.includes('documents'));
+
+    it('does not save a download asked for before Ana signed out and back in', async () => {
+      servePage({ documents: [aDocument()] });
+      const content = serveDownload(1, pdfBytes(), { hold: true });
+      const { saved, create } = watchSaves();
+      const rendered = renderRoute(page);
+      const { user, queryClient } = rendered;
+      const item = await billOfLading();
+      await user.click(
+        item.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+      );
+      await content.received;
+
+      await signOut(user);
+      await signIn(rendered, ana);
+      expect(await billOfLading()).toBeDefined();
+      content.release();
+      await allAnswered(queryClient);
+
+      expect(create).not.toHaveBeenCalled();
+      expect(saved).toEqual([]);
+    });
+
+    it('lets an upload sent before Ana signed out and back in touch nothing of her new session', async () => {
+      const state = servePage();
+      const upload = serveUpload(() => HttpResponse.json(aDocument(), { status: 201 }), {
+        hold: true,
+      });
+      const rendered = renderRoute(page);
+      const { user, queryClient } = rendered;
+      const before = await billOfLading();
+      await chooseFile(user, before, aPdf());
+      await user.click(before.getByRole('button', { name: 'Upload' }));
+      await upload.received;
+
+      await signOut(user);
+      await signIn(rendered, ana);
+      const item = await billOfLading();
+      expect(item.getByText('Not uploaded yet')).toBeVisible();
+      const documentRequests = state.documentRequests;
+      const instructionRequests = state.instructionRequests;
+      upload.release();
+      await allAnswered(queryClient);
+
+      expect(screen.queryByText(/has been uploaded/)).not.toBeInTheDocument();
+      expect(item.getByText('Not uploaded yet')).toBeVisible();
+      expect(state.documentRequests).toBe(documentRequests);
+      expect(state.instructionRequests).toBe(instructionRequests);
+      const [documents] = anasDocuments(queryClient);
+      expect(documents?.state.data).toEqual({ items: [] });
+      expect(documents?.state.isInvalidated).toBe(false);
+    });
+
+    it('lets a 409 sent before another tab went to Claire and back to Ana refresh nothing', async () => {
+      const state = servePage();
+      const upload = serveUpload(
+        () => problem(409, 'Conflict', 'Revision 1 has been superseded by revision 2.'),
+        { hold: true },
+      );
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { user, queryClient } = rendered;
+      const otherTab = anotherTab(queryClient);
+      const before = await billOfLading();
+      await chooseFile(user, before, aPdf());
+      await user.click(before.getByRole('button', { name: 'Upload' }));
+      await upload.received;
+
+      await anotherTabSignsInAs(otherTab, rendered, claire);
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      await anotherTabSignsInAs(otherTab, rendered, ana);
+      expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
+      expect(await billOfLading()).toBeDefined();
+      const documentRequests = state.documentRequests;
+      const instructionRequests = state.instructionRequests;
+      upload.release();
+      await allAnswered(queryClient);
+
+      expect(state.documentRequests).toBe(documentRequests);
+      expect(state.instructionRequests).toBe(instructionRequests);
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.state.isInvalidated).toBe(false);
+      }
+    });
+
+    it('does not save a download asked for before Ana signed out, Claire signed in and another tab returned to Ana', async () => {
+      servePage({ documents: [aDocument()] });
+      const content = serveDownload(1, pdfBytes(), { hold: true });
+      const { saved, create } = watchSaves();
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { user, queryClient } = rendered;
+      const otherTab = anotherTab(queryClient);
+      const item = await billOfLading();
+      await user.click(
+        item.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+      );
+      await content.received;
+
+      await signOut(user);
+      await signIn(rendered, claire);
+      await anotherTabSignsInAs(otherTab, rendered, ana);
+      expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
+      expect(await billOfLading()).toBeDefined();
+      content.release();
+      await allAnswered(queryClient);
+
+      expect(create).not.toHaveBeenCalled();
+      expect(saved).toEqual([]);
+    });
+
+    it('completes an upload when a session check only confirmed that Ana is still signed in', async () => {
+      const state = servePage();
+      const uploaded = aDocument({
+        currentVersion: aDocumentVersion({ fileName: 'bl-signed.pdf' }),
+      });
+      const upload = serveUpload(
+        () => {
+          state.documents = [uploaded];
+          return HttpResponse.json(uploaded, { status: 201 });
+        },
+        { hold: true },
+      );
+      const { user, session, queryClient } = renderRoute(page);
+      const item = await billOfLading();
+      await chooseFile(user, item, aPdf('bl-signed.pdf'));
+      await user.click(item.getByRole('button', { name: 'Upload' }));
+      await upload.received;
+
+      const checks = session.meRequests;
+      await queryClient.refetchQueries({ queryKey: ['session'] });
+      expect(session.meRequests).toBe(checks + 1);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      upload.release();
+
+      expect(
+        await item.findByText('Version 1 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+      expect(item.getByText('Version 1: bl-signed.pdf (47.1 KB)')).toBeVisible();
+    });
+
+    it('keeps to each download the session it was asked in, when they overlap', async () => {
+      servePage({ documents: [replacedBy(aDocument())] });
+      const first = serveDownload(1, pdfBytes(1000), { hold: true });
+      const secondBytes = pdfBytes(2000);
+      const second = serveDownload(2, secondBytes, { hold: true });
+      const { saved } = watchSaves();
+      const rendered = renderRoute(page);
+      const { user, queryClient } = rendered;
+      const before = await billOfLading();
+      await user.click(before.getByRole('button', { name: 'Earlier versions (1)' }));
+      await user.click(
+        before.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+      );
+      await first.received;
+
+      await signOut(user);
+      await signIn(rendered, ana);
+      const item = await billOfLading();
+      await user.click(
+        item.getByRole('button', { name: 'Download version 2 of the bill of lading' }),
+      );
+      await second.received;
+      // The older answer arrives while the newer request is still on its way, then the newer.
+      first.release();
+      await waitFor(() => {
+        expect(pendingMutations(queryClient)).toHaveLength(1);
+      });
+      second.release();
+      await allAnswered(queryClient);
+
+      expect(saved.map(({ download }) => download)).toEqual(['bill-of-lading-v2.pdf']);
+      expect(new Uint8Array(await (saved[0]?.blob as Blob).arrayBuffer())).toEqual(secondBytes);
     });
   });
 });
