@@ -64,6 +64,9 @@ importers:
       '@tradeflow/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      busboy:
+        specifier: 1.6.0
+        version: 1.6.0
       reflect-metadata:
         specifier: 0.2.2
         version: 0.2.2
@@ -83,6 +86,9 @@ importers:
       '@swc/core':
         specifier: 1.16.18
         version: 1.16.18
+      '@types/busboy':
+        specifier: 1.5.4
+        version: 1.5.4
       '@types/express':
         specifier: 5.0.6
         version: 5.0.6
@@ -1469,6 +1475,9 @@ packages:
 
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
+
+  '@types/busboy@1.5.4':
+    resolution: {integrity: sha512-kG7WrUuAKK0NoyxfQHsVE6j1m01s6kMma64E+OZenQABMQyTJop1DumUWcLwAQ2JzpefU7PDYoRDKl8uZosFjw==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -4843,6 +4852,10 @@ snapshots:
   '@types/body-parser@1.19.6':
     dependencies:
       '@types/connect': 3.4.38
+      '@types/node': 24.19.2
+
+  '@types/busboy@1.5.4':
+    dependencies:
       '@types/node': 24.19.2
 
   '@types/chai@5.2.3':

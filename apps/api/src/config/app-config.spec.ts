@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from './app-config.js';
 
@@ -10,6 +11,7 @@ describe('loadConfig', () => {
       port: 4000,
       databaseUrl: 'postgresql://u:p@localhost:5433/tradeflow',
       session: { ttlMs: 8 * 60 * 60_000, secureCookie: false },
+      documentStorage: { directory: resolve('var/documents') },
     });
   });
 
@@ -18,8 +20,16 @@ describe('loadConfig', () => {
       NODE_ENV: 'production',
       DATABASE_URL: 'postgresql://u:p@db:5432/tradeflow',
       SESSION_TTL_MINUTES: '30',
+      DOCUMENT_STORAGE_DIR: '/srv/tradeflow/documents',
     });
     expect(config.session).toEqual({ ttlMs: 30 * 60_000, secureCookie: true });
+    expect(config.documentStorage).toEqual({ directory: resolve('/srv/tradeflow/documents') });
+  });
+
+  it('requires a document storage directory in production', () => {
+    expect(() =>
+      loadConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgresql://u:p@db:5432/tradeflow' }),
+    ).toThrow(/Required in production[\s\S]*DOCUMENT_STORAGE_DIR/);
   });
 
   it('fails fast listing every invalid variable', () => {

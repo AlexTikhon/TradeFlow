@@ -2,6 +2,7 @@ import { queryOptions } from '@tanstack/react-query';
 import type { ListVoyagesQuery } from '@tradeflow/contracts';
 import type { ProtectedScope } from '../../../shared/auth/identity';
 import { fetchDocumentaryInstructions } from './documentary-instructions.api';
+import { fetchDocuments } from './documents.api';
 import { fetchMyContracts, fetchNotices } from './notices.api';
 import { fetchTradeString, fetchVoyage, fetchVoyages } from './voyages.api';
 
@@ -51,5 +52,11 @@ export const voyageQueries = {
         'documentary-instructions',
       ] as const,
       queryFn: ({ signal }) => fetchDocumentaryInstructions(voyageId, signal),
+    }),
+  /** Documents presented under the organization's contracts, each with every version. */
+  documents: (scope: ProtectedScope, voyageId: string) =>
+    queryOptions({
+      queryKey: [...voyageQueries.all(scope), 'detail', voyageId, 'documents'] as const,
+      queryFn: ({ signal }) => fetchDocuments(voyageId, signal),
     }),
 };

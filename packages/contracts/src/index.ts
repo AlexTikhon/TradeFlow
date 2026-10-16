@@ -5,4 +5,5 @@ export * from './trade-string.js';
 export * from './trade-contracts.js';
 export * from './notices.js';
 export * from './documentary-instructions.js';
+export * from './documents.js';
 export * from './auth.js';

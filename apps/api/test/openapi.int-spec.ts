@@ -2,6 +2,10 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestApp, type TestApp } from './support/test-app.js';
 
+/** One document's path: a document type required by one instruction revision. */
+const DOCUMENT =
+  '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}';
+
 /** Collects every `$ref` value anywhere in a JSON document. */
 function collectRefs(node: unknown, refs: string[] = []): string[] {
   if (Array.isArray(node)) {
@@ -45,6 +49,9 @@ describe('OpenAPI document', () => {
         '/api/voyages/{voyageId}/documentary-instructions',
         '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions',
         '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/acknowledgement',
+        '/api/voyages/{voyageId}/documents',
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}/versions',
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/documents/{documentType}/versions/{versionNumber}/content',
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
@@ -94,6 +101,9 @@ describe('OpenAPI document', () => {
         '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/acknowledgement',
         'post',
       ),
+      operation('/api/voyages/{voyageId}/documents', 'get'),
+      operation(`${DOCUMENT}/versions`, 'post'),
+      operation(`${DOCUMENT}/versions/{versionNumber}/content`, 'get'),
       operation('/api/auth/me', 'get'),
       operation('/api/voyages', 'post'),
       operation('/api/vessels', 'get'),
@@ -310,6 +320,82 @@ describe('OpenAPI document', () => {
       'id',
       'previousRevisions',
       'version',
+      'voyageId',
+    ]);
+  });
+
+  it('documents documents: a multipart upload, its limits and refusals, and a binary download', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      parameters?: { name: string; in: string; required?: boolean }[];
+      requestBody?: { content: Record<string, { schema: Record<string, unknown> }> };
+      responses: Record<
+        string,
+        { headers?: Record<string, unknown>; content?: Record<string, unknown> }
+      >;
+    };
+    type Schema = { properties?: Record<string, unknown> };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+    const upload = document.paths[`${DOCUMENT}/versions`]?.post;
+    const download = document.paths[`${DOCUMENT}/versions/{versionNumber}/content`]?.get;
+    const codes = (op: Operation | undefined) => Object.keys(op?.responses ?? {});
+    const header = (op: Operation | undefined, name: string) =>
+      op?.parameters?.find((parameter) => parameter.in === 'header' && parameter.name === name);
+
+    expect(Object.keys(upload?.requestBody?.content ?? {})).toEqual(['multipart/form-data']);
+    expect(upload?.requestBody?.content['multipart/form-data']?.schema).toMatchObject({
+      type: 'object',
+      required: ['file'],
+      additionalProperties: false,
+      properties: { file: { type: 'string', format: 'binary' } },
+    });
+    expect(codes(upload)).toEqual(
+      expect.arrayContaining([
+        '201',
+        '400',
+        '401',
+        '403',
+        '404',
+        '409',
+        '412',
+        '413',
+        '415',
+        '428',
+      ]),
+    );
+    expect(header(upload, 'If-Match')?.required).toBe(false);
+    expect(header(upload, 'If-None-Match')?.required).toBe(false);
+    expect(upload?.responses['201']?.headers).toHaveProperty('ETag');
+    expect(upload?.responses['201']?.headers).toHaveProperty('Location');
+
+    expect(download?.responses['200']?.content).toEqual({
+      'application/pdf': { schema: { type: 'string', format: 'binary' } },
+    });
+    expect(download?.responses['200']?.headers).toHaveProperty('Content-Disposition');
+    expect(codes(download)).toEqual(expect.arrayContaining(['200', '400', '401', '404']));
+
+    const { schemas } = document.components;
+    expect(Object.keys(schemas.DocumentVersion?.properties ?? {}).sort()).toEqual([
+      'fileName',
+      'mediaType',
+      'number',
+      'sha256',
+      'sizeBytes',
+      'uploadedAt',
+      'uploadedBy',
+    ]);
+    // Where the bytes are kept is the server's business.
+    expect(JSON.stringify(schemas)).not.toMatch(/storage/i);
+    expect(Object.keys(schemas.ContractDocument?.properties ?? {}).sort()).toEqual([
+      'contract',
+      'currentVersion',
+      'documentType',
+      'id',
+      'previousVersions',
+      'revisionNumber',
       'voyageId',
     ]);
   });

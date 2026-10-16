@@ -11,6 +11,7 @@ import type {
   DocumentaryInstructionContent,
   DocumentaryInstructionListResponse,
 } from '@tradeflow/contracts';
+import type { WritePrecondition } from '../../common/http/preconditions.js';
 import { RequestValidationException } from '../../common/http/request-validation.exception.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
@@ -29,13 +30,6 @@ import {
   advanceToNextRevision,
   createInstruction,
 } from './instruction.writes.js';
-
-/** What a write is conditional on, from the request's precondition headers. */
-export type WritePrecondition =
-  /** `If-None-Match: *`: only if the contract has no instruction yet. */
-  | { kind: 'absent' }
-  /** `If-Match`: only if the instruction is at one of these versions. */
-  | { kind: 'version'; versions: number[] };
 
 export interface PutResult {
   instruction: DocumentaryInstruction;

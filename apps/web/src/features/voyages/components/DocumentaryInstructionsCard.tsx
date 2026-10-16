@@ -21,6 +21,7 @@ import type {
   CounterpartyContractListResponse,
   DocumentaryInstruction,
   DocumentaryInstructionListResponse,
+  DocumentListResponse,
 } from '@tradeflow/contracts';
 import { type ReactNode, useState } from 'react';
 import { ApiError } from '../../../shared/api/http-client';
@@ -34,6 +35,7 @@ import {
 } from '../hooks/use-documentary-instruction-commands';
 import { InstructionForm } from './InstructionForm';
 import { InstructionRevision } from './InstructionRevision';
+import { RevisionDocuments } from './RevisionDocuments';
 
 function describeAcknowledgeFailure(error: Error): string {
   if (isPreconditionFailure(error)) {
@@ -49,6 +51,7 @@ interface ContractInstructionsProps {
   voyageId: string;
   contract: CounterpartyContract;
   instruction: DocumentaryInstruction | null;
+  documents: UseQueryResult<DocumentListResponse>;
   onReviewLatest: () => Promise<unknown>;
 }
 
@@ -57,6 +60,7 @@ function ContractInstructions({
   voyageId,
   contract,
   instruction,
+  documents,
   onReviewLatest,
 }: ContractInstructionsProps) {
   const identity = useIdentity();
@@ -149,6 +153,14 @@ function ContractInstructions({
           </Typography>
         )}
 
+        <RevisionDocuments
+          voyageId={voyageId}
+          contract={contract}
+          revision={currentRevision}
+          current
+          documents={documents}
+        />
+
         {previousRevisions.length > 0 && (
           <Accordion disableGutters variant="outlined">
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
@@ -159,7 +171,16 @@ function ContractInstructions({
             <AccordionDetails>
               <Stack spacing={2} divider={<Divider flexItem />}>
                 {previousRevisions.map((revision) => (
-                  <InstructionRevision key={revision.number} revision={revision} current={false} />
+                  <Stack key={revision.number} spacing={2}>
+                    <InstructionRevision revision={revision} current={false} />
+                    <RevisionDocuments
+                      voyageId={voyageId}
+                      contract={contract}
+                      revision={revision}
+                      current={false}
+                      documents={documents}
+                    />
+                  </Stack>
                 ))}
               </Stack>
             </AccordionDetails>
@@ -210,18 +231,21 @@ interface DocumentaryInstructionsCardProps {
   voyageId: string;
   contracts: UseQueryResult<CounterpartyContractListResponse>;
   instructions: UseQueryResult<DocumentaryInstructionListResponse>;
+  documents: UseQueryResult<DocumentListResponse>;
 }
 
 /**
  * Documentary instructions under the organization's own contracts on this voyage: the current
- * revision, earlier ones, acknowledgements, and the buyer's form. Degrades on its own, like the
- * other cards. Once loaded it stays on screen through a failed refresh, so an open draft is never
- * thrown away by a network error.
+ * revision, earlier ones, acknowledgements, the buyer's form, and the documents the seller
+ * presents against each revision. Degrades on its own, like the other cards, and so do the
+ * documents within it. Once loaded it stays on screen through a failed refresh, so an open draft
+ * or a chosen file is never thrown away by a network error.
  */
 export function DocumentaryInstructionsCard({
   voyageId,
   contracts,
   instructions,
+  documents,
 }: DocumentaryInstructionsCardProps) {
   const error = contracts.error ?? instructions.error;
   const ownContracts = contracts.data?.items;
@@ -275,6 +299,7 @@ export function DocumentaryInstructionsCard({
               voyageId={voyageId}
               contract={contract}
               instruction={loaded.find((item) => item.contract.id === contract.id) ?? null}
+              documents={documents}
               onReviewLatest={() => instructions.refetch()}
             />
           ))}
@@ -292,7 +317,9 @@ export function DocumentaryInstructionsCard({
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Given by the buyer to the seller under each sale contract, and seen only by those two: the
           consignee, the notify party and the documents to present. Every revision is kept.
-          Acknowledging a revision records its receipt; it does not accept any commercial terms.
+          Acknowledging a revision records its receipt; it does not accept any commercial terms. The
+          seller presents the documents against the current revision; every uploaded version is
+          kept.
         </Typography>
         {body}
       </CardContent>

@@ -3,6 +3,7 @@ import {
   isIfNoneMatchAny,
   PreconditionRequiredException,
   versionsFromIfMatch,
+  writePrecondition,
 } from './preconditions.js';
 import { RequestValidationException } from './request-validation.exception.js';
 
@@ -41,5 +42,33 @@ describe('isIfNoneMatchAny', () => {
     expect(isIfNoneMatchAny(' * ')).toBe(true);
     expect(isIfNoneMatchAny(undefined)).toBe(false);
     expect(isIfNoneMatchAny('"1"')).toBe(false);
+  });
+});
+
+describe('writePrecondition', () => {
+  const missing = 'Name the version.';
+
+  it('reads a creation or a replacement', () => {
+    expect(writePrecondition(undefined, '*', missing)).toEqual({ kind: 'absent' });
+    expect(writePrecondition('"2", "3"', undefined, missing)).toEqual({
+      kind: 'version',
+      versions: [2, 3],
+    });
+  });
+
+  it('is 428 with the given message when the write names nothing', () => {
+    expect(() => writePrecondition(undefined, undefined, missing)).toThrow(
+      new PreconditionRequiredException(missing),
+    );
+  });
+
+  it.each<[string | undefined, string | undefined]>([
+    ['"1"', '*'],
+    [undefined, '"1"'],
+    ['3', undefined],
+  ])('refuses If-Match %j with If-None-Match %j as malformed', (ifMatch, ifNoneMatch) => {
+    expect(() => writePrecondition(ifMatch, ifNoneMatch, missing)).toThrow(
+      RequestValidationException,
+    );
   });
 });

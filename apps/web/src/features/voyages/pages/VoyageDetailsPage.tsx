@@ -51,6 +51,7 @@ export function VoyageDetailsPage() {
     ...voyageQueries.documentaryInstructions(scope, voyageId),
     enabled: isValidId,
   });
+  const documents = useQuery({ ...voyageQueries.documents(scope, voyageId), enabled: isValidId });
 
   if (!isValidId || (error instanceof ApiError && error.status === 404)) {
     return <VoyageNotFound />;
@@ -100,6 +101,7 @@ export function VoyageDetailsPage() {
               voyageId={voyage.id}
               contracts={myContracts}
               instructions={instructions}
+              documents={documents}
             />
             <ParticipantsCard participants={voyage.participants} />
           </Stack>

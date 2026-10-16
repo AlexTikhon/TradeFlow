@@ -54,3 +54,40 @@ export function versionsFromIfMatch(header: string | undefined): number[] | unde
 export function isIfNoneMatchAny(header: string | undefined): boolean {
   return header?.trim() === '*';
 }
+
+/** What a create-or-replace write is conditional on, from its precondition headers. */
+export type WritePrecondition =
+  /** `If-None-Match: *`: only if nothing exists yet. */
+  | { kind: 'absent' }
+  /** `If-Match`: only if the aggregate is at one of these versions. */
+  | { kind: 'version'; versions: number[] };
+
+/**
+ * The precondition of a write that either creates the first version (`If-None-Match: *`) or
+ * replaces a named one (`If-Match`). Neither is 428 with `missing` as its message; both at
+ * once, or an `If-None-Match` other than `*`, is a malformed request.
+ */
+export function writePrecondition(
+  ifMatch: string | undefined,
+  ifNoneMatch: string | undefined,
+  missing: string,
+): WritePrecondition {
+  const versions = versionsFromIfMatch(ifMatch);
+  if (versions && ifNoneMatch !== undefined) {
+    throw new RequestValidationException([
+      { path: 'header', message: 'Send either If-Match or If-None-Match: *, not both' },
+    ]);
+  }
+  if (versions) {
+    return { kind: 'version', versions };
+  }
+  if (isIfNoneMatchAny(ifNoneMatch)) {
+    return { kind: 'absent' };
+  }
+  if (ifNoneMatch !== undefined) {
+    throw new RequestValidationException([
+      { path: 'header.if-none-match', message: 'Only If-None-Match: * is accepted' },
+    ]);
+  }
+  throw new PreconditionRequiredException(missing);
+}

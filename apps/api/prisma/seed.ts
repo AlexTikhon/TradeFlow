@@ -10,6 +10,9 @@ import {
   PrismaClient,
   type VoyageStatus,
 } from '../src/generated/prisma/client.js';
+import { loadConfig } from '../src/config/app-config.js';
+import type { DocumentStorage } from '../src/infrastructure/storage/document-storage.js';
+import { LocalDocumentStorage } from '../src/infrastructure/storage/local-document-storage.js';
 import { hashPassword } from '../src/modules/auth/password.js';
 import { deadlineViolations } from '../src/modules/notices/notice-rules.js';
 import { toLinearTradeString } from '../src/modules/voyages/trade-string.js';
@@ -495,7 +498,7 @@ function planVoyage({ number, participants, tradeString, laycan, ...fields }: Vo
   };
 }
 
-async function seed(prisma: PrismaClient): Promise<void> {
+async function seed(prisma: PrismaClient, storage: DocumentStorage): Promise<void> {
   for (const { id, ...data } of organizations) {
     await prisma.organization.upsert({ where: { id }, update: data, create: { id, ...data } });
   }
@@ -521,12 +524,21 @@ async function seed(prisma: PrismaClient): Promise<void> {
   const notices = noticeSeeds.map((seed) => planNotice(seed, now));
   for (const { id, data, participants, contracts } of plans) {
     // The seed owns these voyages, so their participants, trade string and notices are replaced
-    // wholesale (notices and documentary instructions first: they reference the contracts, which
-    // reference the participants). Notices and instructions given through the API on a seeded
-    // voyage go too (an instruction takes its revisions and acknowledgements with it); their
-    // audit events stay. No instructions are seeded: the demo starts without any.
+    // wholesale (documents, notices and documentary instructions first: documents reference the
+    // instruction revisions, and all of them reference the contracts, which reference the
+    // participants). Documents, notices and instructions given through the API on a seeded voyage
+    // go too (a document takes its versions with it, an instruction its revisions and
+    // acknowledgements); their audit events stay. Nothing of this is seeded: the demo starts
+    // without any. The documents' stored bytes are removed once their rows are gone.
+    const storageKeys = (
+      await prisma.documentVersion.findMany({
+        where: { document: { voyageId: id } },
+        select: { storageKey: true },
+      })
+    ).map(({ storageKey }) => storageKey);
     await prisma.$transaction([
       prisma.voyage.upsert({ where: { id }, update: data, create: { id, ...data } }),
+      prisma.document.deleteMany({ where: { voyageId: id } }),
       prisma.notice.deleteMany({ where: { voyageId: id } }),
       prisma.documentaryInstruction.deleteMany({ where: { voyageId: id } }),
       prisma.tradeContract.deleteMany({ where: { voyageId: id } }),
@@ -535,6 +547,11 @@ async function seed(prisma: PrismaClient): Promise<void> {
       prisma.tradeContract.createMany({ data: contracts }),
       prisma.notice.createMany({ data: notices.filter((notice) => notice.voyageId === id) }),
     ]);
+    // Versions uploaded meanwhile (between the read and the transaction) keep their bytes as
+    // orphans; reconciliation removes those (docs/architecture.md).
+    for (const key of storageKeys) {
+      await storage.remove(key);
+    }
   }
 
   // Voyages created through the API continue numbering after the seeded references. Never
@@ -556,8 +573,10 @@ if (!connectionString) {
 }
 
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+// The same directory the API keeps document bytes in.
+const storage = new LocalDocumentStorage(loadConfig(process.env).documentStorage.directory);
 try {
-  await seed(prisma);
+  await seed(prisma, storage);
   console.log(
     `Seeded ${organizations.length} organizations, ${users.length} users, ${vessels.length} vessels, ` +
       `${ports.length} ports, ${commodities.length} commodities, ${voyages.length} voyages ` +

@@ -10,11 +10,15 @@ meaningful alternatives are recorded as ADRs in [decisions/](decisions/).
                 │ fetch /api/*  (same origin; Vite proxies in development)
                 ▼
             API (NestJS, single process) ──▶ PostgreSQL 18
+                │
+                └──▶ document storage (a private directory on the API's filesystem)
 ```
 
-There is one deployable backend, one database and one static frontend. Nothing else is needed for
-the current scope: no cache, no queue and no object store. Each of those arrives with the feature
-that needs it (see [Evolution](#evolution)).
+There is one deployable backend, one database and one static frontend. Uploaded document bytes
+live in a private directory beside the API, behind a storage interface
+([ADR 0013](decisions/0013-documents.md)). Nothing else is needed for the current scope: no cache,
+no queue and no object store. Each of those arrives with the feature that needs it (see
+[Evolution](#evolution)).
 
 ## Monorepo
 
@@ -45,7 +49,11 @@ src/
   app.setup.ts                  HTTP pipeline, shared by main.ts and integration tests
   config/app-config.ts          environment schema (Zod), fail fast on boot
   infrastructure/prisma/        PrismaService (driver adapter: node-postgres)
-  common/http/                  ProblemDetailsFilter, ZodValidationPipe, OpenAPI wiring
+  infrastructure/storage/       DocumentStorage (stage, promote, discard, read, remove) and its
+                                local-filesystem implementation (ADR 0013)
+  common/http/                  ProblemDetailsFilter, ZodValidationPipe, OpenAPI wiring;
+                                multipart-file.ts (one streamed file, limits enforced while it
+                                arrives), content-disposition.ts (attachment headers)
   health/                       GET /api/health (readiness: DB answers SELECT 1)
   modules/
     auth/
@@ -58,6 +66,8 @@ src/
       password.ts               argon2id hashing (PHC strings)
       session-token.ts          random tokens and their SHA-256 digests
       user-permissions.ts       requireOperator(principal, action): the role check (ADR 0008)
+      session-principals.ts     SessionPrincipals.refresh: the session's principal read again,
+                                for commands that commit long after the request arrived
     audit/
       audit-trail.ts            AuditTrail.record(tx, event): append-only, same transaction
     reference-data/
@@ -86,6 +96,14 @@ src/
       instruction.writes.ts     the three conditional SQL statements that decide every write
       documentary-instructions.service.ts     list, get, put (create or revise), acknowledge
       documentary-instructions.controller.ts  preconditions (If-Match / If-None-Match), ETag
+      instruction-revisions.ts  InstructionRevisions: the current revision and what a revision
+                                requires; exported, share-locks the instruction for a commit
+    documents/
+      document-rules.ts         PDF signature, display file names, UploadInspection (size, hash)
+      document.read-model.ts    allowlisted select (every version, never the storage key)
+      document.writes.ts        the two conditional SQL statements that decide every version
+      documents.service.ts      list, upload (check, receive, keep, commit, compensate), download
+      documents.controller.ts   multipart upload, preconditions, ETag, attachment download
   common/http/preconditions.ts  If-Match / If-None-Match parsing, 428 (no comparison: the DB does it)
 ```
 
@@ -98,7 +116,9 @@ rule ([ADR 0011](decisions/0011-counterparty-notices.md)). They reach contracts 
 `CounterpartyContracts`, which the voyages module exports. Documentary instructions follow the
 same pattern in their own module ([ADR 0012](decisions/0012-documentary-instructions.md)): the
 same visibility rule through the same provider, three tables of their own, and conditional
-writes.
+writes. Documents are the next module ([ADR 0013](decisions/0013-documents.md)): two tables and
+the stored bytes of their own, the same visibility rule, and the instruction revisions they answer
+read only through what the documentary-instructions module exports.
 
 ### Module boundaries
 
@@ -110,7 +130,10 @@ extraction possible later:
   that the ids in a request exist) and `AuditTrail` (to record what it did); it never touches
   `audit_events` itself. `notices` and `documentary-instructions` import `CounterpartyContracts`
   (to resolve the reader's contracts, with the access rule inside the query) and `AuditTrail`;
-  neither queries `trade_contracts` or `voyage_participants`. Its read model reads the actors' names and
+  neither queries `trade_contracts` or `voyage_participants`. `documents` imports
+  `CounterpartyContracts`, the documentary-instructions module's `InstructionRevisions` (which
+  revision is current and what it requires; it never reads `documentary_instructions`), the auth
+  module's `SessionPrincipals`, `AuditTrail` and `DocumentStorage`. Its read model reads the actors' names and
   organizations through the notice's own actor relations, as the voyage read model reads its
   participants' organizations. Its read model still joins vessel, commodity and port rows through
   relations, because those columns are part of what a voyage is.
@@ -127,7 +150,8 @@ The `auth` module owns identity: it reads `users` (with their organization and r
 `organizations` module, because nothing manages organizations on their own yet. `audit` owns
 `audit_events`; `reference-data` owns vessels, commodities and ports; `notices` owns `notices`;
 `documentary-instructions` owns `documentary_instructions` and their revisions and
-acknowledgements.
+acknowledgements; `documents` owns `documents`, `document_versions` and the bytes in document
+storage.
 
 ### Request pipeline
 
@@ -161,7 +185,11 @@ acknowledgements.
    ```
 
    Errors with status 5xx are logged with their stack trace and returned with a generic `detail`,
-   so internals never leak. An integration test asserts this.
+   so internals never leak. An integration test asserts this. An error can be answered before
+   the request's body was read (an upload refused by a guard, or by its service before receiving
+   the file); Node would then reset the connection under a client still sending, so the filter
+   first reads and discards the rest of the body, up to 16 MiB (`unread-body.ts`), and closes the
+   connection after the answer beyond that.
 
 5. **Caching.** Every `/api` response carries `Cache-Control: no-store`: responses depend on who
    is signed in, so no browser or proxy may keep them. Express's automatic `ETag` (a body hash)
@@ -208,6 +236,13 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
   revision, and let the aggregate change only by advancing its version by one; a deferred
   constraint trigger requires the current revision to exist at commit. A CHECK validates the
   requirements JSON through an immutable function.
+- Documents: one per (contract, revision, document type), pinned by composite keys to their
+  contract's voyage, to the instruction under that contract and to an existing revision (none
+  cascades). Triggers accept a document and each new version only for the instruction's current
+  revision and a type it requires, share-locking the instruction; versions are numbered without
+  gaps and never updated; a deferred constraint trigger requires the current version at commit.
+  CHECKs hold the storage-key format (a UUID), the file name (display text: no separators or
+  control characters), `application/pdf`, 1 byte to 10 MiB and a 32-byte SHA-256.
 
 ### Reads scoped below the voyage: the trade string
 
@@ -288,6 +323,64 @@ requests are blocked on it in PostgreSQL, then releases them. Two creations, two
 acknowledgements, and a revision against an acknowledgement each end with exactly one success,
 one 412, and the matching rows and audit events.
 
+### Documents: files outside the transaction
+
+Documents are the first writes that carry a file ([ADR 0013](decisions/0013-documents.md)). The
+bytes cannot go into the database transaction, so an upload runs in steps, and each step knows
+what to undo:
+
+1. **Check before reading.** Guards and path parameters, the precondition headers (428/400),
+   `multipart/form-data` and the declared length (415/413, the connection closed unread), then in
+   the service the role (403), the contract through `CounterpartyContracts` (404), the seller side
+   (403), the revision through `InstructionRevisions.find` (404, or 409 when superseded), the
+   document type it requires (404) and the precondition against the document as it is (412).
+2. **Receive** (`common/http/multipart-file.ts`, busboy): exactly one part, the file, streamed
+   into `DocumentStorage.stage` through `UploadInspection`, which counts and hashes it. Every
+   limit holds while the bytes arrive: the declared length, the bytes actually read, the file's
+   size, one part. A refusal or an aborted connection destroys the stream, and the staged file
+   with it; the error response reads and discards the rest of the body first (see
+   [Errors](#request-pipeline)), so the client still gets its answer.
+   Then the bytes must start with `%PDF-` (415) and not be empty (400).
+3. **Keep**: `promote` renames the staged file to `objects/<new uuid>`.
+4. **Commit** in one transaction: `SessionPrincipals.refresh` (the upload took time: 401 if the
+   session ended, 403 if the role went, 404 if the user changed organization), the contract again,
+   `InstructionRevisions.lock` (`SELECT ... FOR SHARE` on the instruction, then the revision's
+   requirements), the conditional write (`INSERT ... ON CONFLICT DO NOTHING`, or `UPDATE ... WHERE
+current_version_number = ANY($expected)`), the version row, the audit event and the response.
+5. **Compensate** on failure: staged bytes are discarded; kept bytes are removed once the
+   transaction has certainly rolled back (it failed before `COMMIT` was sent). A failure while
+   committing leaves the bytes, since the commit may have happened; so does a removal that fails.
+   Both are logged as orphans.
+
+The only leftover any failure produces is bytes no row names; never a row whose bytes are
+missing. The two stores do not commit atomically, and nothing here claims they do.
+
+**Orphan recovery.** After a crash, or when the log reports an orphan, run this by hand (there
+is no job yet). It is safe while the API runs, because of the age threshold: an object becomes
+named only when its upload commits, and no upload outlives the server's five-minute request
+timeout.
+
+1. List `objects/` under `DOCUMENT_STORAGE_DIR` with each file's modification time.
+2. Keep the names older than one hour, and look them up:
+   `SELECT storage_key FROM document_versions WHERE storage_key = ANY($names)`.
+3. Delete the files no row named. Delete files in `staging/` older than one hour as well.
+
+The reverse (a row whose object is missing) can only follow a power loss right after a rename, or
+damage to the directory; a download then answers a logged 500, and the version must be restored
+from a backup of the directory. Downloads check every file against its size and SHA-256 before
+serving it, so damaged bytes are never served as if they were the upload.
+
+**Concurrency.** Two uploads of the same version end in one 201 and one 412, and the loser's kept
+bytes are removed. A revision given while an upload is checking or receiving makes the upload's
+commit refuse it (409): the commit's share lock waits for the revision and then sees it. A revision
+given while an upload commits waits for the upload and supersedes it afterwards. The triggers hold
+the same rules for writers other than the API.
+
+**Downloads** stream the version after the check above, as an attachment
+(`Content-Disposition` with the uploaded name, ASCII fallback and exact UTF-8), with `nosniff`, a
+sandboxing CSP, `Repr-Digest` and `no-store`. Nest's default stream-error handler (a 400 carrying
+the error message) is replaced: a generic 500 before the first byte, a cut connection after it.
+
 ### Writes (first one: `POST /api/voyages`)
 
 The order of checks, and who decides what:
@@ -315,6 +408,8 @@ or reference behind; spoofed organization ids in the body, headers or query chan
 
 `loadConfig()` validates the environment with Zod at startup and lists every invalid variable at
 once. Configuration is injected via the `APP_CONFIG` token; nothing else reads `process.env`.
+`DOCUMENT_STORAGE_DIR` (where document bytes are kept) defaults to `var/documents` under the
+working directory outside production and is required in production.
 
 ## Frontend (apps/web)
 
@@ -334,15 +429,16 @@ src/
       domain/       presentation rules for the domain (status labels, role grouping,
                     trade-string steps in contract order, notice states), what to offer whom
       hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice,
-                    useSubmitInstruction, useAcknowledgeRevision: mutations and what happens
-                    after them
+                    useSubmitInstruction, useAcknowledgeRevision, useUploadDocument,
+                    useDownloadDocument: mutations and what happens after them
       components/   feature UI (table, filter, facts card, trade string, notices, participants)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
   shared/
-    api/        fetch wrapper: ApiError (Problem Details), ApiContractError
+    api/        fetch wrapper: ApiError (Problem Details), ApiContractError; JSON, one-file
+                multipart uploads and blob downloads
     auth/       identity context and identity-scoped query keys
-    lib/        formatting (numbers, calendar dates, countries)
+    lib/        formatting (numbers, calendar dates, countries), saving a downloaded file
     ui/         generic UI: PageHeader, QueryErrorAlert, NotFoundState
   test/         MSW server, typed fixtures, renderRoute helper
 ```
@@ -418,6 +514,20 @@ src/
   the card stays mounted through a failed refresh, so an open draft is not lost to a network
   error. Writes go through `sendForCurrentSession`, are never retried, and write to the cache
   only for the identity that sent them.
+- **Documents** (inside each contract's instruction panel, under the revision they answer). The
+  page fetches the document list alongside the instructions, under the voyage's detail key. The
+  current revision lists every document it requires: presented or not, the current version and
+  earlier ones, each with a download; earlier revisions show only what was presented against them.
+  Seller operators choose a PDF per document; the choice is checked with the contract's
+  `DocumentFileSchema` before anything is sent, and the upload is a real `multipart/form-data`
+  request (`postFile`). Like an instruction draft, a chosen file remembers the version it would
+  replace (its basis) and sends it as `If-Match` (`If-None-Match: *` when there was none); a 412,
+  or a refresh showing someone else's version, keeps the file, shows that version and disables
+  the upload until the user chooses to replace it. Any failure keeps the chosen file and nothing
+  is re-sent on its own; a 409 (the revision was superseded) refreshes the instructions.
+  Downloads are `fetch`ed through `sendForCurrentSession` and handed to the browser as a blob
+  (`saveFile`), so a 401 signs out as elsewhere, and a download that arrives after the identity
+  changed is not saved. The section degrades on its own: the revision above it stays readable.
 
 ### Authentication in the browser
 
@@ -519,6 +629,20 @@ every precondition outcome (428, 412, 409, 400 for malformed headers), immutabil
 aggregate's transition rules with plain SQL, the requirements CHECK, a forced audit failure on
 each command (nothing written, version unchanged), and a role removed or an organization changed
 between reading and writing.
+Documents are tested with real multipart uploads and downloads against a temporary storage
+directory (the production `LocalDocumentStorage`, wrapped so a test can make one operation fail):
+byte-for-byte round trips with their checksum and headers, refusals by a guard, a check or the stream that still reach a client sending a large file, exactly 10 MiB accepted and one byte
+more refused while streaming, a declared oversize body refused unread, files that only claim to be
+PDFs, empty files, extra parts and fields, malformed bodies, file names with paths, control
+characters and non-ASCII letters; who may upload, list and download (opaque 404s for everyone
+else); preconditions; superseded revisions before the upload and at commit (the test holds the
+instruction row while the upload's bytes are kept, then gives revision 2); a revision that waits
+for an upload's commit; two first versions and two replacements racing (one 201, one 412, the
+loser's bytes removed); an upload abandoned part-way (nothing staged, nothing written); a session
+revoked, a role removed and an organization changed while the bytes arrive (sent by hand, byte by
+byte); staging, promotion, audit and compensation failures (rows, staged files and kept objects
+asserted after each); missing, unreadable and tampered bytes never served; and the tables'
+triggers and constraints with plain SQL.
 
 No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
 string included) is not covered automatically. Playwright is the planned answer.
@@ -535,7 +659,14 @@ the identity changed. The documentary-instruction card is tested for both sides 
 the preconditions each write sends, client and server validation, a 412 on revising and on
 creating (draft kept, nothing re-sent until the user rebases), a newer version brought in by a
 refresh while editing, a failed refresh with a draft open, an acknowledgement overtaken by a
-revision, expiry, and responses that arrive after the identity changed.
+revision, expiry, and responses that arrive after the identity changed. Documents are tested
+through the same route tree: what each side and role is offered, the multipart request an upload
+sends (field, file name, type, bytes, precondition), files refused before sending, server refusals
+and failures that keep the chosen file without re-sending it, a 412 and a refresh that bring in
+someone else's version, a superseded revision, downloads saved under their name, 401s, and upload
+and download responses that arrive after a sign-out or after another tab signed in as someone
+else. jsdom's own `File` and `FormData` cannot be sent by Node's `fetch`, so the test setup puts
+Node's on the global object (a `FormData` built from a `<form>` stays jsdom's).
 
 ## Operational concerns (current state)
 
@@ -545,24 +676,25 @@ revision, expiry, and responses that arrive after the identity changed.
 | Logging      | Nest logger; 5xx logged with stack                                                        | Structured JSON logs, request ids, OpenTelemetry |
 | Config       | Validated env, fail fast                                                                  | Secrets manager in cloud environments            |
 | Shutdown     | `enableShutdownHooks`; Prisma disconnects on destroy                                      | —                                                |
+| File storage | Private local directory; orphans logged, removed by a manual procedure; no backups        | Object store, lifecycle rules, scheduled sweep   |
 | Supply chain | Exact versions, lockfile, pnpm install-script allowlist, release-age quarantine respected | Renovate, pinned action SHAs                     |
 
 ## Evolution
 
 How later requirements land on the current structure:
 
-| Requirement              | Where it goes                                                                                                                                                                                                                                                                                                                       |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                                                                                         |
-| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                                                                                          |
-| Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Counterparty-only contract ids since M5. Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details |
-| Notices                  | **Started (M5)**: ETA notices, counterparty-only, `ISSUED → ACKNOWLEDGED` by conditional update, overdue derived ([ADR 0011](decisions/0011-counterparty-notices.md)). Next: further notice types, then notifications of new and overdue notices (outbox + jobs)                                                                    |
-| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                                                          |
-| Documentary instructions | **Started (M6)**: one per contract, immutable revisions, per-revision acknowledgement by the seller, counterparty-only ([ADR 0012](decisions/0012-documentary-instructions.md)). Next: presentation deadlines, document upload against the requirements                                                                             |
-| Optimistic concurrency   | **Started (M6)**: `version` on documentary instructions; one conditional `UPDATE ... WHERE version = ANY(...)`; `ETag`, `If-Match` (412), `If-None-Match: *`, 428 without a precondition ([ADR 0012](decisions/0012-documentary-instructions.md)). Next: the same for recording the trade string                                    |
-| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                            |
-| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                                                                     |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                                                                       |
-| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                           |
-| Documents                | S3-compatible storage, pre-signed URLs, versions in Postgres                                                                                                                                                                                                                                                                        |
-| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                          |
+| Requirement              | Where it goes                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication           | **Done (M2)**: `auth` module, cookie sessions ([ADR 0007](decisions/0007-cookie-sessions.md)). Next: OIDC for SSO, rate limiting on sign-in, password reset                                                                                                                                                                                                                                  |
+| Tenant isolation         | **Done (M2)**: every voyage query `AND`s `accessibleVoyages(principal)` ([ADR 0006](decisions/0006-participation-based-access.md)). Next: Postgres RLS as defence in depth                                                                                                                                                                                                                   |
+| Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Counterparty-only contract ids since M5. Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details                                                          |
+| Notices                  | **Started (M5)**: ETA notices, counterparty-only, `ISSUED → ACKNOWLEDGED` by conditional update, overdue derived ([ADR 0011](decisions/0011-counterparty-notices.md)). Next: further notice types, then notifications of new and overdue notices (outbox + jobs)                                                                                                                             |
+| Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                                                                                                                   |
+| Documentary instructions | **Started (M6)**: one per contract, immutable revisions, per-revision acknowledgement by the seller, counterparty-only ([ADR 0012](decisions/0012-documentary-instructions.md)). Documents presented against them since M7. Next: presentation deadlines                                                                                                                                     |
+| Optimistic concurrency   | **Started (M6)**: `version` on documentary instructions; one conditional `UPDATE ... WHERE version = ANY(...)`; `ETag`, `If-Match` (412), `If-None-Match: *`, 428 without a precondition ([ADR 0012](decisions/0012-documentary-instructions.md)). Next: the same for recording the trade string                                                                                             |
+| Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                                                                                     |
+| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                                                                                                                              |
+| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                                                                                                                                |
+| Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                                                                                    |
+| Documents                | **Started (M7)**: PDF versions per required document of an exact revision, counterparty-only, uploaded by the seller with `If-Match`; bytes staged outside the transaction in a private local directory, compensated on failure ([ADR 0013](decisions/0013-documents.md)). Next: S3-compatible storage behind the same interface, pre-signed uploads, a scheduled orphan sweep, buyer review |
+| AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                                                                                   |

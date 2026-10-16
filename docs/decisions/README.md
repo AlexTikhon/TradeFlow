@@ -18,6 +18,7 @@ with a link to its replacement.
 | 0010 | [Trade-string topology is visible to every voyage participant (MVP)](0010-trade-string-visibility.md)                      | Accepted                              |
 | 0011 | [ETA notices: counterparty-only, issued then acknowledged, overdue derived (MVP)](0011-counterparty-notices.md)            | Accepted                              |
 | 0012 | [Documentary instructions: revisioned per contract, conditional writes with ETags (MVP)](0012-documentary-instructions.md) | Accepted                              |
+| 0013 | [Documents: private PDF versions per instruction revision, received outside the transaction (MVP)](0013-documents.md)      | Accepted                              |
 
 Template: **Context** (forces at play), **Decision**, **Alternatives considered**,
 **Consequences** (good and bad).

@@ -57,10 +57,12 @@ function servePage({
       state.listRequests += 1;
       return listResponse ? listResponse() : HttpResponse.json({ items: state.notices });
     }),
-    // The details page also loads documentary instructions; they have their own tests.
+    // The details page also loads documentary instructions and documents; they have their own
+    // tests.
     http.get(`*/api/voyages/${voyage.id}/documentary-instructions`, () =>
       HttpResponse.json({ items: [] }),
     ),
+    http.get(`*/api/voyages/${voyage.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
   return state;
 }

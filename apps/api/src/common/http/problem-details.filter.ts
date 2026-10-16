@@ -10,6 +10,7 @@ import {
 import { PROBLEM_CONTENT_TYPE, type ProblemDetails, ProblemTypes } from '@tradeflow/contracts';
 import type { Request, Response } from 'express';
 import { RequestValidationException } from './request-validation.exception.js';
+import { discardUnreadBody } from './unread-body.js';
 
 /**
  * Renders every error as RFC 9457 Problem Details so clients handle one error shape.
@@ -32,7 +33,12 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       );
     }
 
-    response.status(problem.status).type(PROBLEM_CONTENT_TYPE).json(problem);
+    // An upload refused before its body was read is answered once the client has sent it all:
+    // otherwise the connection is reset under the client and the answer never arrives.
+    void discardUnreadBody(request, response).then(() => {
+      if (response.headersSent || response.destroyed) return;
+      response.status(problem.status).type(PROBLEM_CONTENT_TYPE).json(problem);
+    });
   }
 }
 

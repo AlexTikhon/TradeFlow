@@ -65,6 +65,8 @@ function servePage({
       state.listRequests += 1;
       return listResponse?.() ?? HttpResponse.json({ items: state.instructions });
     }),
+    // Documents presented against the revisions have their own tests.
+    http.get(`*/api/voyages/${voyage.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
   return state;
 }

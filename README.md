@@ -11,35 +11,37 @@ Exporter ──sells to──▶ Trader A ──sells to──▶ Trader B ─�
 
 Every party in that chain works on the same physical shipment, but each has separate contracts,
 documents and obligations. TradeFlow models that shared workspace. Today that means voyages, the
-organizations taking part in them, the trade string, ETA notices from sellers to buyers, and
-documentary instructions from buyers to sellers. Next come further notices, documents and
-approvals.
+organizations taking part in them, the trade string, ETA notices from sellers to buyers,
+documentary instructions from buyers to sellers, and the documents sellers present against them.
+Next come further notices, document review and approvals.
 
 > This is an engineering portfolio project. It is inspired by real commodity-shipping workflow
 > problems, but it is not a clone of any commercial product, and all organizations and people in the
 > demo data are fictional.
 
-## Status: Milestone 6 (documentary instructions)
+## Status: Milestone 7 (documents, first slice)
 
-| Area         | Delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth         | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                                                                                                                                                                                                                                                                                                                                                                      |
-| Access       | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                                                                                                                                                                                                                                                                                                                                                                 |
-| Roles        | `VIEWER` (read) and `OPERATOR` (read and act) per user, read on every request and checked in the service that performs each command ([ADR 0008](docs/decisions/0008-user-roles.md))                                                                                                                                                                                                                                                                                                                         |
-| Writes       | `POST /api/voyages`: starts `PLANNED`, creator's organization becomes `EXPORTER`, server-assigned `TF-<year>-<number>`; issuing and acknowledging notices; giving, revising and acknowledging documentary instructions with `If-Match`/`ETag` (412 when stale, 428 without a precondition). Each command and its audit event commit in one transaction                                                                                                                                                      |
-| Trade        | Sale contracts stored as edges (`trade_contracts`), row rules in the database, chain rules (linear, exporter → traders → final buyer) in the domain; every participant sees the topology, never contract ids or terms ([ADR 0010](docs/decisions/0010-trade-string-visibility.md))                                                                                                                                                                                                                          |
-| Notices      | ETA notices from the seller to the buyer under one contract, readable only by those two organizations; an operator of the seller issues, an operator of the buyer acknowledges receipt (not acceptance) once, by conditional update; overdue derived from the deadline, late acknowledgement allowed ([ADR 0011](docs/decisions/0011-counterparty-notices.md))                                                                                                                                              |
-| Instructions | Documentary instructions from the buyer to the seller under one contract (consignee, notify party, up to eight required documents), counterparty-only; immutable revisions, the seller acknowledges an exact revision, a new revision starts unacknowledged; every write is one conditional SQL statement, so races end in one success and one 412 ([ADR 0012](docs/decisions/0012-documentary-instructions.md))                                                                                            |
-| API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                   |
-| Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
-| Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices and instruction revisions, versioned instructions, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                  |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 551 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), GitHub Actions CI                                                                                                                                                                                                                                                                                                                                  |
+| Area         | Delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth         | Email + password sign-in (argon2id), server-side sessions in an HttpOnly cookie, `GET /api/auth/me`, sign-out that revokes the session                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Access       | Every voyage query scoped to the voyages the user's organization participates in; non-participants get the same 404 as for a missing voyage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Roles        | `VIEWER` (read) and `OPERATOR` (read and act) per user, read on every request and checked in the service that performs each command ([ADR 0008](docs/decisions/0008-user-roles.md))                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Writes       | `POST /api/voyages`: starts `PLANNED`, creator's organization becomes `EXPORTER`, server-assigned `TF-<year>-<number>`; issuing and acknowledging notices; giving, revising and acknowledging documentary instructions with `If-Match`/`ETag` (412 when stale, 428 without a precondition); uploading document versions. Each command and its audit event commit in one transaction                                                                                                                                                                                                                                                |
+| Trade        | Sale contracts stored as edges (`trade_contracts`), row rules in the database, chain rules (linear, exporter → traders → final buyer) in the domain; every participant sees the topology, never contract ids or terms ([ADR 0010](docs/decisions/0010-trade-string-visibility.md))                                                                                                                                                                                                                                                                                                                                                 |
+| Notices      | ETA notices from the seller to the buyer under one contract, readable only by those two organizations; an operator of the seller issues, an operator of the buyer acknowledges receipt (not acceptance) once, by conditional update; overdue derived from the deadline, late acknowledgement allowed ([ADR 0011](docs/decisions/0011-counterparty-notices.md))                                                                                                                                                                                                                                                                     |
+| Instructions | Documentary instructions from the buyer to the seller under one contract (consignee, notify party, up to eight required documents), counterparty-only; immutable revisions, the seller acknowledges an exact revision, a new revision starts unacknowledged; every write is one conditional SQL statement, so races end in one success and one 412 ([ADR 0012](docs/decisions/0012-documentary-instructions.md))                                                                                                                                                                                                                   |
+| Documents    | PDFs the seller presents for each document the current instruction revision requires: multipart upload (PDF by content, at most 10 MiB, enforced while streaming), immutable versions with size, SHA-256, uploader and time, `If-Match` for replacements, attachment downloads for both counterparties; bytes staged outside the transaction in private storage under server-generated keys, compensated on every failure ([ADR 0013](docs/decisions/0013-documents.md))                                                                                                                                                           |
+| API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                    |
+| Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history, authenticated download; a chosen file survives every failure), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
+| Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions and document versions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                        |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 720 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), GitHub Actions CI                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-Voyage creation, ETA notices and documentary instructions write data; trade strings come from the
-seed and are read-only.
+Voyage creation, ETA notices, documentary instructions and documents write data; trade strings
+come from the seed and are read-only.
 Recording or editing a trade string, editing voyages, adding participants or inviting
-organizations, other notice types, editing notices, document uploads, notifications, an audit timeline in
-the UI, real-time updates and AI features are **intentionally not built yet**. See
+organizations, other notice types, editing notices, document review or approval, object storage
+(S3), notifications, an audit timeline in the UI, real-time updates and AI features are
+**intentionally not built yet**. See
 [Roadmap](#roadmap) and the [domain model](docs/domain-model.md#eta-notices).
 
 ## Architecture at a glance
@@ -147,7 +149,10 @@ No **documentary instructions** are seeded. To try them on TF-2026-0001, sign in
 (Lacustra buys under contract 1) and give instructions to Cerrado, then sign in as Ana Souza to
 acknowledge the revision. Revise again as Claire in two tabs to see a conflict: the second tab
 keeps its draft, shows the newer revision, and sends only after you base the draft on it.
-Re-seeding removes instructions on the seeded voyages.
+Once instructions are given, Ana Souza (Cerrado sells under contract 1) can upload a PDF for each
+document the current revision requires, and replace it; Claire Morel can download every version.
+Uploaded bytes are kept in `apps/api/var/documents` (`DOCUMENT_STORAGE_DIR`). Re-seeding removes
+instructions and documents on the seeded voyages, and the documents' stored bytes.
 
 API docs are at <http://localhost:3000/api/docs>.
 
@@ -208,7 +213,12 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
   changed between read and write, immutable revisions and the aggregate's transition rules with
   plain SQL, the requirements CHECK, a forced audit failure on each command, and four real races
   on held locks (two creations, two revisions, two acknowledgements, revision against
-  acknowledgement), each ending in one success and one 412.
+  acknowledgement), each ending in one success and one 412. Documents: real multipart uploads
+  and downloads against a temporary storage directory (byte-for-byte, with checksums), size and
+  type refusals, file names that try to be paths, who may upload and read, superseded revisions
+  before the upload and at commit, racing uploads, an abandoned upload, a session, role or
+  organization changed while the file arrives, and storage, audit and compensation failures, with
+  the database rows and the files on disk checked after each.
 - **web**: renders the real route tree with real providers. Only the network is faked, by MSW, and
   unhandled requests fail the test. Auth flows run against a stateful fake of the auth API,
   including sign-out during an in-flight request, switching users, and a change made in another
@@ -221,11 +231,14 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
   panel is tested for both sides and roles, the preconditions each write sends, validation, a 412
   on revising and on creating (draft kept, nothing re-sent until the user rebases), a newer
   version arriving while editing, a failed refresh with a draft open, an acknowledgement overtaken
-  by a revision, expiry, and late responses after an identity change. The suite runs
+  by a revision, expiry, and late responses after an identity change. Documents: the multipart
+  request each upload sends, files refused before sending, a chosen file kept through refusals,
+  failures and a 412, downloads saved under their name, expiry, and upload and download responses
+  after an identity change. The suite runs
   in `America/Sao_Paulo` time so date- and time-shifting bugs show up.
 - **Not covered:** nothing runs in a real browser yet (web tests use jsdom), so layout, including
-  the responsive trade string and the notice and instruction panels, and the browser's own `datetime-local`
-  picker are not verified automatically. Playwright end-to-end tests are planned.
+  the responsive trade string and the notice, instruction and document panels, the browser's own `datetime-local`
+  picker, its file picker and how it saves a download are not verified automatically. Playwright end-to-end tests are planned.
 
 ## Roadmap
 
@@ -241,7 +254,10 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
    issued and acknowledged with an audit trail. Documentary instructions done (Milestone 6):
    immutable revisions, per-revision acknowledgement, optimistic concurrency with `If-Match`.
    Next: further notice types, notifications.
-4. **Documents.** Object storage, versions, access checks.
+4. **Documents.** First slice done (Milestone 7): private PDF upload against an exact
+   instruction revision, immutable versions, counterparty-only downloads, local storage behind an
+   interface. Next: S3-compatible storage and pre-signed uploads, a scheduled orphan sweep, the
+   buyer's review of what was presented.
 5. **Workflow, tasks and deadlines; real-time updates (SSE); background jobs and transactional outbox.**
 6. **AI-assisted document extraction and comparison**, with human approval for any critical action.
 

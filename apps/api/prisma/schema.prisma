@@ -34,6 +34,7 @@ model Organization {
   acknowledgedNotices  Notice[]                                @relation("NoticeAcknowledgedBy")
   instructionRevisions DocumentaryInstructionRevision[]
   instructionAcks      DocumentaryInstructionAcknowledgement[]
+  documentVersions     DocumentVersion[]
 
   @@map("organizations")
 }
@@ -66,6 +67,7 @@ model User {
   acknowledgedNotices  Notice[]                                @relation("NoticeAcknowledgedBy")
   instructionRevisions DocumentaryInstructionRevision[]
   instructionAcks      DocumentaryInstructionAcknowledgement[]
+  documentVersions     DocumentVersion[]
 
   @@index([organizationId])
   @@map("users")
@@ -173,6 +175,7 @@ model Voyage {
   tradeContracts          TradeContract[]
   notices                 Notice[]
   documentaryInstructions DocumentaryInstruction[]
+  documents               Document[]
   auditEvents             AuditEvent[]
 
   @@index([status, laycanStart])
@@ -243,6 +246,7 @@ model TradeContract {
   notices                 Notice[]
   // At most one: `documentary_instructions.trade_contract_id` is unique.
   documentaryInstructions DocumentaryInstruction[]
+  documents               Document[]
 
   @@unique([voyageId, position])
   // Target of the notices' composite foreign key, so a notice stays inside its contract's voyage.
@@ -351,7 +355,11 @@ model DocumentaryInstruction {
   tradeContract    TradeContract                           @relation(fields: [voyageId, tradeContractId], references: [voyageId, id], onDelete: Restrict, onUpdate: NoAction)
   revisions        DocumentaryInstructionRevision[]
   acknowledgements DocumentaryInstructionAcknowledgement[]
+  documents        Document[]
 
+  // Target of the documents' composite foreign key, so a document's instruction is the one under
+  // its own contract.
+  @@unique([id, tradeContractId])
   @@index([voyageId])
   @@map("documentary_instructions")
 }
@@ -379,6 +387,7 @@ model DocumentaryInstructionRevision {
   createdByUser         User                                   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
   createdByOrganization Organization                           @relation(fields: [createdByOrganizationId], references: [id], onDelete: Restrict)
   acknowledgement       DocumentaryInstructionAcknowledgement?
+  documents             Document[]
 
   @@unique([instructionId, revisionNumber])
   @@index([createdByUserId])
@@ -408,6 +417,92 @@ model DocumentaryInstructionAcknowledgement {
 }
 
 // ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+/// The document types a revision of documentary instructions can require (the contract's
+/// REQUIRED_DOCUMENT_TYPES). The requirements JSON of a revision holds the same names.
+enum DocumentType {
+  BILL_OF_LADING
+  COMMERCIAL_INVOICE
+  CERTIFICATE_OF_ORIGIN
+  PHYTOSANITARY_CERTIFICATE
+  WEIGHT_CERTIFICATE
+  QUALITY_CERTIFICATE
+  FUMIGATION_CERTIFICATE
+  INSURANCE_CERTIFICATE
+
+  @@map("document_type")
+}
+
+/// A document the seller presents under one sale contract (ADR 0013), for one document type that
+/// one exact revision of the contract's documentary instructions requires. At most one per
+/// (contract, revision, type); owned by the documents module. Its content lives in immutable
+/// versions; this row says which version is current and is the concurrency token.
+///
+/// `currentVersionNumber` advances by exactly one with each upload, by one conditional UPDATE.
+/// Triggers accept a document, and each new version, only while its revision is the
+/// instruction's current revision and requires that type; a deferred constraint trigger
+/// requires the current version to exist at commit.
+model Document {
+  id                   String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  voyageId             String       @map("voyage_id") @db.Uuid
+  tradeContractId      String       @map("trade_contract_id") @db.Uuid
+  instructionId        String       @map("instruction_id") @db.Uuid
+  revisionNumber       Int          @map("revision_number")
+  documentType         DocumentType @map("document_type")
+  currentVersionNumber Int          @default(1) @map("current_version_number")
+  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime     @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  voyage        Voyage                         @relation(fields: [voyageId], references: [id], onDelete: Restrict)
+  // Composite keys pin the document inside its contract's voyage, to the instruction under that
+  // same contract, and to an existing revision of it. None cascades: a contract, instruction or
+  // revision that documents were presented against cannot be deleted from under them.
+  tradeContract TradeContract                  @relation(fields: [voyageId, tradeContractId], references: [voyageId, id], onDelete: Restrict, onUpdate: NoAction)
+  instruction   DocumentaryInstruction         @relation(fields: [instructionId, tradeContractId], references: [id, tradeContractId], onDelete: Restrict, onUpdate: NoAction)
+  revision      DocumentaryInstructionRevision @relation(fields: [instructionId, revisionNumber], references: [instructionId, revisionNumber], onDelete: Restrict, onUpdate: NoAction)
+  versions      DocumentVersion[]
+
+  @@unique([tradeContractId, revisionNumber, documentType])
+  @@index([voyageId, tradeContractId])
+  @@index([instructionId, revisionNumber])
+  @@map("documents")
+}
+
+/// One uploaded file of a document. Never changes: a trigger refuses every UPDATE. Numbered 1, 2,
+/// 3, ... per document, and only ever inserted as the document's current version (trigger). The
+/// bytes live in private storage under `storageKey`, which the server generates; the client's
+/// file name is kept for display only and never names anything in storage.
+model DocumentVersion {
+  id                       String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  documentId               String   @map("document_id") @db.Uuid
+  versionNumber            Int      @map("version_number")
+  /// Where the bytes are in document storage: a server-generated UUID (CHECK), unique.
+  storageKey               String   @unique @map("storage_key")
+  /// For display: at most 255 characters, no path separators or control characters (CHECK).
+  fileName                 String   @map("file_name")
+  /// `application/pdf` only (CHECK).
+  mediaType                String   @map("media_type")
+  /// 1 byte to 10 MiB (CHECK).
+  sizeBytes                Int      @map("size_bytes")
+  /// SHA-256 of the bytes as received: exactly 32 bytes (CHECK).
+  sha256                   Bytes
+  uploadedByUserId         String   @map("uploaded_by_user_id") @db.Uuid
+  uploadedByOrganizationId String   @map("uploaded_by_organization_id") @db.Uuid
+  /// Set by the API from its clock; never accepted from a client.
+  uploadedAt               DateTime @map("uploaded_at") @db.Timestamptz(3)
+
+  document               Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  uploadedByUser         User         @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  uploadedByOrganization Organization @relation(fields: [uploadedByOrganizationId], references: [id], onDelete: Restrict)
+
+  @@unique([documentId, versionNumber])
+  @@index([uploadedByUserId])
+  @@map("document_versions")
+}
+
+// ---------------------------------------------------------------------------
 // Audit trail
 // ---------------------------------------------------------------------------
 
@@ -417,6 +512,7 @@ enum AuditAction {
   NOTICE_ACKNOWLEDGED
   DOCUMENTARY_INSTRUCTION_REVISED
   DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED
+  DOCUMENT_VERSION_UPLOADED
 
   @@map("audit_action")
 }
@@ -437,7 +533,9 @@ model AuditEvent {
   /// issued. NOTICE_ACKNOWLEDGED: the notice, its contract, when, and whether it was late.
   /// DOCUMENTARY_INSTRUCTION_REVISED: the instruction, its contract, the revision as written and
   /// the new version. DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: the instruction, its contract, the
-  /// revision acknowledged, when, and the new version.
+  /// revision acknowledged, when, and the new version. DOCUMENT_VERSION_UPLOADED: the document,
+  /// its contract, instruction revision and type, and the version as stored (number, file name,
+  /// media type, size, SHA-256, time).
   payload             Json
 
   actorUser         User         @relation(fields: [actorUserId], references: [id], onDelete: Restrict)

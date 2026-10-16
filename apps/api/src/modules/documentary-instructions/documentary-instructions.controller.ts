@@ -40,18 +40,15 @@ import {
 import type { Response } from 'express';
 import { schemaRef } from '../../common/http/openapi.js';
 import {
-  isIfNoneMatchAny,
   PreconditionRequiredException,
   versionsFromIfMatch,
+  type WritePrecondition,
+  writePrecondition,
 } from '../../common/http/preconditions.js';
-import { RequestValidationException } from '../../common/http/request-validation.exception.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
-import {
-  DocumentaryInstructionsService,
-  type WritePrecondition,
-} from './documentary-instructions.service.js';
+import { DocumentaryInstructionsService } from './documentary-instructions.service.js';
 
 const voyageIdPipe = () => new ZodValidationPipe(VoyageIdParamSchema);
 const contractIdPipe = () => new ZodValidationPipe(ContractIdParamSchema);
@@ -78,32 +75,16 @@ const PRECONDITION_REQUIRED = {
 } as const;
 
 /** The precondition of a PUT: create when nothing exists, or revise a named version. */
-function putPrecondition(
+const putPrecondition = (
   ifMatch: string | undefined,
   ifNoneMatch: string | undefined,
-): WritePrecondition {
-  const versions = versionsFromIfMatch(ifMatch);
-  if (versions && ifNoneMatch !== undefined) {
-    throw new RequestValidationException([
-      { path: 'header', message: 'Send either If-Match or If-None-Match: *, not both' },
-    ]);
-  }
-  if (versions) {
-    return { kind: 'version', versions };
-  }
-  if (isIfNoneMatchAny(ifNoneMatch)) {
-    return { kind: 'absent' };
-  }
-  if (ifNoneMatch !== undefined) {
-    throw new RequestValidationException([
-      { path: 'header.if-none-match', message: 'Only If-None-Match: * is accepted' },
-    ]);
-  }
-  throw new PreconditionRequiredException(
+): WritePrecondition =>
+  writePrecondition(
+    ifMatch,
+    ifNoneMatch,
     'Send If-Match with the version your revision is based on, or If-None-Match: * to give ' +
       'the first instructions.',
   );
-}
 
 @ApiTags('documentary-instructions')
 @ApiSessionAuth()

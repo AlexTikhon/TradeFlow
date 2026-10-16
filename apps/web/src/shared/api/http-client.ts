@@ -33,6 +33,15 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+interface SendOptions extends RequestOptions {
+  /** A JSON body. */
+  body?: unknown;
+  /** A multipart body. The browser sets its Content-Type, boundary included. */
+  form?: FormData;
+  /** What the response may be; errors are always Problem Details (JSON). */
+  accept?: string;
+}
+
 /**
  * Sends a request to the API. The session cookie is HttpOnly and same-origin, so the browser
  * attaches it; no code here ever sees the token.
@@ -40,7 +49,7 @@ interface RequestOptions {
 async function send(
   method: 'GET' | 'POST' | 'PUT',
   path: string,
-  { query, signal, headers, body }: RequestOptions & { body?: unknown } = {},
+  { query, signal, headers, body, form, accept = 'application/json' }: SendOptions = {},
 ): Promise<Response> {
   const url = new URL(`${API_BASE_PATH}${path}`, window.location.origin);
   for (const [key, value] of Object.entries(query ?? {})) {
@@ -52,10 +61,11 @@ async function send(
     credentials: 'same-origin',
     headers: {
       ...headers,
-      Accept: 'application/json',
+      Accept: accept,
       ...(body !== undefined && { 'Content-Type': 'application/json' }),
     },
     ...(body !== undefined && { body: JSON.stringify(body) }),
+    ...(form && { body: form }),
     ...(signal && { signal }),
   });
   if (!response.ok) {
@@ -107,6 +117,35 @@ export async function putJson<TSchema extends z.ZodType>(
   options: RequestOptions = {},
 ): Promise<z.output<TSchema>> {
   return parseBody(path, await send('PUT', path, { ...options, body }), schema);
+}
+
+/**
+ * POSTs one file as `multipart/form-data`, in the form field `field`, and validates the JSON
+ * response. The file is streamed by the browser; nothing here reads it.
+ */
+export async function postFile<TSchema extends z.ZodType>(
+  path: string,
+  field: string,
+  file: File,
+  schema: TSchema,
+  options: RequestOptions = {},
+): Promise<z.output<TSchema>> {
+  const form = new FormData();
+  form.append(field, file, file.name);
+  return parseBody(path, await send('POST', path, { ...options, form }), schema);
+}
+
+/** GETs a file's bytes, of the media type `accept`. */
+export async function getBlob(
+  path: string,
+  accept: string,
+  options: RequestOptions = {},
+): Promise<Blob> {
+  const response = await send('GET', path, {
+    ...options,
+    accept: `${accept}, application/problem+json`,
+  });
+  return response.blob();
 }
 
 /** POSTs without a body, for commands answered with 204 No Content. */

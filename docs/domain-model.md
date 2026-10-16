@@ -14,6 +14,8 @@
 | **ETA notice**               | The seller's statement, under one sale contract, of when the vessel is expected; the buyer acknowledges receiving it.                     |
 | **Documentary instructions** | The buyer's instructions to its seller, under one sale contract, on whom the shipping documents name and which documents to present.      |
 | **Revision**                 | One complete, unchangeable version of a contract's documentary instructions, numbered 1, 2, 3.                                            |
+| **Document**                 | What the seller presents for one document type that one revision of the instructions requires (a bill of lading, a certificate).          |
+| **Document version**         | One uploaded file of a document, numbered 1, 2, 3. A replacement is a new version; none is ever changed or removed.                       |
 | **Consignee**                | The party a bill of lading is made out to (often "to order of" a bank); it may take delivery of the cargo.                                |
 | **Notify party**             | Whom the carrier notifies when the vessel arrives; usually the buyer or its agent.                                                        |
 | **Counterparty**             | The seller or the buyer under a given sale contract.                                                                                      |
@@ -22,7 +24,7 @@
 | **UN/LOCODE**                | 5-character location code (`BRSSZ` = Santos, `NLRTM` = Rotterdam).                                                                        |
 | **MT**                       | Metric tonnes.                                                                                                                            |
 
-## Implemented (Milestones 1 to 6)
+## Implemented (Milestones 1 to 7)
 
 ```
                         ┌──────────────┐
@@ -53,6 +55,10 @@
                                1 ──── n DocumentaryInstructionRevision   (given by the buyer; immutable)
                                               1 ──── 0..1 DocumentaryInstructionAcknowledgement
                                                                          (by the seller; immutable)
+                                              1 ──── n Document   (one per required document type)
+                                                          1 ──── n DocumentVersion
+                                                                   (uploaded by the seller; immutable;
+                                                                    bytes in private storage)
 ```
 
 | Entity                                  | Key fields                                                                                                                                       | Notes                                                         |
@@ -70,6 +76,8 @@
 | `DocumentaryInstruction`                | voyageId, tradeContractId (unique), version, currentRevisionNumber                                                                               | Counterparties only; changes by conditional update (ADR 0012) |
 | `DocumentaryInstructionRevision`        | instructionId, revisionNumber, consignee, notifyParty, requirements (JSON), author and createdAt                                                 | Immutable                                                     |
 | `DocumentaryInstructionAcknowledgement` | instructionId, revisionNumber (unique together), acknowledger and acknowledgedAt                                                                 | Immutable; at most one per revision                           |
+| `Document`                              | voyageId, tradeContractId, instructionId, revisionNumber, documentType (unique with contract and revision), currentVersionNumber                 | Counterparties only; changes by conditional update (ADR 0013) |
+| `DocumentVersion`                       | documentId, versionNumber, storageKey (server-generated), fileName, mediaType, sizeBytes, sha256, uploader and uploadedAt                        | Immutable; bytes in private document storage                  |
 | `AuditEvent`                            | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                                            | Append-only; see ADR 0009                                     |
 | `VoyageReferenceCounter`                | year, lastNumber                                                                                                                                 | Hands out `TF-<year>-<number>`                                |
 
@@ -225,6 +233,40 @@ shipping documents must name and which documents to present.
    only reset the seller's acknowledgement.
 4. **Nothing is withdrawn or deleted.** Instructions are corrected by revising them.
 
+### Documents
+
+Documents travel with the goods' paperwork: from the **seller** to the **buyer** under one sale
+contract, in answer to its documentary instructions ([ADR 0013](decisions/0013-documents.md)).
+
+```
+            seller's operator               seller's operator              seller's operator
+ (none) ──── uploads version 1 ────▶ v1 ──── replaces it ────▶ v2 ──── ... ────▶ vn
+             (If-None-Match: *)              (If-Match: "1")
+
+ revision n of the instructions is superseded by revision n+1:
+   the documents of revision n stay, read-only; revision n+1 starts with none
+```
+
+- **A document is one required document of one exact revision**: the bill of lading that revision
+  2 asks for is a different document from the one revision 1 asked for. Only the current revision
+  takes documents, and only of the types it requires.
+- **Versions, never edits.** Each upload is a new version, numbered 1, 2, 3 without gaps, with its
+  bytes, file name, size, SHA-256, uploader and time. A replacement leaves every earlier version
+  exactly as it was. Every write names the version it replaces (HTTP `If-Match`;
+  `If-None-Match: *` for the first) and fails with 412 if another upload came first.
+- **Who:** users of the contract's seller and buyer list and download them, viewers included; an
+  `OPERATOR` of the seller uploads. The organization must be a counterparty and still participate.
+  Everyone else gets the same 404 as for a document that does not exist.
+- **People, times, sizes and checksums** come from the session, the server's clock and the bytes
+  the server received, never from the request. The file name is the client's, kept for display.
+
+**MVP business rules** (project-specific starting points, not settled commercial practice):
+
+1. **PDF only**, judged by the file's content (it must start with `%PDF-`), **1 byte to 10 MiB**.
+2. **A new revision asks for every document again**, even those whose requirement did not change.
+3. **Nothing is approved, rejected or deleted yet.** The buyer reads and downloads; reviewing what
+   was presented is a later step.
+
 ### Invariants enforced by the database
 
 - `quantity > 0`
@@ -256,6 +298,15 @@ buyer_participant_id`; both reference participants of the same voyage (foreign k
   document once. A contract with instructions cannot be deleted. Audit events allow one event
   per instruction version, one `DOCUMENTARY_INSTRUCTION_REVISED` per revision and one
   `DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED` per revision.
+- Documents: one per (contract, revision, document type); inside the contract's voyage, under the
+  instruction of that contract, on an existing revision (composite foreign keys, none cascading);
+  created and given new versions only while their revision is the instruction's current one and
+  requires their type; versions numbered one after another, the current one present at commit, and
+  never updated. A version's storage key is a server-generated UUID, unique; its file name has at
+  most 255 characters and no path separators or control characters; its type is
+  `application/pdf`, its size 1 byte to 10 MiB, its SHA-256 32 bytes. A revision, instruction or
+  contract with documents cannot be deleted. Audit events allow one `DOCUMENT_VERSION_UPLOADED`
+  per document version.
 
 ## Modelling decisions
 
@@ -321,19 +372,22 @@ other. A trader's junior analyst sees every voyage the trader participates in bu
 allowed to accept notices. And when the organization is exporter on one voyage and buyer on
 another, its users' permissions do not change between the two.
 
-**Current state (Milestone 6).** Every signed-in user can read exactly the voyages their
-organization participates in, including each voyage's trade-string topology, and the notices and
-documentary instructions under the contracts their organization is a party to. Users have one of
-two roles ([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads; an **operator** may
-also create voyages for their organization, issue or acknowledge notices, and give, revise or
-acknowledge documentary instructions for it. The role is on
+**Current state (Milestone 7).** Every signed-in user can read exactly the voyages their
+organization participates in, including each voyage's trade-string topology, and the notices,
+documentary instructions and documents under the contracts their organization is a party to.
+Users have one of two roles ([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads
+(and downloads); an **operator** may also create voyages for their organization, issue or
+acknowledge notices, give, revise or acknowledge documentary instructions, and upload documents
+for it. The role is on
 the user row, which is organization-scoped because a user belongs to exactly one organization,
 and it is read on every request. Creating a voyage needs no participant role, since the voyage
 does not exist yet; the creator becomes its exporter. Notice commands are the first commands on
 existing voyages and check both layers in their service: the organization's side of the
 contract (a domain rule: only the seller issues, only the buyer acknowledges), and the user's
 role within their organization. Documentary instructions check the same two layers, with the
-sides reversed: the buyer writes, the seller acknowledges.
+sides reversed: the buyer writes, the seller acknowledges. Documents check them again: the seller
+uploads. An upload is checked once more as it commits, against the user's role and organization
+as they are then, since its bytes take time to arrive.
 
 ## Proposed next (not implemented)
 
@@ -357,8 +411,8 @@ deliberately not modelled yet: it adds a join to every query for a case nothing 
 
 ### Further entities
 
-| Entity                         | Shape (sketch)                                                               |
-| ------------------------------ | ---------------------------------------------------------------------------- |
-| Further notice types           | vessel nomination, notice of readiness; same direction and visibility as ETA |
-| `Document` / `DocumentVersion` | file metadata and storage key; immutable versions                            |
-| `Task`                         | due date (often derived from laycan), assignee organization, status          |
+| Entity               | Shape (sketch)                                                               |
+| -------------------- | ---------------------------------------------------------------------------- |
+| Further notice types | vessel nomination, notice of readiness; same direction and visibility as ETA |
+| Document review      | the buyer accepts or rejects a presented version, with a reason              |
+| `Task`               | due date (often derived from laycan), assignee organization, status          |

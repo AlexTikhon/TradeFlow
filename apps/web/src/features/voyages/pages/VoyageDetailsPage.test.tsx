@@ -31,6 +31,7 @@ function serveVoyage(
     http.get(`*/api/voyages/${detail.id}/documentary-instructions`, () =>
       HttpResponse.json({ items: [] }),
     ),
+    http.get(`*/api/voyages/${detail.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
 }
 
@@ -77,6 +78,9 @@ describe('VoyageDetailsPage', () => {
         problemResponse(404, 'Voyage was not found.'),
       ),
       http.get(`*/api/voyages/${voyage.id}/documentary-instructions`, () =>
+        problemResponse(404, 'Voyage was not found.'),
+      ),
+      http.get(`*/api/voyages/${voyage.id}/documents`, () =>
         problemResponse(404, 'Voyage was not found.'),
       ),
     );

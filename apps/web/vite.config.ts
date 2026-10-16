@@ -15,5 +15,8 @@ export default defineConfig({
     setupFiles: ['src/test/setup.ts'],
     // Run in a timezone west of UTC so date-shifting bugs on calendar dates fail loudly.
     env: { TZ: 'America/Sao_Paulo' },
+    // Page tests type into real forms through jsdom; the longest take seconds on a loaded
+    // machine, and the default of 5 s made them fail by timing, not by behaviour.
+    testTimeout: 15_000,
   },
 });
