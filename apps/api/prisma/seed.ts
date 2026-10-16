@@ -521,11 +521,14 @@ async function seed(prisma: PrismaClient): Promise<void> {
   const notices = noticeSeeds.map((seed) => planNotice(seed, now));
   for (const { id, data, participants, contracts } of plans) {
     // The seed owns these voyages, so their participants, trade string and notices are replaced
-    // wholesale (notices first: they reference the contracts, which reference the participants).
-    // Notices issued through the API on a seeded voyage go too; their audit events stay.
+    // wholesale (notices and documentary instructions first: they reference the contracts, which
+    // reference the participants). Notices and instructions given through the API on a seeded
+    // voyage go too (an instruction takes its revisions and acknowledgements with it); their
+    // audit events stay. No instructions are seeded: the demo starts without any.
     await prisma.$transaction([
       prisma.voyage.upsert({ where: { id }, update: data, create: { id, ...data } }),
       prisma.notice.deleteMany({ where: { voyageId: id } }),
+      prisma.documentaryInstruction.deleteMany({ where: { voyageId: id } }),
       prisma.tradeContract.deleteMany({ where: { voyageId: id } }),
       prisma.voyageParticipant.deleteMany({ where: { voyageId: id } }),
       prisma.voyageParticipant.createMany({ data: participants }),

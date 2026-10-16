@@ -30,8 +30,10 @@ model Organization {
   users                User[]
   voyageParticipations VoyageParticipant[]
   auditEvents          AuditEvent[]
-  issuedNotices        Notice[]            @relation("NoticeIssuedBy")
-  acknowledgedNotices  Notice[]            @relation("NoticeAcknowledgedBy")
+  issuedNotices        Notice[]                                @relation("NoticeIssuedBy")
+  acknowledgedNotices  Notice[]                                @relation("NoticeAcknowledgedBy")
+  instructionRevisions DocumentaryInstructionRevision[]
+  instructionAcks      DocumentaryInstructionAcknowledgement[]
 
   @@map("organizations")
 }
@@ -57,11 +59,13 @@ model User {
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  sessions            Session[]
-  auditEvents         AuditEvent[]
-  issuedNotices       Notice[]     @relation("NoticeIssuedBy")
-  acknowledgedNotices Notice[]     @relation("NoticeAcknowledgedBy")
+  organization         Organization                            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  sessions             Session[]
+  auditEvents          AuditEvent[]
+  issuedNotices        Notice[]                                @relation("NoticeIssuedBy")
+  acknowledgedNotices  Notice[]                                @relation("NoticeAcknowledgedBy")
+  instructionRevisions DocumentaryInstructionRevision[]
+  instructionAcks      DocumentaryInstructionAcknowledgement[]
 
   @@index([organizationId])
   @@map("users")
@@ -160,15 +164,16 @@ model Voyage {
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  vessel         Vessel              @relation(fields: [vesselId], references: [id], onDelete: Restrict)
-  commodity      Commodity           @relation(fields: [commodityId], references: [id], onDelete: Restrict)
-  loadPort       Port                @relation("VoyageLoadPort", fields: [loadPortId], references: [id], onDelete: Restrict)
-  dischargePort  Port                @relation("VoyageDischargePort", fields: [dischargePortId], references: [id], onDelete: Restrict)
-  participants   VoyageParticipant[]
+  vessel                  Vessel                   @relation(fields: [vesselId], references: [id], onDelete: Restrict)
+  commodity               Commodity                @relation(fields: [commodityId], references: [id], onDelete: Restrict)
+  loadPort                Port                     @relation("VoyageLoadPort", fields: [loadPortId], references: [id], onDelete: Restrict)
+  dischargePort           Port                     @relation("VoyageDischargePort", fields: [dischargePortId], references: [id], onDelete: Restrict)
+  participants            VoyageParticipant[]
   /// The trade string, as its sale contracts (see TradeContract).
-  tradeContracts TradeContract[]
-  notices        Notice[]
-  auditEvents    AuditEvent[]
+  tradeContracts          TradeContract[]
+  notices                 Notice[]
+  documentaryInstructions DocumentaryInstruction[]
+  auditEvents             AuditEvent[]
 
   @@index([status, laycanStart])
   @@index([vesselId])
@@ -229,13 +234,15 @@ model TradeContract {
   buyerParticipantId  String   @map("buyer_participant_id") @db.Uuid
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  voyage  Voyage            @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  voyage                  Voyage                   @relation(fields: [voyageId], references: [id], onDelete: Cascade)
   // Composite keys pin both counterparties to this contract's voyage. NO ACTION (checked at the
   // end of the statement) lets a voyage deletion cascade to participants and contracts together,
   // while still refusing to delete a participant that a contract names.
-  seller  VoyageParticipant @relation("TradeContractSeller", fields: [voyageId, sellerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
-  buyer   VoyageParticipant @relation("TradeContractBuyer", fields: [voyageId, buyerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
-  notices Notice[]
+  seller                  VoyageParticipant        @relation("TradeContractSeller", fields: [voyageId, sellerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  buyer                   VoyageParticipant        @relation("TradeContractBuyer", fields: [voyageId, buyerParticipantId], references: [voyageId, id], onDelete: NoAction, onUpdate: NoAction)
+  notices                 Notice[]
+  // At most one: `documentary_instructions.trade_contract_id` is unique.
+  documentaryInstructions DocumentaryInstruction[]
 
   @@unique([voyageId, position])
   // Target of the notices' composite foreign key, so a notice stays inside its contract's voyage.
@@ -317,6 +324,90 @@ model Notice {
 }
 
 // ---------------------------------------------------------------------------
+// Documentary instructions
+// ---------------------------------------------------------------------------
+
+/// Documentary instructions from the buyer to the seller under one sale contract (ADR 0012): the
+/// aggregate. At most one per contract (unique), so concurrent first instructions cannot both be
+/// created. Its content lives in immutable revisions; this row says which revision is current
+/// and carries the concurrency version. Owned by the documentary-instructions module.
+///
+/// `version` advances by exactly one on every change (a revision or an acknowledgement) and is
+/// the entity tag clients send in `If-Match`. `currentRevisionNumber` advances by one with each
+/// revision. Every change is one conditional UPDATE of this row; a trigger refuses any other
+/// kind of change, and a deferred constraint trigger requires the current revision to exist.
+model DocumentaryInstruction {
+  id                    String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  voyageId              String   @map("voyage_id") @db.Uuid
+  tradeContractId       String   @unique @map("trade_contract_id") @db.Uuid
+  version               Int      @default(1)
+  currentRevisionNumber Int      @default(1) @map("current_revision_number")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  voyage           Voyage                                  @relation(fields: [voyageId], references: [id], onDelete: Restrict)
+  // Composite key: the instruction's voyage is its contract's voyage, whoever writes the row. A
+  // contract with instructions cannot be deleted.
+  tradeContract    TradeContract                           @relation(fields: [voyageId, tradeContractId], references: [voyageId, id], onDelete: Restrict, onUpdate: NoAction)
+  revisions        DocumentaryInstructionRevision[]
+  acknowledgements DocumentaryInstructionAcknowledgement[]
+
+  @@index([voyageId])
+  @@map("documentary_instructions")
+}
+
+/// One revision of an instruction, as the buyer wrote it. Never changes: a trigger refuses every
+/// UPDATE. Numbered 1, 2, 3, ... per instruction, and only ever inserted as the instruction's
+/// current revision (trigger), so the numbers have no gaps.
+model DocumentaryInstructionRevision {
+  id                      String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  instructionId           String   @map("instruction_id") @db.Uuid
+  revisionNumber          Int      @map("revision_number")
+  /// Name and address lines; at most 500 characters and never blank (CHECK).
+  consignee               String
+  /// Optional; the same bounds as the consignee (CHECK).
+  notifyParty             String?  @map("notify_party")
+  /// `[{ document, originals, copies }]`: one to eight entries, each document once, counts
+  /// 0..10 and not both zero. Validated by the API and again by a CHECK constraint.
+  requirements            Json
+  createdByUserId         String   @map("created_by_user_id") @db.Uuid
+  createdByOrganizationId String   @map("created_by_organization_id") @db.Uuid
+  /// Set by the API from its clock; never accepted from a client.
+  createdAt               DateTime @map("created_at") @db.Timestamptz(3)
+
+  instruction           DocumentaryInstruction                 @relation(fields: [instructionId], references: [id], onDelete: Cascade)
+  createdByUser         User                                   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByOrganization Organization                           @relation(fields: [createdByOrganizationId], references: [id], onDelete: Restrict)
+  acknowledgement       DocumentaryInstructionAcknowledgement?
+
+  @@unique([instructionId, revisionNumber])
+  @@index([createdByUserId])
+  @@map("documentary_instruction_revisions")
+}
+
+/// The seller's acknowledgement of one exact revision. At most one per revision (unique), only
+/// of the instruction's current revision at the time (trigger), and never changed afterwards. A
+/// later revision starts unacknowledged; earlier acknowledgements remain.
+model DocumentaryInstructionAcknowledgement {
+  id                           String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  instructionId                String   @map("instruction_id") @db.Uuid
+  revisionNumber               Int      @map("revision_number")
+  acknowledgedByUserId         String   @map("acknowledged_by_user_id") @db.Uuid
+  acknowledgedByOrganizationId String   @map("acknowledged_by_organization_id") @db.Uuid
+  /// Set by the API from its clock; never accepted from a client.
+  acknowledgedAt               DateTime @map("acknowledged_at") @db.Timestamptz(3)
+
+  instruction                DocumentaryInstruction         @relation(fields: [instructionId], references: [id], onDelete: Cascade)
+  revision                   DocumentaryInstructionRevision @relation(fields: [instructionId, revisionNumber], references: [instructionId, revisionNumber], onDelete: Cascade, onUpdate: NoAction)
+  acknowledgedByUser         User                           @relation(fields: [acknowledgedByUserId], references: [id], onDelete: Restrict)
+  acknowledgedByOrganization Organization                   @relation(fields: [acknowledgedByOrganizationId], references: [id], onDelete: Restrict)
+
+  @@unique([instructionId, revisionNumber])
+  @@index([acknowledgedByUserId])
+  @@map("documentary_instruction_acknowledgements")
+}
+
+// ---------------------------------------------------------------------------
 // Audit trail
 // ---------------------------------------------------------------------------
 
@@ -324,6 +415,8 @@ enum AuditAction {
   VOYAGE_CREATED
   NOTICE_ISSUED
   NOTICE_ACKNOWLEDGED
+  DOCUMENTARY_INSTRUCTION_REVISED
+  DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED
 
   @@map("audit_action")
 }
@@ -342,6 +435,9 @@ model AuditEvent {
   occurredAt          DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
   /// Action-specific facts. VOYAGE_CREATED: the voyage as created. NOTICE_ISSUED: the notice as
   /// issued. NOTICE_ACKNOWLEDGED: the notice, its contract, when, and whether it was late.
+  /// DOCUMENTARY_INSTRUCTION_REVISED: the instruction, its contract, the revision as written and
+  /// the new version. DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: the instruction, its contract, the
+  /// revision acknowledged, when, and the new version.
   payload             Json
 
   actorUser         User         @relation(fields: [actorUserId], references: [id], onDelete: Restrict)

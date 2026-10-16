@@ -19,7 +19,12 @@ export class ZodValidationPipe<TSchema extends z.ZodType> implements PipeTransfo
     }
     throw new RequestValidationException(
       result.error.issues.map((issue) => ({
-        path: [metadata.type, metadata.data, ...issue.path].filter(Boolean).map(String).join('.'),
+        // Drops only absent segments (`data` is undefined for a whole body): an array index
+        // of 0 is a real segment.
+        path: [metadata.type, metadata.data, ...issue.path]
+          .filter((segment) => segment !== undefined && segment !== '')
+          .map(String)
+          .join('.'),
         message: issue.message,
       })),
     );

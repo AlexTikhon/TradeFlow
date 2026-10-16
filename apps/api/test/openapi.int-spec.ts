@@ -42,6 +42,9 @@ describe('OpenAPI document', () => {
         '/api/voyages/{voyageId}/notices',
         '/api/voyages/{voyageId}/notices/{noticeId}',
         '/api/voyages/{voyageId}/notices/{noticeId}/acknowledgement',
+        '/api/voyages/{voyageId}/documentary-instructions',
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions',
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/acknowledgement',
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
@@ -84,6 +87,13 @@ describe('OpenAPI document', () => {
       operation('/api/voyages/{voyageId}/notices', 'post'),
       operation('/api/voyages/{voyageId}/notices/{noticeId}', 'get'),
       operation('/api/voyages/{voyageId}/notices/{noticeId}/acknowledgement', 'post'),
+      operation('/api/voyages/{voyageId}/documentary-instructions', 'get'),
+      operation('/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions', 'get'),
+      operation('/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions', 'put'),
+      operation(
+        '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/acknowledgement',
+        'post',
+      ),
       operation('/api/auth/me', 'get'),
       operation('/api/voyages', 'post'),
       operation('/api/vessels', 'get'),
@@ -232,6 +242,75 @@ describe('OpenAPI document', () => {
       'buyerOrganizationId',
       'position',
       'sellerOrganizationId',
+    ]);
+  });
+
+  it('documents documentary instructions: conditional writes, their headers and refusals', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      parameters?: { name: string; in: string; required?: boolean }[];
+      requestBody?: { required?: boolean; content: Record<string, { schema: unknown }> };
+      responses: Record<string, { headers?: Record<string, unknown> }>;
+    };
+    type Schema = {
+      properties?: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+      enum?: string[];
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+    const base = '/api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions';
+    const put = document.paths[base]?.put;
+    const get = document.paths[base]?.get;
+    const acknowledge = document.paths[`${base}/revisions/{revisionNumber}/acknowledgement`]?.post;
+    const codes = (op: Operation | undefined) => Object.keys(op?.responses ?? {});
+    const header = (op: Operation | undefined, name: string) =>
+      op?.parameters?.find((parameter) => parameter.in === 'header' && parameter.name === name);
+
+    expect(put?.requestBody?.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/DocumentaryInstructionContent',
+    });
+    expect(codes(put)).toEqual(
+      expect.arrayContaining(['200', '201', '400', '401', '403', '404', '412', '428']),
+    );
+    expect(header(put, 'If-Match')?.required).toBe(false);
+    expect(header(put, 'If-None-Match')?.required).toBe(false);
+    expect(put?.responses['200']?.headers).toHaveProperty('ETag');
+    expect(put?.responses['201']?.headers).toHaveProperty('ETag');
+
+    expect(codes(get)).toEqual(expect.arrayContaining(['200', '401', '404']));
+    expect(get?.responses['200']?.headers).toHaveProperty('ETag');
+
+    expect(codes(acknowledge)).toEqual(
+      expect.arrayContaining(['200', '400', '401', '403', '404', '409', '412', '428']),
+    );
+    expect(header(acknowledge, 'If-Match')?.required).toBe(true);
+    expect(acknowledge?.requestBody?.required).toBe(false);
+
+    const { schemas } = document.components;
+    expect(schemas.DocumentaryInstructionContent?.additionalProperties).toBe(false);
+    expect(Object.keys(schemas.DocumentaryInstructionContent?.properties ?? {}).sort()).toEqual([
+      'consignee',
+      'notifyParty',
+      'requirements',
+    ]);
+    expect(schemas.DocumentaryInstructionContent?.required?.sort()).toEqual([
+      'consignee',
+      'requirements',
+    ]);
+    expect(schemas.DocumentRequirement?.additionalProperties).toBe(false);
+    expect(schemas.AcknowledgeRevisionRequest?.properties ?? {}).toEqual({});
+    expect(schemas.RequiredDocumentType?.enum).toHaveLength(8);
+    expect(Object.keys(schemas.DocumentaryInstruction?.properties ?? {}).sort()).toEqual([
+      'contract',
+      'currentRevision',
+      'id',
+      'previousRevisions',
+      'version',
+      'voyageId',
     ]);
   });
 });

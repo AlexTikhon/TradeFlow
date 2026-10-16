@@ -8,6 +8,7 @@ import { NotFoundState } from '../../../shared/ui/NotFoundState';
 import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { voyageQueries } from '../api/voyage.queries';
+import { DocumentaryInstructionsCard } from '../components/DocumentaryInstructionsCard';
 import { NoticesCard } from '../components/NoticesCard';
 import { ParticipantsCard } from '../components/ParticipantsCard';
 import { TradeStringCard } from '../components/TradeStringCard';
@@ -46,6 +47,10 @@ export function VoyageDetailsPage() {
     enabled: isValidId,
   });
   const notices = useQuery({ ...voyageQueries.notices(scope, voyageId), enabled: isValidId });
+  const instructions = useQuery({
+    ...voyageQueries.documentaryInstructions(scope, voyageId),
+    enabled: isValidId,
+  });
 
   if (!isValidId || (error instanceof ApiError && error.status === 404)) {
     return <VoyageNotFound />;
@@ -91,6 +96,11 @@ export function VoyageDetailsPage() {
               onRetry={() => void tradeString.refetch()}
             />
             <NoticesCard voyageId={voyage.id} contracts={myContracts} notices={notices} />
+            <DocumentaryInstructionsCard
+              voyageId={voyage.id}
+              contracts={myContracts}
+              instructions={instructions}
+            />
             <ParticipantsCard participants={voyage.participants} />
           </Stack>
         </div>

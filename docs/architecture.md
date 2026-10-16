@@ -80,6 +80,13 @@ src/
       notice.read-model.ts      allowlisted select + row → contract mapping, overdue derived
       notices.service.ts        list, get, issue, acknowledge; role and side checked here
       notices.controller.ts     /voyages/:voyageId/notices[/:noticeId[/acknowledgement]]
+    documentary-instructions/
+      instruction-rules.ts      MVP content rules: what counts as an unchanged revision (pure)
+      instruction.read-model.ts allowlisted select (all revisions, acknowledgements) + mapping
+      instruction.writes.ts     the three conditional SQL statements that decide every write
+      documentary-instructions.service.ts     list, get, put (create or revise), acknowledge
+      documentary-instructions.controller.ts  preconditions (If-Match / If-None-Match), ETag
+  common/http/preconditions.ts  If-Match / If-None-Match parsing, 428 (no comparison: the DB does it)
 ```
 
 The trade string lives in the `voyages` module rather than a module of its own: its contracts
@@ -88,7 +95,10 @@ reference voyage participants by composite key, and reading it goes through
 
 Notices are a module of their own: they have commands, their own table and their own visibility
 rule ([ADR 0011](decisions/0011-counterparty-notices.md)). They reach contracts only through
-`CounterpartyContracts`, which the voyages module exports.
+`CounterpartyContracts`, which the voyages module exports. Documentary instructions follow the
+same pattern in their own module ([ADR 0012](decisions/0012-documentary-instructions.md)): the
+same visibility rule through the same provider, three tables of their own, and conditional
+writes.
 
 ### Module boundaries
 
@@ -98,9 +108,9 @@ extraction possible later:
 - A module talks to another module only through that module's exported providers, never by
   querying the other module's tables directly. `voyages` imports `ReferenceDataService` (to check
   that the ids in a request exist) and `AuditTrail` (to record what it did); it never touches
-  `audit_events` itself. `notices` imports `CounterpartyContracts` (to resolve the reader's
-  contracts, with the access rule inside the query) and `AuditTrail`; it never queries
-  `trade_contracts` or `voyage_participants`. Its read model reads the actors' names and
+  `audit_events` itself. `notices` and `documentary-instructions` import `CounterpartyContracts`
+  (to resolve the reader's contracts, with the access rule inside the query) and `AuditTrail`;
+  neither queries `trade_contracts` or `voyage_participants`. Its read model reads the actors' names and
   organizations through the notice's own actor relations, as the voyage read model reads its
   participants' organizations. Its read model still joins vessel, commodity and port rows through
   relations, because those columns are part of what a voyage is.
@@ -115,7 +125,9 @@ The `auth` module owns identity: it reads `users` (with their organization and r
 `sessions`. Other modules depend only on what it exports: the `Principal` type, the
 `@CurrentPrincipal()` / `@Public()` decorators and `requireOperator`. There is still no
 `organizations` module, because nothing manages organizations on their own yet. `audit` owns
-`audit_events`; `reference-data` owns vessels, commodities and ports; `notices` owns `notices`.
+`audit_events`; `reference-data` owns vessels, commodities and ports; `notices` owns `notices`;
+`documentary-instructions` owns `documentary_instructions` and their revisions and
+acknowledgements.
 
 ### Request pipeline
 
@@ -152,7 +164,9 @@ The `auth` module owns identity: it reads `users` (with their organization and r
    so internals never leak. An integration test asserts this.
 
 5. **Caching.** Every `/api` response carries `Cache-Control: no-store`: responses depend on who
-   is signed in, so no browser or proxy may keep them.
+   is signed in, so no browser or proxy may keep them. Express's automatic `ETag` (a body hash)
+   is switched off: entity tags appear only where writes are conditional, and mean an aggregate
+   version ([ADR 0012](decisions/0012-documentary-instructions.md)).
 
 ### OpenAPI
 
@@ -189,6 +203,11 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
   issued content immutable and an acknowledged notice unchangeable, for every writer.
 - Instants that business rules compare (`issued_at`, `acknowledged_at`) are set by the API from
   one clock reading per command, so the CHECK constraints between them hold.
+- Documentary instructions: one per contract (unique), inside the contract's voyage (composite
+  key). Triggers keep revisions and acknowledgements immutable, accept them only for the current
+  revision, and let the aggregate change only by advancing its version by one; a deferred
+  constraint trigger requires the current revision to exist at commit. A CHECK validates the
+  requirements JSON through an immutable function.
 
 ### Reads scoped below the voyage: the trade string
 
@@ -236,6 +255,36 @@ Commands run in one interactive transaction each, resolving the contract inside 
 `overdue` is computed by the read model from the deadline and the time of the response
 (`notice-rules.ts`), never stored.
 
+### Conditional writes: documentary instructions
+
+Documentary instructions are the first aggregate that is edited after it is created
+([ADR 0012](decisions/0012-documentary-instructions.md)). Reads and visibility work exactly as for
+notices (`CounterpartyContracts`, opaque 404). What is new is how writes avoid lost updates:
+
+- The aggregate carries a **version** that advances on every change (a revision or an
+  acknowledgement), separate from the **revision number** that counts content. Its entity tag is
+  `"<version>"`, sent as `ETag` and in the body.
+- `PUT /voyages/:voyageId/contracts/:contractId/documentary-instructions` creates with
+  `If-None-Match: *` (201) or writes the next revision with `If-Match` (200).
+  `POST .../revisions/:n/acknowledgement` requires `If-Match`. The controller turns the headers
+  into a precondition (`common/http/preconditions.ts`): none is 428, `If-Match: *` is 428,
+  malformed or both is 400. It never compares versions itself.
+- Order of checks: guards, then param and body validation (400), the precondition headers (428 or
+  400), the role (403), the contract as the principal sees it (404), its side (403), and finally
+  the **conditional statement** in the database (`instruction.writes.ts`): `INSERT ... ON CONFLICT
+DO NOTHING` or `UPDATE ... WHERE version = ANY($expected) ... RETURNING`. No row means the
+  precondition failed (412), or for an acknowledgement, a superseded or already acknowledged
+  revision (409), or no such revision (404). The service reads the row after a failed statement
+  only to choose that answer.
+- The new revision or acknowledgement row, the audit event and the response read happen in the
+  same transaction, so the returned `ETag` is the version this write produced.
+
+Integration tests make every race real: a test holds the contested row's lock (the instruction,
+or for creation the contract row that each insert's foreign-key check needs), waits until both
+requests are blocked on it in PostgreSQL, then releases them. Two creations, two revisions, two
+acknowledgements, and a revision against an acknowledgement each end with exactly one success,
+one 412, and the matching rows and audit events.
+
 ### Writes (first one: `POST /api/voyages`)
 
 The order of checks, and who decides what:
@@ -281,8 +330,9 @@ src/
                     including reference data (vessels, commodities, ports) for the form
       domain/       presentation rules for the domain (status labels, role grouping,
                     trade-string steps in contract order, notice states), what to offer whom
-      hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice: mutations and what
-                    happens after them
+      hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice,
+                    useSubmitInstruction, useAcknowledgeRevision: mutations and what happens
+                    after them
       components/   feature UI (table, filter, facts card, trade string, notices, participants)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
@@ -351,6 +401,20 @@ src/
   nothing, and nothing is retried automatically. A success writes to the cache only if the
   identity it was sent for is still signed in. A 409 on acknowledging reports the conflict and
   refreshes the list, so the user sees who acknowledged first.
+- **Documentary instructions** (a card after the notices, one panel per contract the organization
+  is a party to). The list carries each instruction's `version`; requests send it back as
+  `If-Match` (`putJson`/`postJson` take headers). The panel shows the current revision, its
+  documents and acknowledgement, and earlier revisions in a collapsed section. Buyer operators
+  get a form that starts from the current revision; seller operators get **Acknowledge receipt
+  of revision n**, which sends the version of the revision on screen. The form keeps the version
+  its draft started from (its _basis_), never the latest cached one, so a background refresh can
+  never turn a stale draft into a valid write. When the instructions moved on (a 412, or a
+  refresh that shows a newer version) the draft stays as typed, the newer revision is shown
+  beside it, and **Send** is disabled until the user chooses **Base my draft on revision n**. A
+  412 does not refresh anything by itself; the user asks for the latest version. Once loaded,
+  the card stays mounted through a failed refresh, so an open draft is not lost to a network
+  error. Writes go through `sendForCurrentSession`, are never retried, and write to the cache
+  only for the identity that sent them.
 
 ### Authentication in the browser
 
@@ -447,6 +511,11 @@ and the table's constraints with plain SQL, a forced audit failure on each comma
 acknowledgements that genuinely race: the test holds the notice's row lock until both requests
 are blocked on their conditional update, then releases it and expects one 200, one 409 and one
 audit event. Another test pins that the trade-string response is byte-for-byte unchanged.
+Documentary instructions add the four races described [above](#conditional-writes-documentary-instructions),
+every precondition outcome (428, 412, 409, 400 for malformed headers), immutability and the
+aggregate's transition rules with plain SQL, the requirements CHECK, a forced audit failure on
+each command (nothing written, version unchanged), and a role removed or an organization changed
+between reading and writing.
 
 No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
 string included) is not covered automatically. Playwright is the planned answer.
@@ -459,7 +528,11 @@ the same way: success, client and server validation, failures, a viewer, and a c
 that arrives after a sign-out or after another tab signed in as someone else. The notice panel
 gets the same treatment: issuing (with local times converted to instants) and acknowledging,
 validation, refusals, failures without retries, a 409, expiry, and responses that arrive after
-the identity changed.
+the identity changed. The documentary-instruction card is tested for both sides and both roles,
+the preconditions each write sends, client and server validation, a 412 on revising and on
+creating (draft kept, nothing re-sent until the user rebases), a newer version brought in by a
+refresh while editing, a failed refresh with a draft open, an acknowledgement overtaken by a
+revision, expiry, and responses that arrive after the identity changed.
 
 ## Operational concerns (current state)
 
@@ -482,7 +555,8 @@ How later requirements land on the current structure:
 | Trade string             | **Started (M4)**: `trade_contracts` as edges, chain rules in the domain, topology readable by every participant ([ADR 0010](decisions/0010-trade-string-visibility.md)). Counterparty-only contract ids since M5. Next: recording it through the API (validated and audited in one transaction); counterparty-only contract details |
 | Notices                  | **Started (M5)**: ETA notices, counterparty-only, `ISSUED → ACKNOWLEDGED` by conditional update, overdue derived ([ADR 0011](decisions/0011-counterparty-notices.md)). Next: further notice types, then notifications of new and overdue notices (outbox + jobs)                                                                    |
 | Write authorization      | **Started (M3)**: `VIEWER` / `OPERATOR` on the user, checked in the command service ([ADR 0008](decisions/0008-user-roles.md)). Next: participant-role rules for commands on existing voyages; a membership table when users act for several organizations                                                                          |
-| Optimistic concurrency   | `version` column on mutable aggregates; `UPDATE ... WHERE id = ? AND version = ?`; HTTP `If-Match`/ETag                                                                                                                                                                                                                             |
+| Documentary instructions | **Started (M6)**: one per contract, immutable revisions, per-revision acknowledgement by the seller, counterparty-only ([ADR 0012](decisions/0012-documentary-instructions.md)). Next: presentation deadlines, document upload against the requirements                                                                             |
+| Optimistic concurrency   | **Started (M6)**: `version` on documentary instructions; one conditional `UPDATE ... WHERE version = ANY(...)`; `ETag`, `If-Match` (412), `If-None-Match: *`, 428 without a precondition ([ADR 0012](decisions/0012-documentary-instructions.md)). Next: the same for recording the trade string                                    |
 | Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                            |
 | Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                                                                     |
 | Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                                                                       |

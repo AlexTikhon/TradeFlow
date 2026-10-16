@@ -4,6 +4,7 @@ import { HealthModule } from './health/health.module.js';
 import { PrismaModule } from './infrastructure/prisma/prisma.module.js';
 import { AuditModule } from './modules/audit/audit.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
+import { DocumentaryInstructionsModule } from './modules/documentary-instructions/documentary-instructions.module.js';
 import { NoticesModule } from './modules/notices/notices.module.js';
 import { ReferenceDataModule } from './modules/reference-data/reference-data.module.js';
 import { VoyagesModule } from './modules/voyages/voyages.module.js';
@@ -18,6 +19,7 @@ import { VoyagesModule } from './modules/voyages/voyages.module.js';
     ReferenceDataModule,
     VoyagesModule,
     NoticesModule,
+    DocumentaryInstructionsModule,
   ],
 })
 export class AppModule {}

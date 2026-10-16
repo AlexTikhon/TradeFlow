@@ -2,23 +2,27 @@
 
 ## Vocabulary
 
-| Term             | Meaning in TradeFlow                                                                                                                      |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Voyage**       | The execution record of one cargo moving on one vessel from a load port to a discharge port. The root object everything else attaches to. |
-| **Organization** | A company using TradeFlow. The tenancy boundary.                                                                                          |
-| **User**         | A person acting on behalf of exactly one organization.                                                                                    |
-| **Session**      | A signed-in browser session of one user. Expires after a fixed lifetime; ends early on sign-out.                                          |
-| **Participant**  | An organization taking part in a specific voyage, in a specific role.                                                                     |
-| **Role**         | What an organization does _on that voyage_: exporter, trader, final buyer (trade parties); surveyor, shipping agent (service providers).  |
-| **Trade string** | The chain of sale contracts linking the exporter to the final buyer through any intermediate traders.                                     |
-| **ETA notice**   | The seller's statement, under one sale contract, of when the vessel is expected; the buyer acknowledges receiving it.                     |
-| **Counterparty** | The seller or the buyer under a given sale contract.                                                                                      |
-| **Laycan**       | "Lay days / cancelling": the date window in which the vessel must present at the load port. Drives deadlines.                             |
-| **IMO number**   | Permanent 7-digit vessel identifier with a check digit.                                                                                   |
-| **UN/LOCODE**    | 5-character location code (`BRSSZ` = Santos, `NLRTM` = Rotterdam).                                                                        |
-| **MT**           | Metric tonnes.                                                                                                                            |
+| Term                         | Meaning in TradeFlow                                                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Voyage**                   | The execution record of one cargo moving on one vessel from a load port to a discharge port. The root object everything else attaches to. |
+| **Organization**             | A company using TradeFlow. The tenancy boundary.                                                                                          |
+| **User**                     | A person acting on behalf of exactly one organization.                                                                                    |
+| **Session**                  | A signed-in browser session of one user. Expires after a fixed lifetime; ends early on sign-out.                                          |
+| **Participant**              | An organization taking part in a specific voyage, in a specific role.                                                                     |
+| **Role**                     | What an organization does _on that voyage_: exporter, trader, final buyer (trade parties); surveyor, shipping agent (service providers).  |
+| **Trade string**             | The chain of sale contracts linking the exporter to the final buyer through any intermediate traders.                                     |
+| **ETA notice**               | The seller's statement, under one sale contract, of when the vessel is expected; the buyer acknowledges receiving it.                     |
+| **Documentary instructions** | The buyer's instructions to its seller, under one sale contract, on whom the shipping documents name and which documents to present.      |
+| **Revision**                 | One complete, unchangeable version of a contract's documentary instructions, numbered 1, 2, 3.                                            |
+| **Consignee**                | The party a bill of lading is made out to (often "to order of" a bank); it may take delivery of the cargo.                                |
+| **Notify party**             | Whom the carrier notifies when the vessel arrives; usually the buyer or its agent.                                                        |
+| **Counterparty**             | The seller or the buyer under a given sale contract.                                                                                      |
+| **Laycan**                   | "Lay days / cancelling": the date window in which the vessel must present at the load port. Drives deadlines.                             |
+| **IMO number**               | Permanent 7-digit vessel identifier with a check digit.                                                                                   |
+| **UN/LOCODE**                | 5-character location code (`BRSSZ` = Santos, `NLRTM` = Rotterdam).                                                                        |
+| **MT**                       | Metric tonnes.                                                                                                                            |
 
-## Implemented (Milestones 1 to 5)
+## Implemented (Milestones 1 to 6)
 
 ```
                         ┌──────────────┐
@@ -44,22 +48,30 @@
 
  TradeContract 1 ──── n Notice   (issued by a user of the seller, acknowledged by one of the buyer)
  Notice.type: ETA        Notice.status: ISSUED | ACKNOWLEDGED
+
+ TradeContract 1 ──── 0..1 DocumentaryInstruction   (version, currentRevisionNumber)
+                               1 ──── n DocumentaryInstructionRevision   (given by the buyer; immutable)
+                                              1 ──── 0..1 DocumentaryInstructionAcknowledgement
+                                                                         (by the seller; immutable)
 ```
 
-| Entity                   | Key fields                                                                                                                                       | Notes                                                    |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| `Organization`           | name, countryCode                                                                                                                                | No role column, by design (see below)                    |
-| `User`                   | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)                            | No password means cannot sign in                         |
-| `Session`                | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                                             | Valid while unexpired and unrevoked                      |
-| `Vessel`                 | name, imoNumber (unique)                                                                                                                         | Reference data shared by all tenants                     |
-| `Commodity`              | code (unique), name                                                                                                                              | Reference data                                           |
-| `Port`                   | unLocode (unique), name, countryCode                                                                                                             | Reference data                                           |
-| `Voyage`                 | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end                   |                                                          |
-| `VoyageParticipant`      | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                                            | Also the access-control relation                         |
-| `TradeContract`          | voyageId, position, sellerParticipantId, buyerParticipantId                                                                                      | One sale in the trade string; topology only (ADR 0010)   |
-| `Notice`                 | voyageId, tradeContractId, type, status, estimatedArrivalAt, acknowledgementDueAt, message, issuer and issuedAt, acknowledger and acknowledgedAt | Counterparties only; issued content immutable (ADR 0011) |
-| `AuditEvent`             | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                                            | Append-only; see ADR 0009                                |
-| `VoyageReferenceCounter` | year, lastNumber                                                                                                                                 | Hands out `TF-<year>-<number>`                           |
+| Entity                                  | Key fields                                                                                                                                       | Notes                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `Organization`                          | name, countryCode                                                                                                                                | No role column, by design (see below)                         |
+| `User`                                  | organizationId, email (unique, lowercase), fullName, role (`VIEWER` \| `OPERATOR`), passwordHash (argon2id, nullable)                            | No password means cannot sign in                              |
+| `Session`                               | userId, tokenHash (SHA-256, unique), createdAt, expiresAt, revokedAt                                                                             | Valid while unexpired and unrevoked                           |
+| `Vessel`                                | name, imoNumber (unique)                                                                                                                         | Reference data shared by all tenants                          |
+| `Commodity`                             | code (unique), name                                                                                                                              | Reference data                                                |
+| `Port`                                  | unLocode (unique), name, countryCode                                                                                                             | Reference data                                                |
+| `Voyage`                                | reference (unique, human-readable), status, vessel, commodity, quantity + unit, load and discharge ports, laycan start and end                   |                                                               |
+| `VoyageParticipant`                     | voyageId, organizationId, role; unique `(voyage, organization, role)`                                                                            | Also the access-control relation                              |
+| `TradeContract`                         | voyageId, position, sellerParticipantId, buyerParticipantId                                                                                      | One sale in the trade string; topology only (ADR 0010)        |
+| `Notice`                                | voyageId, tradeContractId, type, status, estimatedArrivalAt, acknowledgementDueAt, message, issuer and issuedAt, acknowledger and acknowledgedAt | Counterparties only; issued content immutable (ADR 0011)      |
+| `DocumentaryInstruction`                | voyageId, tradeContractId (unique), version, currentRevisionNumber                                                                               | Counterparties only; changes by conditional update (ADR 0012) |
+| `DocumentaryInstructionRevision`        | instructionId, revisionNumber, consignee, notifyParty, requirements (JSON), author and createdAt                                                 | Immutable                                                     |
+| `DocumentaryInstructionAcknowledgement` | instructionId, revisionNumber (unique together), acknowledger and acknowledgedAt                                                                 | Immutable; at most one per revision                           |
+| `AuditEvent`                            | action, actorUserId, actorOrganizationId, voyageId, occurredAt, payload (JSON object)                                                            | Append-only; see ADR 0009                                     |
+| `VoyageReferenceCounter`                | year, lastNumber                                                                                                                                 | Hands out `TF-<year>-<number>`                                |
 
 ### Creating a voyage (initial business rule)
 
@@ -165,6 +177,54 @@ type (`ETA`) and one workflow:
 3. The buyer may **acknowledge late**. A late acknowledgement is recorded like any other; the
    notice stops being overdue, and its times (and its audit event) show it was late.
 
+### Documentary instructions
+
+Documentary instructions travel the other way: from the **buyer** to the **seller** under one sale
+contract ([ADR 0012](decisions/0012-documentary-instructions.md)). They tell the seller whom the
+shipping documents must name and which documents to present.
+
+```
+                 buyer's operator                  buyer's operator
+ (none) ──── gives revision 1 ────▶ revision 1 ──── revises ────▶ revision 2 ──── ... ────▶ revision n
+                                       │                             │
+                     seller's operator acknowledges     seller's operator acknowledges
+                     receipt of revision 1 (once)       receipt of revision 2 (once)
+```
+
+- **One instruction per contract.** It is an aggregate of **revisions**; each revision is the
+  complete content, never changes once written, and is numbered 1, 2, 3 without gaps. Revising
+  writes the next revision and makes it current; earlier revisions stay as they were.
+- **Acknowledgement names the exact revision** and records receipt, not acceptance. Only the
+  current revision can be acknowledged, and only once. A new revision starts unacknowledged;
+  the acknowledgements of earlier revisions remain, so it is always clear which content the
+  seller confirmed.
+- **Who:** users of the contract's buyer and seller read them, viewers included, with every
+  revision; an `OPERATOR` of the buyer gives and revises them; an `OPERATOR` of the seller
+  acknowledges. The organization must be a counterparty and still participate in the voyage.
+  Everyone else gets the same 404 as for instructions that do not exist. As for notices, the
+  side of the contract decides, not the participant role.
+- **Version versus revision.** The aggregate's **version** advances on every change, a revision
+  or an acknowledgement; the **revision number** advances only with content. Every write names
+  the version it was based on (HTTP `If-Match`; `If-None-Match: *` for the first instructions)
+  and fails with 412 if anything changed since, so nobody overwrites, or acknowledges, content
+  they have not seen.
+- **People and times** come from the session and the server's clock, never from the request.
+
+**MVP business rules** (project-specific starting points, not settled commercial practice):
+
+1. **Content** is a consignee (free text, at most 500 characters: name and address lines), an
+   optional notify party (the same bounds), and **one to eight document requirements**. A
+   requirement names one of eight document types (bill of lading, commercial invoice,
+   certificate of origin, phytosanitary, weight, quality, fumigation or insurance certificate)
+   and asks for 0 to 10 originals and 0 to 10 copies, at least one in total. Each type appears
+   at most once per revision. Nothing else yet: no free-text clauses, presentation deadlines,
+   bank details or attachments.
+2. **Only the buyer writes.** The seller cannot propose changes through the system; it
+   acknowledges, or talks to the buyer.
+3. **A revision must change something.** Re-sending the current content is refused: it would
+   only reset the seller's acknowledgement.
+4. **Nothing is withdrawn or deleted.** Instructions are corrected by revising them.
+
 ### Invariants enforced by the database
 
 - `quantity > 0`
@@ -187,6 +247,15 @@ buyer_participant_id`; both reference participants of the same voyage (foreign k
   trigger refuses changes to issued content and any change to an acknowledged notice. A contract
   with notices cannot be deleted. Audit events allow one `NOTICE_ISSUED` and one
   `NOTICE_ACKNOWLEDGED` per notice.
+- Documentary instructions: one per contract, inside its voyage (foreign key on
+  `(voyage_id, trade_contract_id)`); created at version 1 with revision 1; every change advances
+  the version by exactly one and the revision number by at most one; the current revision never
+  exceeds the version and exists at commit. Revisions and acknowledgements are inserted only for
+  the current revision and never updated; one acknowledgement per revision. Consignee and notify
+  party are bounded and not blank; requirements are one to eight well-formed entries, each
+  document once. A contract with instructions cannot be deleted. Audit events allow one event
+  per instruction version, one `DOCUMENTARY_INSTRUCTION_REVISED` per revision and one
+  `DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED` per revision.
 
 ## Modelling decisions
 
@@ -252,17 +321,19 @@ other. A trader's junior analyst sees every voyage the trader participates in bu
 allowed to accept notices. And when the organization is exporter on one voyage and buyer on
 another, its users' permissions do not change between the two.
 
-**Current state (Milestone 5).** Every signed-in user can read exactly the voyages their
-organization participates in, including each voyage's trade-string topology, and the notices
-under the contracts their organization is a party to. Users have one of two roles
-([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads; an **operator** may also
-create voyages for their organization, and issue or acknowledge notices for it. The role is on
+**Current state (Milestone 6).** Every signed-in user can read exactly the voyages their
+organization participates in, including each voyage's trade-string topology, and the notices and
+documentary instructions under the contracts their organization is a party to. Users have one of
+two roles ([ADR 0008](decisions/0008-user-roles.md)): a **viewer** only reads; an **operator** may
+also create voyages for their organization, issue or acknowledge notices, and give, revise or
+acknowledge documentary instructions for it. The role is on
 the user row, which is organization-scoped because a user belongs to exactly one organization,
 and it is read on every request. Creating a voyage needs no participant role, since the voyage
 does not exist yet; the creator becomes its exporter. Notice commands are the first commands on
 existing voyages and check both layers in their service: the organization's side of the
 contract (a domain rule: only the seller issues, only the buyer acknowledges), and the user's
-role within their organization.
+role within their organization. Documentary instructions check the same two layers, with the
+sides reversed: the buyer writes, the seller acknowledges.
 
 ## Proposed next (not implemented)
 
@@ -289,6 +360,5 @@ deliberately not modelled yet: it adds a join to every query for a case nothing 
 | Entity                         | Shape (sketch)                                                               |
 | ------------------------------ | ---------------------------------------------------------------------------- |
 | Further notice types           | vessel nomination, notice of readiness; same direction and visibility as ETA |
-| `DocumentaryInstruction`       | buyer → seller, versioned, requires acknowledgement                          |
 | `Document` / `DocumentVersion` | file metadata and storage key; immutable versions                            |
 | `Task`                         | due date (often derived from laycan), assignee organization, status          |

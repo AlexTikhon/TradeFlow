@@ -29,6 +29,8 @@ export const isUnauthenticated = (error: unknown): boolean =>
 interface RequestOptions {
   query?: Record<string, string | undefined>;
   signal?: AbortSignal;
+  /** Extra request headers, such as the preconditions of a conditional write (`If-Match`). */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -36,9 +38,9 @@ interface RequestOptions {
  * attaches it; no code here ever sees the token.
  */
 async function send(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PUT',
   path: string,
-  { query, signal, body }: RequestOptions & { body?: unknown } = {},
+  { query, signal, headers, body }: RequestOptions & { body?: unknown } = {},
 ): Promise<Response> {
   const url = new URL(`${API_BASE_PATH}${path}`, window.location.origin);
   for (const [key, value] of Object.entries(query ?? {})) {
@@ -49,6 +51,7 @@ async function send(
     method,
     credentials: 'same-origin',
     headers: {
+      ...headers,
       Accept: 'application/json',
       ...(body !== undefined && { 'Content-Type': 'application/json' }),
     },
@@ -94,6 +97,16 @@ export async function postJson<TSchema extends z.ZodType>(
   options: RequestOptions = {},
 ): Promise<z.output<TSchema>> {
   return parseBody(path, await send('POST', path, { ...options, body }), schema);
+}
+
+/** PUTs a JSON body (a full replacement or new version) and validates the JSON response. */
+export async function putJson<TSchema extends z.ZodType>(
+  path: string,
+  body: unknown,
+  schema: TSchema,
+  options: RequestOptions = {},
+): Promise<z.output<TSchema>> {
+  return parseBody(path, await send('PUT', path, { ...options, body }), schema);
 }
 
 /** POSTs without a body, for commands answered with 204 No Content. */

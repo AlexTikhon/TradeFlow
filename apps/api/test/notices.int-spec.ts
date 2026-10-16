@@ -11,6 +11,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { UserRole } from '../src/generated/prisma/client.js';
 import { signIn } from './support/auth.js';
+import { failAuditWrites, holdLock, waitForLockWaiters } from './support/concurrency.js';
 import {
   createOrganization,
   createReferenceData,
@@ -538,7 +539,7 @@ describe('Notices', () => {
 
     it('rolls the notice back when its audit event cannot be written', async () => {
       const s = await scenario();
-      await failAuditWrites(async () => {
+      await failAuditWrites(ctx.prisma, async () => {
         const response = await issue(
           s.exporter.operator.cookie,
           s.voyage.id,
@@ -833,32 +834,18 @@ describe('Notices', () => {
 
       // Hold the notice's row lock, so that both requests read it as ISSUED, pass every check
       // and then queue on the conditional update, before either can commit.
-      let release: () => void = () => undefined;
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let locked: () => void = () => undefined;
-      const lockTaken = new Promise<void>((resolve) => {
-        locked = resolve;
-      });
-      const holder = ctx.prisma.$transaction(
-        async (tx) => {
-          await tx.$queryRaw`SELECT id FROM notices WHERE id = ${notice.id}::uuid FOR UPDATE`;
-          locked();
-          await released;
-        },
-        { timeout: 10_000 },
+      const lock = await holdLock(
+        ctx.prisma,
+        (tx) => tx.$queryRaw`SELECT id FROM notices WHERE id = ${notice.id}::uuid FOR UPDATE`,
       );
-      await lockTaken;
 
       const responses = Promise.all(
         contenders.map(({ cookie }) =>
           acknowledge(cookie, s.voyage.id, notice.id).then((response) => response),
         ),
       );
-      await waitForLockWaiters(2);
-      release();
-      await holder;
+      await waitForLockWaiters(ctx.prisma, 2);
+      await lock.release();
       const [first, second] = await responses;
 
       expect([first?.status, second?.status].sort()).toEqual([200, 409]);
@@ -877,7 +864,7 @@ describe('Notices', () => {
       const s = await scenario();
       const notice = await issued(s.exporter.operator.cookie, s.voyage.id, s.c1);
 
-      await failAuditWrites(async () => {
+      await failAuditWrites(ctx.prisma, async () => {
         const response = await acknowledge(s.trader.operator.cookie, s.voyage.id, notice.id).expect(
           500,
         );
@@ -1108,35 +1095,4 @@ describe('Notices', () => {
       }
     });
   });
-
-  /** Runs `act` while every insert into `audit_events` fails, like an unavailable audit store. */
-  async function failAuditWrites(act: () => Promise<void>) {
-    await ctx.prisma.$executeRawUnsafe(`
-      CREATE FUNCTION test_audit_unavailable() RETURNS trigger LANGUAGE plpgsql
-      AS $$ BEGIN RAISE EXCEPTION 'audit store unavailable'; END $$`);
-    await ctx.prisma.$executeRawUnsafe(`
-      CREATE TRIGGER test_audit_unavailable BEFORE INSERT ON audit_events
-      FOR EACH ROW EXECUTE FUNCTION test_audit_unavailable()`);
-    try {
-      await act();
-    } finally {
-      await ctx.prisma.$executeRawUnsafe('DROP TRIGGER test_audit_unavailable ON audit_events');
-      await ctx.prisma.$executeRawUnsafe('DROP FUNCTION test_audit_unavailable()');
-    }
-  }
-
-  /** Waits until `count` sessions of this database are blocked on a lock. */
-  async function waitForLockWaiters(count: number) {
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      const [row] = await ctx.prisma.$queryRaw<{ waiting: number }[]>`
-        SELECT count(*)::int AS waiting FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock'`;
-      if ((row?.waiting ?? 0) >= count) return;
-      if (Date.now() > deadline) {
-        throw new Error(`Expected ${count} sessions waiting on a lock, saw ${row?.waiting ?? 0}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
 });
