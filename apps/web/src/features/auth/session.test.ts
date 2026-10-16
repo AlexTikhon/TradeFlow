@@ -333,6 +333,39 @@ describe('session transitions', () => {
     expect(sessionOf(queryClient)).toEqual(claire);
     expect(queryClient.getQueryData(voyagesOf(claire))).toEqual(['TF-CLAIRE-ONLY']);
   });
+
+  it('outdates checks already on their way once a check adopts another identity', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    // Sent while the cookie was still Ana's: it will answer Ana.
+    const held = session.holdNext('me');
+    const olderCheck = checkSession(queryClient, neverAborted());
+    await held.received;
+
+    // The cookie changed behind this tab's back; a check through the cache adopts Claire.
+    session.current = claire;
+    await expect(queryClient.query({ ...sessionQuery, staleTime: 0 })).resolves.toEqual(claire);
+    expect(sessionOf(queryClient)).toEqual(claire);
+    queryClient.setQueryData(voyagesOf(claire), ['TF-CLAIRE-ONLY']);
+    held.release();
+
+    await expect(olderCheck).rejects.toBeInstanceOf(StaleSessionCheckError);
+    expect(sessionOf(queryClient)).toEqual(claire);
+    expect(queryClient.getQueryData(voyagesOf(claire))).toEqual(['TF-CLAIRE-ONLY']);
+  });
+
+  it('outdates no check already on its way when a check only confirms the identity', async () => {
+    const session = serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const held = session.holdNext('me');
+    const earlierCheck = checkSession(queryClient, neverAborted());
+    await held.received;
+
+    await expect(queryClient.query({ ...sessionQuery, staleTime: 0 })).resolves.toEqual(ana);
+    held.release();
+
+    await expect(earlierCheck).resolves.toEqual(ana);
+  });
 });
 
 describe('a 401 attributed to the session it was sent under', () => {
@@ -376,6 +409,22 @@ describe('a 401 attributed to the session it was sent under', () => {
 
     expect(sessionOf(queryClient)).toEqual(claire);
     expect(queryClient.getQueryData(voyagesOf(claire))).toEqual(['TF-CLAIRE-ONLY']);
+  });
+
+  it('leaves alone the same user after session checks went to someone else and back', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    session.current = ana;
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+    queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
+    await sessionExpired(queryClient, epoch);
+
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(queryClient.getQueryData(voyagesOf(ana))).toEqual(['TF-ANA-ONLY']);
   });
 
   it('leaves alone the same user after they signed out and back in', async () => {
@@ -444,6 +493,32 @@ describe('whether the session an operation started in is still the current one',
     await expect(revalidate(queryClient)).resolves.toEqual(claire);
 
     expect(isCurrentSession(queryClient, epoch)).toBe(false);
+  });
+
+  it('no longer holds after session checks went to someone else and back, without a transition', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    session.current = ana;
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(isCurrentSession(queryClient, epoch)).toBe(false);
+  });
+
+  it('holds for the session a check adopted, while later checks only confirm it', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    const epoch = currentSessionEpoch(queryClient);
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+
+    expect(isCurrentSession(queryClient, epoch)).toBe(true);
   });
 
   it('keeps each epoch to itself: an older one stays stale beside a newer, current one', async () => {

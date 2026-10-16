@@ -22,6 +22,7 @@ import { aCounterpartyContract, contractList } from '../../../test/fixtures/noti
 import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
+import { checkSession, StaleSessionCheckError } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 
 const voyage = aVoyageDetail();
@@ -242,6 +243,27 @@ async function anotherTabSignsInAs(
   await waitFor(() => {
     expect(queryClient.getQueryData(['session'])).toEqual(identity);
   });
+}
+
+/**
+ * The cookie now belongs to `identity`, and nothing announced it: a session check (as on
+ * returning to the tab) finds out. Waits until this tab has adopted the answer.
+ */
+async function aSessionCheckFinds(
+  { session, queryClient }: Pick<Rendered, 'session' | 'queryClient'>,
+  identity: CurrentUser,
+) {
+  session.current = identity;
+  await act(() => queryClient.refetchQueries({ queryKey: ['session'] }));
+  expect(queryClient.getQueryData(['session'])).toEqual(identity);
+}
+
+/** Session checks alone go to Claire and back to Ana; waits until Ana's page is back. */
+async function sessionChecksGoToClaireAndBack(rendered: Pick<Rendered, 'session' | 'queryClient'>) {
+  await aSessionCheckFinds(rendered, claire);
+  expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+  await aSessionCheckFinds(rendered, ana);
+  expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
 }
 
 /** Waits until every request still on its way has been answered and handled. */
@@ -967,6 +989,138 @@ describe('Documents on the voyage page', () => {
 
       expect(saved.map(({ download }) => download)).toEqual(['bill-of-lading-v2.pdf']);
       expect(new Uint8Array(await (saved[0]?.blob as Blob).arrayBuffer())).toEqual(secondBytes);
+    });
+  });
+
+  describe('when session checks alone go to Claire and back to Ana while a request is in flight', () => {
+    const anasDocuments = (queryClient: Rendered['queryClient']) =>
+      queryClient
+        .getQueryCache()
+        .findAll({ queryKey: ['protected', `${ana.user.id}:${ana.organization.id}`] })
+        .filter((query) => query.queryKey.includes('documents'));
+
+    it('does not save a download asked for before', async () => {
+      servePage({ documents: [aDocument()] });
+      const content = serveDownload(1, pdfBytes(), { hold: true });
+      const { saved, create } = watchSaves();
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const item = await billOfLading();
+      await rendered.user.click(
+        item.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+      );
+      await content.received;
+
+      await sessionChecksGoToClaireAndBack(rendered);
+      expect(await billOfLading()).toBeDefined();
+      content.release();
+      await allAnswered(rendered.queryClient);
+
+      expect(create).not.toHaveBeenCalled();
+      expect(saved).toEqual([]);
+    });
+
+    it.each<[string, () => Response]>([
+      ['succeeds', () => HttpResponse.json(aDocument(), { status: 201 })],
+      ['answers 409', () => problem(409, 'Conflict', 'Revision 1 has been superseded.')],
+    ])(
+      'lets an upload sent before, which %s, touch nothing of her session',
+      async (_case, respond) => {
+        const state = servePage();
+        const upload = serveUpload(respond, { hold: true });
+        const rendered = renderRoute(page, { accounts: [ana, claire] });
+        const { user, queryClient } = rendered;
+        const before = await billOfLading();
+        await chooseFile(user, before, aPdf());
+        await user.click(before.getByRole('button', { name: 'Upload' }));
+        await upload.received;
+
+        await sessionChecksGoToClaireAndBack(rendered);
+        const item = await billOfLading();
+        expect(await item.findByText('Not uploaded yet')).toBeVisible();
+        const documentRequests = state.documentRequests;
+        const instructionRequests = state.instructionRequests;
+        upload.release();
+        await allAnswered(queryClient);
+
+        expect(screen.queryByText(/has been uploaded/)).not.toBeInTheDocument();
+        expect(item.getByText('Not uploaded yet')).toBeVisible();
+        expect(state.documentRequests).toBe(documentRequests);
+        expect(state.instructionRequests).toBe(instructionRequests);
+        const [documents] = anasDocuments(queryClient);
+        expect(documents?.state.data).toEqual({ items: [] });
+        for (const query of protectedQueries(queryClient)) {
+          expect(query.state.isInvalidated).toBe(false);
+        }
+      },
+    );
+
+    it('keeps Ana signed in, with her data, when a 401 sent before answers', async () => {
+      servePage({ documents: [aDocument()] });
+      const upload = serveUpload(() => problemResponse(401, 'Authentication is required.'), {
+        hold: true,
+      });
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { router, user, session, queryClient } = rendered;
+      const before = await billOfLading();
+      await chooseFile(user, before, aPdf());
+      await user.click(before.getByRole('button', { name: 'Upload as version 2' }));
+      await upload.received;
+
+      await sessionChecksGoToClaireAndBack(rendered);
+      const item = await billOfLading();
+      expect(item.getByText('Version 1')).toBeVisible();
+      upload.release();
+      await allAnswered(queryClient);
+
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      expect(router.state.location.pathname).toBe(page);
+      expect(screen.queryByRole('heading', { name: 'Sign in to TradeFlow' })).toBeNull();
+      expect(item.getByText('Version 1')).toBeVisible();
+      const [documents] = anasDocuments(queryClient);
+      expect(documents?.state.data).toEqual({ items: [aDocument()] });
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('keeps Claire when a session check sent under Ana answers after a check adopted Claire', async () => {
+      servePage();
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { session, queryClient } = rendered;
+      expect(await billOfLading()).toBeDefined();
+      // A check already on its way under Ana, as a sign-in's reconciliation makes one.
+      const held = session.holdNext('me');
+      const olderCheck = checkSession(queryClient);
+      await held.received;
+
+      await aSessionCheckFinds(rendered, claire);
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      held.release();
+
+      await expect(olderCheck).rejects.toBeInstanceOf(StaleSessionCheckError);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(screen.getByText('Claire Morel')).toBeInTheDocument();
+      expect(screen.queryByText('Ana Souza')).toBeNull();
+    });
+
+    it('saves a download when a session check only confirmed that Ana is still signed in', async () => {
+      servePage({ documents: [aDocument()] });
+      const bytes = pdfBytes(1000);
+      const content = serveDownload(1, bytes, { hold: true });
+      const { saved } = watchSaves();
+      const rendered = renderRoute(page);
+      const item = await billOfLading();
+      await rendered.user.click(
+        item.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+      );
+      await content.received;
+
+      const checks = rendered.session.meRequests;
+      await aSessionCheckFinds(rendered, ana);
+      expect(rendered.session.meRequests).toBe(checks + 1);
+      content.release();
+      await allAnswered(rendered.queryClient);
+
+      expect(saved.map(({ download }) => download)).toEqual(['bill-of-lading.pdf']);
+      expect(new Uint8Array(await (saved[0]?.blob as Blob).arrayBuffer())).toEqual(bytes);
     });
   });
 });

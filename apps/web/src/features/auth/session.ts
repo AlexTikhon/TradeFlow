@@ -17,7 +17,8 @@ import { fetchCurrentUser, signIn, signOut } from './api/auth.api';
  * Who is signed in changes through explicit transitions (sign-in, sign-out, a 401, another tab)
  * and through session checks. Transitions are ordered by a generation counter kept per query
  * client: each one starts a new generation, and a check's answer counts only if no transition
- * started while it was on its way. Requests that change the session cookie (sign-in, sign-out)
+ * started while it was on its way. A check whose answer names someone else starts a generation
+ * too; one that confirms the identity does not. Requests that change the session cookie (sign-in, sign-out)
  * run one at a time, so a slow sign-out response cannot clear the cookie of a newer sign-in.
  *
  * A sign-in owns the session from the moment it starts until it resolves: nobody is signed in
@@ -93,6 +94,13 @@ export class StaleSessionCheckError extends Error {
   }
 }
 
+/** A session check's answer, and the generation it belongs to. */
+interface SessionAnswer {
+  identity: CurrentUser | null;
+  /** The generation the check started in, or the one it started itself by adopting someone. */
+  generation: number;
+}
+
 /**
  * Asks the server who is signed in. The answer is used only if no identity transition started
  * meanwhile; otherwise this rejects with `StaleSessionCheckError` and touches nothing. While a
@@ -100,27 +108,38 @@ export class StaleSessionCheckError extends Error {
  * leave, and an identity the server still remembers must not come back on its own. While a
  * sign-in is pending the answer is also "nobody": the cookie is about to change, and whoever it
  * belongs to now must not be shown.
+ *
+ * An answer naming someone other than the identity held now (the cookie changed behind this
+ * tab's back, with no notification) starts a new generation, owned by this check: every earlier
+ * session has ended, even if its identity comes back later, and checks still on their way are
+ * outdated. An answer that confirms the identity held now changes nothing.
  */
 export async function checkSession(
   queryClient: QueryClient,
   signal?: AbortSignal,
 ): Promise<CurrentUser | null> {
+  return (await askServer(queryClient, signal)).identity;
+}
+
+async function askServer(queryClient: QueryClient, signal?: AbortSignal): Promise<SessionAnswer> {
   const control = controlOf(queryClient);
-  if (control.signOut.status !== 'idle' || control.signInIntent !== undefined) return null;
-  const generation = control.generation;
+  let generation = control.generation;
+  if (control.signOut.status !== 'idle' || control.signInIntent !== undefined) {
+    return { identity: null, generation };
+  }
   const assertCurrent = () => {
     if (control.generation !== generation) throw new StaleSessionCheckError();
   };
 
   const identity = await fetchCurrentUser(signal);
   assertCurrent();
-  // The cookie can change behind this tab's back (another tab signed in as someone else).
   // Drop the previous identity's data before the new identity is stored and rendered.
   if (!sameIdentity(queryClient.getQueryData<CurrentUser | null>(SESSION_KEY), identity)) {
+    generation = ++control.generation;
     await purgeProtectedData(queryClient);
     assertCurrent();
   }
-  return identity;
+  return { identity, generation };
 }
 
 export const sessionQuery = queryOptions({
@@ -202,12 +221,12 @@ async function publishIdentity(
 }
 
 /**
- * The session as it stands now: the transition it belongs to and the identity published for it.
+ * The session as it stands now: the generation it belongs to and the identity published for it.
  * The generation changes with every identity transition, including signing out and back in as
- * the same user, so it tells sessions apart where identities cannot. The identity also changes
- * when a session check adopts someone else (the cookie changed behind this tab's back with no
- * notification), which is not a transition of its own. Capture it when sending a request whose
- * 401 must be attributed to the session it was sent under.
+ * the same user, and whenever a session check adopts someone else (the cookie changed behind
+ * this tab's back with no notification), so it tells sessions apart where identities cannot:
+ * going to someone else and back never revives an earlier session. Capture it when sending a
+ * request whose 401 must be attributed to the session it was sent under.
  */
 export interface SessionEpoch {
   readonly generation: number;
@@ -224,8 +243,11 @@ export function currentSessionEpoch(queryClient: QueryClient): SessionEpoch {
 /**
  * Whether `epoch` is still the session as it stands: no transition has started since, and no
  * session check has adopted another identity. False once the user has signed out, even if the
- * same user has signed back in since. A session check that only confirms the identity changes
+ * same user has signed back in since, and once a check has gone to someone else, even if a later
+ * check came back to the same user. A session check that only confirms the identity changes
  * nothing. Gate on it every side effect of a response to an operation started during `epoch`.
+ * (The identity is compared too: an adopting check moves the generation before its answer is
+ * published.)
  */
 export function isCurrentSession(queryClient: QueryClient, epoch: SessionEpoch): boolean {
   const current = queryClient.getQueryData<CurrentUser | null>(SESSION_KEY);
@@ -239,7 +261,7 @@ export function isCurrentSession(queryClient: QueryClient, epoch: SessionEpoch):
  * elsewhere). Signs out locally, like a 401 on protected data: requests are aborted, data dropped,
  * and the auth boundary sends the user to sign in. Nothing is sent to the server, which has ended
  * the session already. If any transition started since the request was sent, or a session check
- * has since adopted another identity, the 401 speaks for a session that is already gone, and the
+ * has since adopted another identity, the 401 speaks for a session that is already gone (even if its identity has come back), and the
  * current one (whoever it belongs to) is left alone.
  */
 export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpoch): Promise<void> {
@@ -277,8 +299,11 @@ async function reconcileSession(queryClient: QueryClient): Promise<void> {
   const generation = ++control.generation;
   await queryClient.cancelQueries({ queryKey: SESSION_KEY });
   try {
-    const identity = await checkSession(queryClient);
-    if (control.generation === generation) queryClient.setQueryData(SESSION_KEY, identity);
+    // Adopting someone else moves the check to a generation of its own; it still publishes.
+    const answer = await askServer(queryClient);
+    if (control.generation === answer.generation) {
+      queryClient.setQueryData(SESSION_KEY, answer.identity);
+    }
   } catch (error) {
     // A stale answer means a newer transition started; that one publishes.
     if (!(error instanceof StaleSessionCheckError) && control.generation === generation) {
