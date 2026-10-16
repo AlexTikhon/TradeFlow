@@ -6,7 +6,7 @@ import type {
   ProblemDetails,
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
 import {
   aCounterpartyContract,
@@ -391,6 +391,193 @@ describe('ETA notices on the voyage page', () => {
       expect(await form.findByText('Use at most 1000 characters')).toBeInTheDocument();
 
       expect(issue.bodies).toEqual([]);
+    });
+
+    describe('entering times', () => {
+      const arrivalField = (form: Form) => form.getByLabelText(/Estimated arrival/);
+      const dueField = (form: Form) => form.getByLabelText(/Acknowledge by/);
+      const setTime = (field: HTMLElement, value: string) => {
+        fireEvent.change(field, { target: { value } });
+      };
+      const submit = (user: User, form: Form) =>
+        user.click(form.getByRole('button', { name: 'Issue notice' }));
+      const issued = () =>
+        screen.findByText('Your ETA notice to Lacustra Commodities SA has been issued.');
+
+      it('shows the offset and instant before sending, in a zone without DST', async () => {
+        servePage();
+        const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+        const { user } = renderRoute(page);
+        const form = await openIssueForm(user);
+        await fillIssueForm(user, form);
+
+        expect(arrivalField(form)).toHaveAccessibleDescription('UTC-03:00 · 2030-10-25 17:00 UTC');
+        expect(dueField(form)).toHaveAccessibleDescription('UTC-03:00 · 2030-10-20 15:00 UTC');
+        expect(form.queryByRole('radiogroup')).not.toBeInTheDocument();
+
+        await submit(user, form);
+        await issued();
+        expect(issue.bodies).toEqual([expectedRequest]);
+      });
+
+      describe('in Europe/Warsaw', () => {
+        // Node re-reads TZ when it changes; the form asks for the zone on every render.
+        beforeEach(() => {
+          vi.stubEnv('TZ', 'Europe/Warsaw');
+        });
+        afterEach(() => {
+          vi.unstubAllEnvs();
+        });
+
+        const skipped =
+          'This time does not exist in Europe/Warsaw: the clocks skip it. Enter another time.';
+        const repeated =
+          'This time occurs twice in Europe/Warsaw, as the clocks go back. Choose which one.';
+        const choiceFor = (form: Form, name: string) =>
+          within(form.getByRole('radiogroup', { name }));
+
+        it('sends ordinary winter and summer times with their own offsets', async () => {
+          servePage();
+          const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+          const { user } = renderRoute(page);
+          const form = await openIssueForm(user);
+          expect(form.getByText(/Times are in your time zone \(Europe\/Warsaw\)/)).toBeVisible();
+          await fillIssueForm(user, form, { arrival: '2030-07-10T14:00', due: '2030-01-10T12:00' });
+
+          expect(arrivalField(form)).toHaveAccessibleDescription(
+            'UTC+02:00 · 2030-07-10 12:00 UTC',
+          );
+          expect(dueField(form)).toHaveAccessibleDescription('UTC+01:00 · 2030-01-10 11:00 UTC');
+
+          await submit(user, form);
+          await issued();
+          expect(issue.bodies).toEqual([
+            {
+              ...expectedRequest,
+              estimatedArrivalAt: '2030-07-10T12:00:00.000Z',
+              acknowledgementDueAt: '2030-01-10T11:00:00.000Z',
+            },
+          ]);
+        });
+
+        it('refuses a time the spring change skips, keeps it, and sends nothing', async () => {
+          servePage();
+          const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+          const { user } = renderRoute(page);
+          const form = await openIssueForm(user);
+          await fillIssueForm(user, form, { arrival: '2030-03-31T02:30', due: '2030-03-20T12:00' });
+
+          // Said before submitting, then marked as an error when the user submits anyway.
+          expect(arrivalField(form)).toHaveAccessibleDescription(skipped);
+          expect(arrivalField(form)).toHaveAttribute('aria-invalid', 'false');
+          await submit(user, form);
+          await waitFor(() => {
+            expect(arrivalField(form)).toHaveAttribute('aria-invalid', 'true');
+          });
+          expect(arrivalField(form)).toHaveAccessibleDescription(skipped);
+          expect(arrivalField(form)).toHaveValue('2030-03-31T02:30');
+          expect(issue.bodies).toEqual([]);
+
+          setTime(arrivalField(form), '2030-03-31T03:30');
+          expect(arrivalField(form)).toHaveAttribute('aria-invalid', 'false');
+          expect(arrivalField(form)).toHaveAccessibleDescription(
+            'UTC+02:00 · 2030-03-31 01:30 UTC',
+          );
+          await submit(user, form);
+          await issued();
+          expect(issue.bodies).toEqual([
+            {
+              ...expectedRequest,
+              estimatedArrivalAt: '2030-03-31T01:30:00.000Z',
+              acknowledgementDueAt: '2030-03-20T11:00:00.000Z',
+            },
+          ]);
+        });
+
+        it('sends a time the autumn change repeats only once the user picks one', async () => {
+          servePage();
+          const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+          const { user } = renderRoute(page);
+          const form = await openIssueForm(user);
+          await fillIssueForm(user, form, { arrival: '2030-10-27T02:30', due: '2030-10-20T12:00' });
+
+          const choice = choiceFor(form, 'Which arrival is meant?');
+          const earlier = 'Earlier: UTC+02:00 · 2030-10-27 00:30 UTC';
+          const later = 'Later: UTC+01:00 · 2030-10-27 01:30 UTC';
+          expect(choice.getByRole('radio', { name: earlier })).not.toBeChecked();
+          expect(choice.getByRole('radio', { name: later })).not.toBeChecked();
+          expect(arrivalField(form)).toHaveAccessibleDescription(repeated);
+
+          await submit(user, form);
+          await waitFor(() => {
+            expect(arrivalField(form)).toHaveAttribute('aria-invalid', 'true');
+          });
+          expect(arrivalField(form)).toHaveValue('2030-10-27T02:30');
+          expect(issue.bodies).toEqual([]);
+
+          await user.click(choice.getByRole('radio', { name: later }));
+          expect(arrivalField(form)).toHaveAttribute('aria-invalid', 'false');
+          expect(arrivalField(form)).toHaveAccessibleDescription(
+            'UTC+01:00 · 2030-10-27 01:30 UTC',
+          );
+
+          // Another time asks again: the choice belonged to the time it was made for.
+          setTime(arrivalField(form), '2030-10-27T02:45');
+          const again = choiceFor(form, 'Which arrival is meant?');
+          expect(again.queryByRole('radio', { checked: true })).not.toBeInTheDocument();
+          expect(arrivalField(form)).toHaveAccessibleDescription(repeated);
+          await user.click(
+            again.getByRole('radio', { name: 'Earlier: UTC+02:00 · 2030-10-27 00:45 UTC' }),
+          );
+
+          await submit(user, form);
+          await issued();
+          expect(issue.bodies).toEqual([
+            {
+              ...expectedRequest,
+              estimatedArrivalAt: '2030-10-27T00:45:00.000Z',
+              // A week before the change: still summer time.
+              acknowledgementDueAt: '2030-10-20T10:00:00.000Z',
+            },
+          ]);
+        });
+
+        it('orders the deadline and the arrival by instant across the autumn change', async () => {
+          servePage();
+          const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+          const { user } = renderRoute(page);
+          const form = await openIssueForm(user);
+          const pick = (name: string, occurrence: string) =>
+            user.click(choiceFor(form, name).getByRole('radio', { name: occurrence }));
+
+          // On the clock the deadline (02:15) comes first; as instants it comes after.
+          await fillIssueForm(user, form, { arrival: '2030-10-27T02:45', due: '2030-10-27T02:15' });
+          await pick('Which arrival is meant?', 'Earlier: UTC+02:00 · 2030-10-27 00:45 UTC');
+          await pick('Which deadline is meant?', 'Later: UTC+01:00 · 2030-10-27 01:15 UTC');
+          await submit(user, form);
+          expect(
+            await form.findByText(
+              'The acknowledgement deadline must not be after the estimated arrival',
+            ),
+          ).toBeInTheDocument();
+          expect(issue.bodies).toEqual([]);
+
+          // On the clock the deadline (02:45) comes last; as instants it comes first.
+          setTime(arrivalField(form), '2030-10-27T02:15');
+          setTime(dueField(form), '2030-10-27T02:45');
+          await pick('Which arrival is meant?', 'Later: UTC+01:00 · 2030-10-27 01:15 UTC');
+          await pick('Which deadline is meant?', 'Earlier: UTC+02:00 · 2030-10-27 00:45 UTC');
+          await submit(user, form);
+          await issued();
+          expect(issue.bodies).toEqual([
+            {
+              ...expectedRequest,
+              estimatedArrivalAt: '2030-10-27T01:15:00.000Z',
+              acknowledgementDueAt: '2030-10-27T00:45:00.000Z',
+            },
+          ]);
+        });
+      });
     });
 
     it("shows the server's validation errors on the fields they concern", async () => {
