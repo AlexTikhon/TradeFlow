@@ -14,6 +14,7 @@ import {
   sessionExpired,
   sessionQuery,
   StaleSessionCheckError,
+  subscribeToSessionTransitions,
   startSession,
   switchIdentity,
 } from './session';
@@ -531,5 +532,74 @@ describe('whether the session an operation started in is still the current one',
 
     expect(isCurrentSession(queryClient, before)).toBe(false);
     expect(isCurrentSession(queryClient, after)).toBe(true);
+  });
+});
+
+describe('being told when a session epoch ends', () => {
+  const revalidate = (queryClient: QueryClient) =>
+    queryClient.query({ ...sessionQuery, staleTime: 0 });
+
+  /** Records, at each call, whether `epoch` was still current and who was signed in. */
+  function watch(queryClient: QueryClient) {
+    const epoch = currentSessionEpoch(queryClient);
+    const calls: { current: boolean; signedIn: unknown }[] = [];
+    const stop = subscribeToSessionTransitions(queryClient, () => {
+      calls.push({
+        current: isCurrentSession(queryClient, epoch),
+        signedIn: sessionOf(queryClient),
+      });
+    });
+    return { calls, stop };
+  }
+
+  it('tells at once when a sign-out starts, before anything else changes', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const { calls } = watch(queryClient);
+
+    const signOut = endSession(queryClient);
+
+    expect(calls).toEqual([{ current: false, signedIn: ana }]);
+    await signOut.settled;
+  });
+
+  it('tells on signing back in as the same user, and when another tab changes the session', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    await endSession(queryClient).settled;
+    const { calls } = watch(queryClient);
+
+    await startSession(queryClient, credentialsOf(ana));
+    expect(calls.length).toBeGreaterThan(0);
+    const afterSignIn = calls.length;
+
+    session.current = claire;
+    await sessionChangedElsewhere(queryClient);
+    expect(calls.length).toBeGreaterThan(afterSignIn);
+    expect(calls.every(({ current }) => !current)).toBe(true);
+  });
+
+  it('tells when a session check adopts another identity, and not when it confirms one', async () => {
+    const session = serveSession(ana, [ana, claire]);
+    const queryClient = signedInClient(ana);
+    const { calls } = watch(queryClient);
+
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+    expect(calls).toEqual([]);
+
+    session.current = claire;
+    await expect(revalidate(queryClient)).resolves.toEqual(claire);
+    expect(calls).toEqual([{ current: false, signedIn: ana }]);
+  });
+
+  it('stops telling once unsubscribed', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const { calls, stop } = watch(queryClient);
+
+    stop();
+    await endSession(queryClient).settled;
+
+    expect(calls).toEqual([]);
   });
 });

@@ -51,6 +51,8 @@ interface SessionControl {
   /** Tail of the queue of requests that change the session cookie. */
   cookieQueue: Promise<unknown>;
   listeners: Set<() => void>;
+  /** Told whenever a new generation starts; see `subscribeToSessionTransitions`. */
+  transitionListeners: Set<() => void>;
 }
 
 const controls = new WeakMap<QueryClient, SessionControl>();
@@ -65,10 +67,30 @@ function controlOf(queryClient: QueryClient): SessionControl {
       signInIntent: undefined,
       cookieQueue: Promise.resolve(),
       listeners: new Set(),
+      transitionListeners: new Set(),
     };
     controls.set(queryClient, control);
   }
   return control;
+}
+
+/**
+ * Starts a new generation: every earlier session epoch is outdated from now on. Transition
+ * listeners are told at once, before anything else of the transition happens. A listener that
+ * throws is reported without stopping the transition or the other listeners.
+ */
+function nextGeneration(control: SessionControl): number {
+  const generation = ++control.generation;
+  control.transitionListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  });
+  return generation;
 }
 
 function setSignOutState(control: SessionControl, state: SignOutState): void {
@@ -135,7 +157,7 @@ async function askServer(queryClient: QueryClient, signal?: AbortSignal): Promis
   assertCurrent();
   // Drop the previous identity's data before the new identity is stored and rendered.
   if (!sameIdentity(queryClient.getQueryData<CurrentUser | null>(SESSION_KEY), identity)) {
-    generation = ++control.generation;
+    generation = nextGeneration(control);
     await purgeProtectedData(queryClient);
     assertCurrent();
   }
@@ -201,7 +223,7 @@ export async function switchIdentity(
   queryClient: QueryClient,
   next: CurrentUser | null,
 ): Promise<void> {
-  const generation = ++controlOf(queryClient).generation;
+  const generation = nextGeneration(controlOf(queryClient));
   await publishIdentity(queryClient, generation, next);
 }
 
@@ -257,6 +279,24 @@ export function isCurrentSession(queryClient: QueryClient, epoch: SessionEpoch):
 }
 
 /**
+ * Calls `listener` synchronously whenever an identity transition starts, or a session check
+ * adopts another identity: the moments a `SessionEpoch` stops being current. For whatever must
+ * end with its session at once (a connection made for it), rather than when a response arrives.
+ * The listener must be quick and must not start a transition itself. Returns an unsubscribe
+ * function.
+ */
+export function subscribeToSessionTransitions(
+  queryClient: QueryClient,
+  listener: () => void,
+): () => void {
+  const { transitionListeners } = controlOf(queryClient);
+  transitionListeners.add(listener);
+  return () => {
+    transitionListeners.delete(listener);
+  };
+}
+
+/**
  * A request sent during `epoch` was answered 401: that session has ended (expired, or revoked
  * elsewhere). Signs out locally, like a 401 on protected data: requests are aborted, data dropped,
  * and the auth boundary sends the user to sign in. Nothing is sent to the server, which has ended
@@ -296,7 +336,7 @@ export async function sendForCurrentSession<T>(
  */
 async function reconcileSession(queryClient: QueryClient): Promise<void> {
   const control = controlOf(queryClient);
-  const generation = ++control.generation;
+  const generation = nextGeneration(control);
   await queryClient.cancelQueries({ queryKey: SESSION_KEY });
   try {
     // Adopting someone else moves the check to a generation of its own; it still publishes.
@@ -331,7 +371,7 @@ export async function startSession(
   credentials: SignInRequest,
 ): Promise<void> {
   const control = controlOf(queryClient);
-  const intent = ++control.generation;
+  const intent = nextGeneration(control);
   control.signInIntent = intent;
   const response = inCookieQueue(control, () => signIn(credentials)).then(
     (identity): SignInOutcome => ({ ok: true, identity }),
@@ -393,7 +433,7 @@ export function endSession(queryClient: QueryClient): SignOut {
  */
 export async function sessionChangedElsewhere(queryClient: QueryClient): Promise<void> {
   const control = controlOf(queryClient);
-  control.generation += 1;
+  nextGeneration(control);
   if (control.signOut.status === 'failed') setSignOutState(control, IDLE);
   await Promise.all([
     purgeProtectedData(queryClient),

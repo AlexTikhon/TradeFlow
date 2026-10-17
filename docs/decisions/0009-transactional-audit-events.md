@@ -41,7 +41,13 @@ did while it was a participant. The forces:
   for every writer. Foreign keys to users, organizations and voyages are `RESTRICT`, so audited
   rows cannot be deleted from under their events. A partial unique index allows at most one
   `VOYAGE_CREATED` per voyage.
-- No endpoint reads, edits or deletes events yet. A voyage timeline is a later feature.
+- No endpoint edits or deletes events. One endpoint reads them: the voyage timeline,
+  `GET /voyages/:voyageId/timeline` (read-only, newest first, cursor-paginated). The audit module
+  reads the table (`AuditTimeline`), but the voyages module decides what each organization may
+  see: the voyage's creation for every participant, contract events only for that contract's two
+  current counterparties. Each entry carries identifiers only; payload contents are never served.
+- Events do not leave the database. Live updates announce committed changes separately and in
+  process, without their payload ([ADR 0015](0015-voyage-event-streams.md)).
 
 ## Alternatives considered
 
@@ -52,9 +58,10 @@ did while it was a participant. The forces:
   can be lost or describe rolled-back work. Logs stay operational, not evidential.
 - **Event sourcing.** The audit trail would be the source of truth, but it changes how every
   aggregate is stored and queried. Far more than this milestone needs.
-- **An outbox now.** Needed once events must leave the database (notifications, real-time
-  updates). The audit table can later feed it, or the outbox row can be written in the same
-  transaction alongside it.
+- **An outbox now.** Needed once events must leave the database durably (notifications,
+  real-time updates across instances). The audit table can later feed it, or the outbox row can
+  be written in the same transaction alongside it. The first live updates
+  ([ADR 0015](0015-voyage-event-streams.md)) do without one, best effort and in one process.
 
 ## Consequences
 

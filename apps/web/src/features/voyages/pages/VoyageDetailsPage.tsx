@@ -15,6 +15,7 @@ import { TimelineCard } from '../components/TimelineCard';
 import { TradeStringCard } from '../components/TradeStringCard';
 import { VoyageFacts } from '../components/VoyageFacts';
 import { VoyageStatusChip } from '../components/VoyageStatusChip';
+import { useVoyageLiveUpdates } from '../hooks/use-voyage-live-updates';
 
 const VoyageNotFound = () => (
   <NotFoundState
@@ -47,7 +48,14 @@ export function VoyageDetailsPage() {
     ...voyageQueries.myContracts(scope, voyageId),
     enabled: isValidId,
   });
-  const notices = useQuery({ ...voyageQueries.notices(scope, voyageId), enabled: isValidId });
+  // Notices and the timeline follow the voyage's event stream once the voyage has loaded (so a
+  // voyage the user cannot see is never streamed), and are polled while no stream is live.
+  const { refetchInterval } = useVoyageLiveUpdates(voyageId, Boolean(voyage));
+  const notices = useQuery({
+    ...voyageQueries.notices(scope, voyageId),
+    enabled: isValidId,
+    refetchInterval,
+  });
   const instructions = useQuery({
     ...voyageQueries.documentaryInstructions(scope, voyageId),
     enabled: isValidId,
@@ -56,6 +64,7 @@ export function VoyageDetailsPage() {
   const timeline = useInfiniteQuery({
     ...voyageQueries.timeline(scope, voyageId),
     enabled: isValidId,
+    refetchInterval,
   });
 
   if (!isValidId || (error instanceof ApiError && error.status === 404)) {

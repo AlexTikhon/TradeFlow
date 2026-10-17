@@ -5,8 +5,9 @@ import { NoticesController } from './notices.controller.js';
 import { NoticesService } from './notices.service.js';
 
 /**
- * Owns `notices`. Resolves sale contracts through the voyages module's `CounterpartyContracts`
- * and records its actions through `AuditTrail`; it reads neither module's tables itself.
+ * Owns `notices`. Resolves sale contracts through the voyages module's `CounterpartyContracts`,
+ * records its actions through `AuditTrail`, and announces committed changes through the voyages
+ * module's `VoyageEventBus`; it reads neither module's tables itself.
  */
 @Module({
   imports: [VoyagesModule, AuditModule],

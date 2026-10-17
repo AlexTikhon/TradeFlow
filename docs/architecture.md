@@ -8,6 +8,7 @@ meaningful alternatives are recorded as ADRs in [decisions/](decisions/).
 ```
  Browser ──▶ Web SPA (Vite build, static files)
                 │ fetch /api/*  (same origin; Vite proxies in development)
+                │ EventSource /api/voyages/:id/events  (server-sent events, same origin)
                 ▼
             API (NestJS, single process) ──▶ PostgreSQL 18
                 │
@@ -16,9 +17,11 @@ meaningful alternatives are recorded as ADRs in [decisions/](decisions/).
 
 There is one deployable backend, one database and one static frontend. Uploaded document bytes
 live in a private directory beside the API, behind a storage interface
-([ADR 0013](decisions/0013-documents.md)). Nothing else is needed for the current scope: no cache,
-no queue and no object store. Each of those arrives with the feature that needs it (see
-[Evolution](#evolution)).
+([ADR 0013](decisions/0013-documents.md)). Live updates are announced in the API's memory
+([ADR 0015](decisions/0015-voyage-event-streams.md)), which is one reason it is a single process
+today: a second instance would neither hear nor relay the first one's announcements. Nothing
+else is needed for the current scope: no cache, no queue, no broker and no object store. Each of
+those arrives with the feature that needs it (see [Evolution](#evolution)).
 
 ## Monorepo
 
@@ -70,6 +73,9 @@ src/
                                 for commands that commit long after the request arrived
     audit/
       audit-trail.ts            AuditTrail.record(tx, event): append-only, same transaction
+      audit-timeline.ts         AuditTimeline.page(db, scope, page): the only reader of
+                                audit_events; the caller passes who may see what (TimelineScope);
+                                identifiers-only entries, opaque cursors
     reference-data/
       reference-data.*.ts       GET /vessels, /commodities, /ports; id existence checks
     voyages/
@@ -85,10 +91,19 @@ src/
       counterparty-contracts.ts   CounterpartyContracts: a contract as its seller or buyer sees
                                   it; exported, the only way other modules resolve a contract
       counterparty-contracts.controller.ts  GET /voyages/:voyageId/my-contracts
+      voyage-timeline.service.ts  the reader's scope (participation, contracts) and the page,
+                                  from one REPEATABLE READ snapshot
+      voyage-timeline.controller.ts  GET /voyages/:voyageId/timeline
+      voyage-event-bus.ts       VoyageEventBus: in-process publish/subscribe of committed
+                                changes per voyage; exported, best effort (ADR 0015)
+      voyage-event-streams.ts   VoyageEventStreams: open streams, a check before every delivery,
+                                periodic rechecks, coalesced and bounded queues
+      voyage-events.controller.ts  GET /voyages/:voyageId/events (text/event-stream)
     notices/
       notice-rules.ts           deadline rules, overdue and lateness (pure functions)
       notice.read-model.ts      allowlisted select + row → contract mapping, overdue derived
-      notices.service.ts        list, get, issue, acknowledge; role and side checked here
+      notices.service.ts        list, get, issue, acknowledge; role and side checked here;
+                                announces each command after it committed
       notices.controller.ts     /voyages/:voyageId/notices[/:noticeId[/acknowledgement]]
     documentary-instructions/
       instruction-rules.ts      MVP content rules: what counts as an unchanged revision (pure)
@@ -130,10 +145,13 @@ extraction possible later:
 
 - A module talks to another module only through that module's exported providers, never by
   querying the other module's tables directly. `voyages` imports `ReferenceDataService` (to check
-  that the ids in a request exist) and `AuditTrail` (to record what it did); it never touches
-  `audit_events` itself. `notices` and `documentary-instructions` import `CounterpartyContracts`
-  (to resolve the reader's contracts, with the access rule inside the query) and `AuditTrail`;
-  neither queries `trade_contracts` or `voyage_participants`. `documents` imports
+  that the ids in a request exist), `AuditTrail` (to record what it did), `AuditTimeline` (to read
+  the timeline within the scope it decided) and the auth module's `SessionPrincipals` (to re-read
+  an event stream's session); it never touches `audit_events` itself. `notices` and
+  `documentary-instructions` import `CounterpartyContracts` (to resolve the reader's contracts,
+  with the access rule inside the query) and `AuditTrail`; neither queries `trade_contracts` or
+  `voyage_participants`. `notices` also announces its committed commands through the voyages
+  module's `VoyageEventBus`, and never learns who listens. `documents` imports
   `CounterpartyContracts`, the documentary-instructions module's `InstructionRevisions` (which
   revision is current and what it requires; it never reads `documentary_instructions`), the auth
   module's `SessionPrincipals`, `AuditTrail` and `DocumentStorage`. Its read model reads the actors' names and
@@ -416,6 +434,57 @@ real by holding the document's row lock (or the instruction's, or a table lock o
 `document_reviews` to stop a review between its share lock and its insert) until every contender
 is blocked in PostgreSQL.
 
+### The voyage timeline: audit events, read
+
+`GET /api/voyages/:voyageId/timeline` serves the audit trail
+([ADR 0009](decisions/0009-transactional-audit-events.md)) as a read-only timeline, newest
+first, a page at a time:
+
+1. Guards, the voyage id, and the query (`limit` 1–50, default 20; `cursor` only as the API
+   issued it, else 400 before anything is read, whatever the voyage).
+2. In one `REPEATABLE READ` transaction, the voyages module resolves the reader's scope
+   (`CounterpartyContracts.listForVoyage`: no participation is the voyage's 404) and the audit
+   module reads the page within it (`AuditTimeline.page`). Visibility and events therefore come
+   from one snapshot.
+3. The scope is applied in the `WHERE` clause: `VOYAGE_CREATED` for every participant, notice,
+   instruction and document events only when their payload's `contractId` is one of the reader's
+   contracts now. Hidden events never shorten a page, decide whether another exists, or end up in
+   a cursor. An action without a rule (a future one) stays hidden.
+4. Each entry is built from an allowlist per action (Zod objects that drop every other key):
+   who acted, for which organization, when, and identifiers. Instruction contents, file names,
+   checksums and rejection reasons stay in the panels that own them. The cursor is the last
+   served `(occurredAt, id)`, base64url; a hand-made one moves only within the bearer's scope.
+
+### Live updates: voyage event streams
+
+`GET /api/voyages/:voyageId/events` is a server-sent-event stream that tells the voyage page
+_that_ something changed, never _what_ ([ADR 0015](decisions/0015-voyage-event-streams.md)).
+Today it carries `NOTICE_ISSUED` and `NOTICE_ACKNOWLEDGED`.
+
+- **Opening.** Guards (401), the voyage id (400), participation through
+  `CounterpartyContracts.listForVoyage` (the voyage's 404). The stream then subscribes to
+  `VoyageEventBus` and only after that writes `READY`, so a client that reads after `READY`
+  misses nothing. Headers: `text/event-stream`, `no-store`, `X-Accel-Buffering: no`; `retry` is
+  5 s.
+- **Publishing.** `NoticesService` publishes `{ type, voyageId, contractId }` after
+  `$transaction` resolved, never inside it: rollbacks and the 409 of a lost race publish nothing.
+  `publish` only schedules deliveries and is wrapped, so a failure is logged and the committed
+  command still answers 201/200.
+- **Delivering.** Before writing to a stream, `VoyageEventStreams` re-reads its session
+  (`SessionPrincipals.refresh`) and the organization's contracts on the voyage. A session that
+  expired or was revoked, a user now in another organization, or an organization no longer in
+  the voyage closes the stream; a change under a contract the organization is not a party to
+  now is dropped for it. Only `{"type": ...}` is written.
+- **Idle streams** are re-checked the same way every 30 s and sent a heartbeat comment. That is
+  the revocation window: a stream whose session ends while nothing is delivered stays open, with
+  heartbeats only, for up to 30 s plus one round of checks.
+- **Bounds.** Pending signals are coalesced per contract and type while a check runs; a stream
+  that would hold more than 32 contracts' worth, or whose client stops reading (socket buffer
+  full), is closed. Client disconnects unsubscribe at once; shutdown ends every stream.
+- **Best effort.** The bus is in this process's memory: no durable replay, no `Last-Event-ID`,
+  and no delivery across instances. Clients reconcile through REST on every `READY` and poll
+  while disconnected.
+
 ### Writes (first one: `POST /api/voyages`)
 
 The order of checks, and who decides what:
@@ -454,20 +523,24 @@ src/
   features/
     auth/
       api/          sign-in, sign-out, current user
-      session.ts    session query, sign-in/sign-out transitions, protected-data purge
+      session.ts    session query, sign-in/sign-out transitions, protected-data purge,
+                    session epochs and transition listeners
       session-sync.ts  cross-tab identity sync (BroadcastChannel)
       components/   RequireAuth (protected-route boundary), UserMenu
       pages/        SignInPage
     voyages/
       api/          fetch functions + query option factories (query keys live here),
-                    including reference data (vessels, commodities, ports) for the form
+                    including reference data (vessels, commodities, ports) for the form, and
+                    the voyage's event stream (EventSource)
       domain/       presentation rules for the domain (status labels, role grouping,
-                    trade-string steps in contract order, notice states), what to offer whom
+                    trade-string steps in contract order, notice states, timeline wording),
+                    what to offer whom
       hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice,
                     useSubmitInstruction, useAcknowledgeRevision, useUploadDocument,
                     useReviewDocument, useDownloadDocument: mutations and what happens after
-                    them
-      components/   feature UI (table, filter, facts card, trade string, notices, participants)
+                    them; useVoyageLiveUpdates: the event stream, invalidation and polling
+      components/   feature UI (table, filter, facts card, trade string, notices, participants,
+                    timeline)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
   shared/
@@ -574,6 +647,29 @@ src/
   Downloads are `fetch`ed through `sendForCurrentSession` and handed to the browser as a blob
   (`saveFile`), so a 401 signs out as elsewhere, and a download that arrives after the identity
   changed is not saved. The section degrades on its own: the revision above it stays readable.
+- **Timeline** (a card at the end of the details page). An infinite query nested under the
+  voyage's detail key; **Load more** passes the previous page's `nextCursor` unchanged, and every
+  page request carries the query's abort signal, so an identity change cancels a page still on
+  its way. A failed older page keeps what is shown and offers a retry. Read-only: entries name
+  the action, when (in the viewer's zone), who and for which organization, and the contract's
+  position.
+- **Live updates** (`useVoyageLiveUpdates`, [ADR 0015](decisions/0015-voyage-event-streams.md)).
+  Once the voyage has loaded, the page opens the voyage's event stream with `EventSource`
+  (same origin, so the browser sends the session cookie). Each signal invalidates exactly two
+  queries of the current identity scope, the voyage's notices and its timeline; at most one
+  such refresh runs, with one more queued however many signals arrive. Every connection starts
+  with `READY`, which triggers the same refresh: that is how the page catches up after a
+  reconnect, since nothing is replayed. The connection belongs to the voyage and to the session
+  epoch it was opened in: unmounting or moving to another voyage closes it, and so does the
+  first transition that ends the epoch (`subscribeToSessionTransitions` in `session.ts`, called
+  synchronously as the transition starts). Every callback checks the epoch too, so a late event
+  from a closed stream does nothing, including after the same user signed out and back in, or
+  after session checks went to someone else and back. The auth boundary remounts the page for
+  the new session, which connects anew. While no stream is live (connecting, the browser
+  reconnecting, no `EventSource`), notices and timeline are polled every 30 s through
+  `refetchInterval` (paused while the tab is hidden; `staleTime` alone never refetches). If the
+  browser gives up on a stream (the server refused it), a new one is opened after 5 s, 15 s,
+  then every 60 s; one timer at most.
 
 ### Authentication in the browser
 
@@ -700,9 +796,33 @@ replacement in both orders (the losing upload's bytes removed), and a revision o
 before and during a review. The migrations are tested against a populated scratch database: every
 earlier migration, documents with several versions written as the API wrote them, the backfill,
 reviews and replacements on the migrated rows, and no drift from the Prisma schema.
+The timeline is tested against events written through the API: who sees which events (each
+counterparty its own contracts', service providers only the creation, viewers as their
+operators, outsiders the voyage's 404, current participation only), exactly the fields each
+entry carries and none of the payload's contents, pages that stay full however many hidden
+events lie between, events with equal times split across pages without loss or repetition,
+cursors that stay within the bearer's scope, and malformed queries.
+Voyage event streams are tested over real HTTP connections (a small SSE client in
+`test/support/event-stream.ts` that sends the session cookie as a header), asserting the bytes
+each connection received: who is told (both counterparties, operators and viewers alike; not a
+party to the voyage's other contract, a service provider, or the same organizations on another
+voyage), nothing for refused commands, nothing when the audit write rolls the command back,
+exactly one acknowledgement when two race on a held row lock, a committed command that still
+succeeds when publishing fails (a bus made to throw), streams closed without a signal after a
+sign-out, and closed while idle once their session is revoked or expires, their user changes
+organization or their organization leaves the voyage, server-side cleanup on client disconnect,
+and every stream ended on shutdown. Proving that a stream received _nothing_ uses barriers: a
+later signal the stream does receive (signals arrive in publication order), or, for a stream
+that can receive none, two heartbeats after the command was answered. Unit tests cover what is
+hard to provoke over HTTP: coalescing while a check runs, the pending-signal limit, a client
+that stops reading, and a check that fails.
 
 No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
-string included) is not covered automatically. Playwright is the planned answer.
+string included) is not covered automatically. Playwright is the planned answer. The same goes
+for the browser's `EventSource`: web tests replace it with a fake the test drives by hand
+(simulated transport), and the API's tests send the cookie themselves, so whether a real browser
+attaches the `SameSite=Strict` cookie to the stream, and how it reconnects, is not verified
+automatically.
 
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
 cross-tab changes run through the real router, query client and cache. They assert, among other
@@ -729,17 +849,31 @@ file is kept), a superseded revision, the cache keeping the newest document by v
 decisions answered (200, 409, 412 or 401) after the same user signed out and back in, after
 session checks went to someone else and back, or after another tab did. jsdom's own `File` and `FormData` cannot be sent by Node's `fetch`, so the test setup puts
 Node's on the global object (a `FormData` built from a `<form>` stays jsdom's).
+The timeline card is tested for every kind of event and its wording, the empty state, pages
+loaded with the previous cursor, a failed first load and a failed older page, and pages still on
+their way when another tab signs in as someone else (aborted, never shown, never used as a
+cursor). Live updates drive a fake `EventSource`: the stream opens only once the voyage has
+loaded (never for a voyage that answered 404), `READY` and each change refetch the notices and
+timeline of the current identity only (nothing else, and not another identity's cached data),
+the buyer sees the seller's new notice and its acknowledgement appear, unknown messages are
+ignored, signals arriving during a refresh cause one more refresh rather than one each, polling
+runs while the stream is not live and stops once it is (and pauses while the page is hidden), a
+reconnect reads again, a stream the browser gave up on is reopened after growing delays, the
+stream closes on unmount and moves with the voyage, and late events from a closed stream do
+nothing after a sign-out, after the same user signs back in, and after session checks went to
+someone else and back. `session.ts`'s transition listeners are unit-tested on their own.
 
 ## Operational concerns (current state)
 
-| Concern      | Today                                                                                     | Planned                                          |
-| ------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| Health       | `GET /api/health` checks DB connectivity                                                  | Split liveness and readiness when deployed       |
-| Logging      | Nest logger; 5xx logged with stack                                                        | Structured JSON logs, request ids, OpenTelemetry |
-| Config       | Validated env, fail fast                                                                  | Secrets manager in cloud environments            |
-| Shutdown     | `enableShutdownHooks`; Prisma disconnects on destroy                                      | —                                                |
-| File storage | Private local directory; orphans logged, removed by a manual procedure; no backups        | Object store, lifecycle rules, scheduled sweep   |
-| Supply chain | Exact versions, lockfile, pnpm install-script allowlist, release-age quarantine respected | Renovate, pinned action SHAs                     |
+| Concern      | Today                                                                                       | Planned                                            |
+| ------------ | ------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Health       | `GET /api/health` checks DB connectivity                                                    | Split liveness and readiness when deployed         |
+| Logging      | Nest logger; 5xx logged with stack                                                          | Structured JSON logs, request ids, OpenTelemetry   |
+| Config       | Validated env, fail fast                                                                    | Secrets manager in cloud environments              |
+| Shutdown     | `enableShutdownHooks`; open event streams ended; Prisma disconnects on destroy              | —                                                  |
+| Real-time    | SSE per voyage from one process; best effort, no replay; idle streams re-checked every 30 s | Shared bus (outbox + broker) for several instances |
+| File storage | Private local directory; orphans logged, removed by a manual procedure; no backups          | Object store, lifecycle rules, scheduled sweep     |
+| Supply chain | Exact versions, lockfile, pnpm install-script allowlist, release-age quarantine respected   | Renovate, pinned action SHAs                       |
 
 ## Evolution
 
@@ -755,8 +889,8 @@ How later requirements land on the current structure:
 | Documentary instructions | **Started (M6)**: one per contract, immutable revisions, per-revision acknowledgement by the seller, counterparty-only ([ADR 0012](decisions/0012-documentary-instructions.md)). Documents presented against them since M7. Next: presentation deadlines                                                                                                                                                                                                                                                                                    |
 | Optimistic concurrency   | **Started (M6)**: `version` on documentary instructions; one conditional `UPDATE ... WHERE version = ANY(...)`; `ETag`, `If-Match` (412), `If-None-Match: *`, 428 without a precondition ([ADR 0012](decisions/0012-documentary-instructions.md)). Documents since M8: one version for uploads and reviews ([ADR 0014](decisions/0014-document-review.md)). Next: the same for recording the trade string                                                                                                                                   |
 | Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). Next: a voyage timeline, more actions                                                                                                                                                                                                                                                                                                                                                             |
-| Real-time                | SSE endpoint per voyage; the client invalidates TanStack Query keys on events                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). A read-only voyage timeline, scoped per contract. Next: more actions                                                                                                                                                                                                                                                                                                                              |
+| Real-time                | **Started**: an SSE stream per voyage signals notice changes after commit, only to the contract's current counterparties, re-checked before each delivery; the client invalidates its notices and timeline and polls while disconnected ([ADR 0015](decisions/0015-voyage-event-streams.md)). Next: instructions and documents, then a shared bus (outbox) for several API instances                                                                                                                                                        |
 | Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Documents                | **Started (M7)**: PDF versions per required document of an exact revision, counterparty-only, uploaded by the seller with `If-Match`; bytes staged outside the transaction in a private local directory, compensated on failure ([ADR 0013](decisions/0013-documents.md)). Buyer review since M8: one final decision per file version, a rejection with its reason ([ADR 0014](decisions/0014-document-review.md)). Next: S3-compatible storage behind the same interface, pre-signed uploads, a scheduled orphan sweep, amending decisions |
 | AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                                                                                                                                                                                                                                  |

@@ -7,4 +7,5 @@ export * from './notices.js';
 export * from './documentary-instructions.js';
 export * from './documents.js';
 export * from './timeline.js';
+export * from './voyage-events.js';
 export * from './auth.js';

@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import type {
   CounterpartyContract,
   IssueNoticeRequest,
@@ -12,6 +12,7 @@ import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { requireOperator } from '../auth/user-permissions.js';
 import { CounterpartyContracts } from '../voyages/counterparty-contracts.js';
+import { type VoyageChange, VoyageEventBus } from '../voyages/voyage-event-bus.js';
 import { deadlineViolations, isLate } from './notice-rules.js';
 import { noticeOrder, type NoticeRow, noticeSelect, toNotice } from './notice.read-model.js';
 
@@ -26,14 +27,18 @@ interface VisibleNotice {
  * database: notices are loaded only under contracts the voyages module resolved for the
  * principal's organization as a counterparty, so another participant's request finds nothing.
  * Commands check the user's role and the organization's side of the contract here, in the
- * service, and write the change and its audit event in one transaction.
+ * service, and write the change and its audit event in one transaction. Once that transaction
+ * has committed, and only then, they announce the change to open voyage streams.
  */
 @Injectable()
 export class NoticesService {
+  private readonly logger = new Logger(NoticesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly contracts: CounterpartyContracts,
     private readonly audit: AuditTrail,
+    private readonly events: VoyageEventBus,
   ) {}
 
   /**
@@ -131,7 +136,9 @@ export class NoticesService {
       });
       return { row, contract };
     });
-    return issued && toNotice(issued.row, issued.contract, new Date());
+    if (!issued) return null;
+    this.announce({ type: 'NOTICE_ISSUED', voyageId, contractId: issued.contract.id });
+    return toNotice(issued.row, issued.contract, new Date());
   }
 
   /**
@@ -189,7 +196,30 @@ export class NoticesService {
       });
       return { row, contract: visible.contract };
     });
-    return acknowledged && toNotice(acknowledged.row, acknowledged.contract, new Date());
+    if (!acknowledged) return null;
+    this.announce({
+      type: 'NOTICE_ACKNOWLEDGED',
+      voyageId,
+      contractId: acknowledged.contract.id,
+    });
+    return toNotice(acknowledged.row, acknowledged.contract, new Date());
+  }
+
+  /**
+   * Tells open voyage streams about a change that has committed. Called after the transaction,
+   * never inside it: a change that rolled back, or an acknowledgement that lost its race (409),
+   * is never announced. Best effort: the change stands whatever happens here, so a failure is
+   * logged and the command still succeeds.
+   */
+  private announce(change: VoyageChange): void {
+    try {
+      this.events.publish(change);
+    } catch (error) {
+      this.logger.error(
+        `Could not announce ${change.type} on voyage ${change.voyageId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /** Loads a notice only under a contract resolved for the principal as a counterparty. */

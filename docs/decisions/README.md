@@ -20,6 +20,7 @@ with a link to its replacement.
 | 0012 | [Documentary instructions: revisioned per contract, conditional writes with ETags (MVP)](0012-documentary-instructions.md) | Accepted                                     |
 | 0013 | [Documents: private PDF versions per instruction revision, received outside the transaction (MVP)](0013-documents.md)      | Accepted (concurrency token amended by 0014) |
 | 0014 | [Document review: one final decision per file version, a document version for every change (MVP)](0014-document-review.md) | Accepted                                     |
+| 0015 | [Voyage event streams: SSE invalidation signals, in-process and best effort (MVP)](0015-voyage-event-streams.md)           | Accepted                                     |
 
 Template: **Context** (forces at play), **Decision**, **Alternatives considered**,
 **Consequences** (good and bad).
