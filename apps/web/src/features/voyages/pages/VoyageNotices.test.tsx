@@ -16,6 +16,7 @@ import {
   contractList,
 } from '../../../test/fixtures/notices';
 import { aTradeString, aVoyageDetail, tradeParties } from '../../../test/fixtures/voyages';
+import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
@@ -62,6 +63,7 @@ function servePage({
     http.get(`*/api/voyages/${voyage.id}/documentary-instructions`, () =>
       HttpResponse.json({ items: [] }),
     ),
+    http.get(`*/api/voyages/${voyage.id}/timeline`, () => HttpResponse.json(emptyTimeline)),
     http.get(`*/api/voyages/${voyage.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
   return state;

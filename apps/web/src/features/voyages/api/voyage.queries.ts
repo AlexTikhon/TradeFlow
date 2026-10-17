@@ -1,9 +1,10 @@
-import { queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 import type { ListVoyagesQuery } from '@tradeflow/contracts';
 import type { ProtectedScope } from '../../../shared/auth/identity';
 import { fetchDocumentaryInstructions } from './documentary-instructions.api';
 import { fetchDocuments } from './documents.api';
 import { fetchMyContracts, fetchNotices } from './notices.api';
+import { fetchVoyageTimeline } from './timeline.api';
 import { fetchTradeString, fetchVoyage, fetchVoyages } from './voyages.api';
 
 /**
@@ -58,5 +59,17 @@ export const voyageQueries = {
     queryOptions({
       queryKey: [...voyageQueries.all(scope), 'detail', voyageId, 'documents'] as const,
       queryFn: ({ signal }) => fetchDocuments(voyageId, signal),
+    }),
+  /**
+   * The voyage's timeline, newest first, one page per "Load more". Every page request carries
+   * the query's abort signal, so an identity change cancels a page still on its way (first or
+   * next) along with the rest of that identity's data.
+   */
+  timeline: (scope: ProtectedScope, voyageId: string) =>
+    infiniteQueryOptions({
+      queryKey: [...voyageQueries.all(scope), 'detail', voyageId, 'timeline'] as const,
+      queryFn: ({ pageParam, signal }) => fetchVoyageTimeline(voyageId, pageParam, signal),
+      initialPageParam: undefined as string | undefined,
+      getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     }),
 };

@@ -20,6 +20,7 @@ import {
 } from '../../../test/fixtures/documents';
 import { aCounterpartyContract, contractList } from '../../../test/fixtures/notices';
 import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
+import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { checkSession, StaleSessionCheckError } from '../../auth/session';
@@ -71,6 +72,7 @@ function servePage({
       state.instructionRequests += 1;
       return HttpResponse.json({ items: state.instructions });
     }),
+    http.get(`*/api/voyages/${voyage.id}/timeline`, () => HttpResponse.json(emptyTimeline)),
     http.get(`*/api/voyages/${voyage.id}/documents`, () => {
       state.documentRequests += 1;
       return documentsResponse?.() ?? HttpResponse.json({ items: state.documents });

@@ -8,6 +8,7 @@ import {
   anEmptyTradeString,
   tradeParties,
 } from '../../../test/fixtures/voyages';
+import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 
@@ -31,6 +32,7 @@ function serveVoyage(
     http.get(`*/api/voyages/${detail.id}/documentary-instructions`, () =>
       HttpResponse.json({ items: [] }),
     ),
+    http.get(`*/api/voyages/${detail.id}/timeline`, () => HttpResponse.json(emptyTimeline)),
     http.get(`*/api/voyages/${detail.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
 }
@@ -78,6 +80,9 @@ describe('VoyageDetailsPage', () => {
         problemResponse(404, 'Voyage was not found.'),
       ),
       http.get(`*/api/voyages/${voyage.id}/documentary-instructions`, () =>
+        problemResponse(404, 'Voyage was not found.'),
+      ),
+      http.get(`*/api/voyages/${voyage.id}/timeline`, () =>
         problemResponse(404, 'Voyage was not found.'),
       ),
       http.get(`*/api/voyages/${voyage.id}/documents`, () =>

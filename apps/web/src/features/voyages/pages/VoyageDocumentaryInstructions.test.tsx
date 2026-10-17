@@ -16,6 +16,7 @@ import {
 } from '../../../test/fixtures/documentary-instructions';
 import { aCounterpartyContract, contractList } from '../../../test/fixtures/notices';
 import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
+import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
@@ -66,6 +67,7 @@ function servePage({
       return listResponse?.() ?? HttpResponse.json({ items: state.instructions });
     }),
     // Documents presented against the revisions have their own tests.
+    http.get(`*/api/voyages/${voyage.id}/timeline`, () => HttpResponse.json(emptyTimeline)),
     http.get(`*/api/voyages/${voyage.id}/documents`, () => HttpResponse.json({ items: [] })),
   );
   return state;

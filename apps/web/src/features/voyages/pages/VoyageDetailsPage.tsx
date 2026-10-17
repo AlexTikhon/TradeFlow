@@ -1,5 +1,5 @@
 import { Breadcrumbs, Link, Skeleton, Stack, Typography } from '@mui/material';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { VoyageIdParamSchema } from '@tradeflow/contracts';
 import { Link as RouterLink, useParams } from 'react-router';
 import { ApiError } from '../../../shared/api/http-client';
@@ -11,6 +11,7 @@ import { voyageQueries } from '../api/voyage.queries';
 import { DocumentaryInstructionsCard } from '../components/DocumentaryInstructionsCard';
 import { NoticesCard } from '../components/NoticesCard';
 import { ParticipantsCard } from '../components/ParticipantsCard';
+import { TimelineCard } from '../components/TimelineCard';
 import { TradeStringCard } from '../components/TradeStringCard';
 import { VoyageFacts } from '../components/VoyageFacts';
 import { VoyageStatusChip } from '../components/VoyageStatusChip';
@@ -52,6 +53,10 @@ export function VoyageDetailsPage() {
     enabled: isValidId,
   });
   const documents = useQuery({ ...voyageQueries.documents(scope, voyageId), enabled: isValidId });
+  const timeline = useInfiniteQuery({
+    ...voyageQueries.timeline(scope, voyageId),
+    enabled: isValidId,
+  });
 
   if (!isValidId || (error instanceof ApiError && error.status === 404)) {
     return <VoyageNotFound />;
@@ -104,6 +109,7 @@ export function VoyageDetailsPage() {
               documents={documents}
             />
             <ParticipantsCard participants={voyage.participants} />
+            <TimelineCard timeline={timeline} />
           </Stack>
         </div>
       )}
