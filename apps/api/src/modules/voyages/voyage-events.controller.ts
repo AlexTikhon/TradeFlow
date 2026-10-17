@@ -1,10 +1,18 @@
-import { Controller, Get, NotFoundException, Param, Res } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Res,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
+  ApiServiceUnavailableResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import { VoyageIdParamSchema } from '@tradeflow/contracts';
@@ -46,14 +54,25 @@ export class VoyageEventsController {
     description: 'No such voyage, or your organization does not participate in it',
     schema: schemaRef('ProblemDetails'),
   })
+  @ApiServiceUnavailableResponse({
+    description: 'The server is shutting down; connect again later',
+    schema: schemaRef('ProblemDetails'),
+  })
   async stream(
     @CurrentPrincipal() principal: Principal,
     @Param('voyageId', new ZodValidationPipe(VoyageIdParamSchema)) voyageId: string,
     @Res() response: Response,
   ): Promise<void> {
-    if (!(await this.streams.open(principal, voyageId, response))) {
-      // The same answer as GET /voyages/:voyageId: existence is not disclosed.
-      throw new NotFoundException('Voyage was not found.');
+    switch (await this.streams.open(principal, voyageId, response)) {
+      case 'not-found':
+        // The same answer as GET /voyages/:voyageId: existence is not disclosed.
+        throw new NotFoundException('Voyage was not found.');
+      case 'shutting-down':
+        // The browser gives up on this stream and the page connects again later.
+        throw new ServiceUnavailableException('The server is shutting down.');
+      case 'streaming':
+      case 'client-gone':
+        return;
     }
   }
 }

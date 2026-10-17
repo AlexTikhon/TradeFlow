@@ -5,8 +5,10 @@ import {
   VoyageStreamMessageSchema,
 } from '@tradeflow/contracts';
 import request from 'supertest';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserRole } from '../src/generated/prisma/client.js';
+import { CounterpartyContracts } from '../src/modules/voyages/counterparty-contracts.js';
+import { VoyageEventBus } from '../src/modules/voyages/voyage-event-bus.js';
 import { VoyageEventStreams } from '../src/modules/voyages/voyage-event-streams.js';
 import { sessionCookie, signIn } from './support/auth.js';
 import { failAuditWrites, holdLock, waitForLockWaiters } from './support/concurrency.js';
@@ -503,5 +505,87 @@ describe('Voyage event streams', () => {
       await stream.ended;
       expect(app.app.get(VoyageEventStreams).size).toBe(0);
     });
+
+    it('answers a stream still being opened at shutdown, and opens nothing afterwards', async () => {
+      const s = await scenario();
+      // Recognisable among the timers the application starts.
+      const recheckIntervalMs = 54_321;
+      const app = await createTestApp({
+        eventStreams: { recheckIntervalMs, maxPendingContracts: 32 },
+      });
+      const appStreams = app.app.get(VoyageEventStreams);
+      const appBus = app.app.get(VoyageEventBus);
+      const cookie = await signIn(app.server, s.trader.viewer.user.email);
+
+      // The access check's result is held once its database read is done.
+      const read = barrier();
+      const release = barrier();
+      const contracts = app.app.get(CounterpartyContracts);
+      const listForVoyage = contracts.listForVoyage.bind(contracts);
+      const check = vi.spyOn(contracts, 'listForVoyage').mockImplementation(async (...args) => {
+        const result = await listForVoyage(...args);
+        read.open();
+        await release.passed;
+        return result;
+      });
+      const destroyed = barrier();
+      const onModuleDestroy = appStreams.onModuleDestroy.bind(appStreams);
+      vi.spyOn(appStreams, 'onModuleDestroy').mockImplementation(() => {
+        onModuleDestroy();
+        destroyed.open();
+      });
+      const setInterval = vi.spyOn(globalThis, 'setInterval');
+
+      try {
+        const response = openEventStream(app.server, eventsPath(s.voyage.id), cookie);
+        await read.passed;
+        const closing = app.app.close();
+        await destroyed.passed;
+
+        // Answered and ended while the check is still held.
+        const stream = await within(response, 'The opening stream was not answered');
+        opened.push(stream);
+        expect(stream.status).toBe(503);
+        expect(ProblemDetailsSchema.parse(stream.problem).status).toBe(503);
+        await within(stream.ended, 'The opening stream was not ended');
+        expect(check).toHaveBeenCalledTimes(1);
+
+        release.open();
+        await check.mock.results[0]?.value;
+        stream.close();
+        await within(closing, 'The application did not close');
+
+        expect(appStreams.size).toBe(0);
+        expect(appBus.listenerCount()).toBe(0);
+        expect(setInterval.mock.calls.filter(([, ms]) => ms === recheckIntervalMs)).toEqual([]);
+      } finally {
+        release.open();
+        vi.restoreAllMocks();
+      }
+    });
   });
 });
+
+/** A point a test opens once; whatever awaits `passed` waits for it. */
+function barrier() {
+  let open: () => void = () => undefined;
+  const passed = new Promise<void>((resolve) => (open = resolve));
+  return { passed, open };
+}
+
+/** `promise`, or a failure naming what did not happen within `timeoutMs`. */
+async function within<T>(promise: Promise<T>, what: string, timeoutMs = 3_000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${what} within ${timeoutMs} ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

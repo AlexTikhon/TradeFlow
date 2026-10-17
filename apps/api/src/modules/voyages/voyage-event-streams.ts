@@ -31,6 +31,20 @@ export const DEFAULT_VOYAGE_EVENT_STREAM_OPTIONS: VoyageEventStreamOptions = {
 /** How long a browser waits before reconnecting a stream that ended (the SSE `retry` field). */
 const RECONNECT_DELAY_MS = 5_000;
 
+/**
+ * What `open` did. Only `streaming` wrote anything: otherwise the caller answers.
+ * - `streaming`: the stream is open.
+ * - `not-found`: the voyage does not exist, or the organization does not participate in it.
+ * - `shutting-down`: the application is shutting down; no stream opens any more.
+ * - `client-gone`: the client left before access was decided; there is no one to answer.
+ */
+export type StreamOpening = 'streaming' | 'not-found' | 'shutting-down' | 'client-gone';
+
+/** Why an opening stopped waiting for its access check. */
+type Interruption = Extract<StreamOpening, 'shutting-down' | 'client-gone'>;
+
+type VoyageContracts = Awaited<ReturnType<CounterpartyContracts['listForVoyage']>>;
+
 interface Stream {
   /** The principal the stream was opened for. Its session and organization must stay the same. */
   readonly principal: Principal;
@@ -64,6 +78,10 @@ interface Stream {
 export class VoyageEventStreams implements OnModuleDestroy {
   private readonly logger = new Logger(VoyageEventStreams.name);
   private readonly streams = new Set<Stream>();
+  /** Streams being opened (their access is being checked), each by how to interrupt it. */
+  private readonly openings = new Set<(reason: Interruption) => void>();
+  /** Set once by shutdown, never cleared: nothing opens afterwards. */
+  private shutDown = false;
   private recheckTimer: NodeJS.Timeout | undefined;
   private rechecking = false;
 
@@ -76,23 +94,44 @@ export class VoyageEventStreams implements OnModuleDestroy {
 
   /**
    * Starts streaming the voyage's changes on `response`, for as long as the client stays and its
-   * session and participation last. False, with nothing written, when the voyage does not exist
-   * or the principal's organization does not participate in it (the caller answers 404).
+   * session and participation last. Unless it answers `streaming`, nothing is kept and nothing
+   * was written: the caller answers.
+   *
+   * Access is checked first. Neither a shutdown nor the client leaving waits for that check:
+   * either answers at once, and the check's late result, or failure, is ignored.
    */
-  async open(principal: Principal, voyageId: string, response: Response): Promise<boolean> {
-    const client = { gone: false };
+  async open(principal: Principal, voyageId: string, response: Response): Promise<StreamOpening> {
+    if (this.shutDown) return 'shutting-down';
+    let interruption: Interruption | undefined;
+    let interrupt: (reason: Interruption) => void = () => undefined;
+    const interrupted = new Promise<undefined>((resolve) => {
+      interrupt = (reason) => {
+        interruption ??= reason;
+        resolve(undefined);
+      };
+    });
     const onGone = () => {
-      client.gone = true;
+      interrupt('client-gone');
     };
+    // Tracked before the first await: a shutdown from now on reaches this opening.
+    this.openings.add(interrupt);
     response.once('close', onGone);
-    let contracts: Awaited<ReturnType<CounterpartyContracts['listForVoyage']>>;
+    let checked: { contracts: VoyageContracts } | undefined;
     try {
-      contracts = await this.contracts.listForVoyage(principal, voyageId);
+      checked = await Promise.race([
+        this.contracts.listForVoyage(principal, voyageId).then((contracts) => ({ contracts })),
+        interrupted,
+      ]);
+    } catch (error) {
+      // A check that fails once the opening was interrupted has no one left to answer.
+      if (!interruption) throw error;
     } finally {
+      this.openings.delete(interrupt);
       response.off('close', onGone);
     }
-    if (!contracts) return false;
-    if (client.gone) return true; // The client left while access was being checked.
+    // Also set when the interruption came after the check, before this resumed.
+    if (interruption) return interruption;
+    if (!checked?.contracts) return 'not-found';
 
     const stream: Stream = {
       principal,
@@ -121,7 +160,7 @@ export class VoyageEventStreams implements OnModuleDestroy {
     response.write(`retry: ${RECONNECT_DELAY_MS}\n\n`);
     this.send(stream, { type: 'READY' });
     this.startRechecks();
-    return true;
+    return 'streaming';
   }
 
   /** Streams open now. */
@@ -129,8 +168,14 @@ export class VoyageEventStreams implements OnModuleDestroy {
     return this.streams.size;
   }
 
+  /**
+   * Shuts down for good: ends every open stream, answers every opening with `shutting-down`, and
+   * opens nothing more. Calling it again changes nothing.
+   */
   onModuleDestroy(): void {
+    this.shutDown = true;
     this.stopRechecks();
+    for (const interrupt of [...this.openings]) interrupt('shutting-down');
     for (const stream of [...this.streams]) this.close(stream);
   }
 
@@ -225,7 +270,7 @@ export class VoyageEventStreams implements OnModuleDestroy {
   }
 
   private startRechecks(): void {
-    if (this.recheckTimer) return;
+    if (this.recheckTimer || this.shutDown) return;
     this.recheckTimer = setInterval(() => {
       void this.recheckAll();
     }, this.options.recheckIntervalMs);

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { CounterpartyContract } from '@tradeflow/contracts';
 import type { Response } from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Principal } from '../auth/principal.js';
 import type { SessionPrincipals } from '../auth/session-principals.js';
 import type { CounterpartyContracts } from './counterparty-contracts.js';
@@ -26,6 +26,7 @@ const principal: Principal = {
 /** Enough of an Express response for a stream, recording what was written. */
 class FakeResponse extends EventEmitter {
   readonly chunks: string[] = [];
+  ends = 0;
   writableEnded = false;
   writableNeedDrain = false;
   socket = { setNoDelay: () => undefined };
@@ -41,6 +42,7 @@ class FakeResponse extends EventEmitter {
     return true;
   }
   end() {
+    this.ends += 1;
     this.writableEnded = true;
     this.emit('close');
   }
@@ -55,7 +57,7 @@ class FakeResponse extends EventEmitter {
 /** The organization's contracts on the voyage, answered when the test says so. */
 class FakeContracts {
   visible: string[] | null = [contractId(1)];
-  held: (() => void)[] = [];
+  held: { resolve: () => void; reject: (error: Error) => void }[] = [];
   hold = false;
   checks = 0;
   failNext = false;
@@ -66,13 +68,22 @@ class FakeContracts {
       this.failNext = false;
       throw new Error('database unavailable');
     }
-    if (this.hold) await new Promise<void>((resolve) => this.held.push(resolve));
+    if (this.hold) {
+      await new Promise<void>((resolve, reject) => this.held.push({ resolve, reject }));
+    }
     return this.visible && this.visible.map((id) => ({ id }) as CounterpartyContract);
   }
 
+  /** Answers the held checks. */
   release() {
     this.hold = false;
-    for (const resolve of this.held.splice(0)) resolve();
+    for (const { resolve } of this.held.splice(0)) resolve();
+  }
+
+  /** Fails the held checks. */
+  fail() {
+    this.hold = false;
+    for (const { reject } of this.held.splice(0)) reject(new Error('database unavailable'));
   }
 }
 
@@ -85,13 +96,23 @@ class FakeSessions {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+const RECHECK_MS = 60_000;
+
+/** Counts the recheck timers started from now on. */
+const recheckTimers = () => {
+  const setInterval = vi.spyOn(globalThis, 'setInterval');
+  return () => setInterval.mock.calls.filter(([, ms]) => ms === RECHECK_MS).length;
+};
+
 describe('VoyageEventStreams', () => {
   const created: VoyageEventStreams[] = [];
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const streams of created.splice(0)) streams.onModuleDestroy();
   });
 
-  async function aStream({ maxPendingContracts = 32 } = {}) {
+  /** The service and its fakes, with no stream open yet. */
+  function aService({ maxPendingContracts = 32 } = {}) {
     const bus = new VoyageEventBus();
     const contracts = new FakeContracts();
     const sessions = new FakeSessions();
@@ -99,15 +120,22 @@ describe('VoyageEventStreams', () => {
       bus,
       contracts as unknown as CounterpartyContracts,
       sessions as unknown as SessionPrincipals,
-      { recheckIntervalMs: 60_000, maxPendingContracts },
+      { recheckIntervalMs: RECHECK_MS, maxPendingContracts },
     );
     created.push(streams);
+    const open = (response: FakeResponse) =>
+      streams.open(principal, VOYAGE, response as unknown as Response);
+    return { bus, contracts, sessions, streams, open };
+  }
+
+  async function aStream({ maxPendingContracts = 32 } = {}) {
+    const { bus, contracts, sessions, streams, open } = aService({ maxPendingContracts });
     const response = new FakeResponse();
-    expect(await streams.open(principal, VOYAGE, response as unknown as Response)).toBe(true);
+    expect(await open(response)).toBe('streaming');
     const publish = (n: number, type: VoyageChange['type'] = 'NOTICE_ISSUED') => {
       bus.publish({ type, voyageId: VOYAGE, contractId: contractId(n) });
     };
-    return { bus, contracts, sessions, streams, response, publish };
+    return { bus, contracts, sessions, streams, open, response, publish };
   }
 
   it('starts with READY once subscribed', async () => {
@@ -118,18 +146,11 @@ describe('VoyageEventStreams', () => {
   });
 
   it('opens nothing for a voyage the organization does not participate in', async () => {
-    const bus = new VoyageEventBus();
-    const contracts = new FakeContracts();
+    const { bus, contracts, streams, open } = aService();
     contracts.visible = null;
-    const streams = new VoyageEventStreams(
-      bus,
-      contracts as unknown as CounterpartyContracts,
-      new FakeSessions() as unknown as SessionPrincipals,
-      { recheckIntervalMs: 60_000, maxPendingContracts: 32 },
-    );
     const response = new FakeResponse();
 
-    expect(await streams.open(principal, VOYAGE, response as unknown as Response)).toBe(false);
+    expect(await open(response)).toBe('not-found');
     expect(response.chunks).toEqual([]);
     expect(streams.size).toBe(0);
     expect(bus.listenerCount()).toBe(0);
@@ -249,5 +270,111 @@ describe('VoyageEventStreams', () => {
     expect(streams.size).toBe(0);
     expect(bus.listenerCount()).toBe(0);
     expect(response.messages).toEqual([{ type: 'READY' }]);
+  });
+
+  it('ends every stream once, however often shutdown and disconnects follow', async () => {
+    const { bus, streams, open, response, publish } = await aStream();
+    const other = new FakeResponse();
+    expect(await open(other)).toBe('streaming');
+
+    streams.onModuleDestroy();
+    streams.onModuleDestroy();
+    other.emit('close'); // The client's own disconnect, after the server ended its stream.
+    publish(1);
+    await settle();
+
+    expect(response.ends).toBe(1);
+    expect(other.ends).toBe(1);
+    expect(streams.size).toBe(0);
+    expect(bus.listenerCount()).toBe(0);
+    expect(response.messages).toEqual([{ type: 'READY' }]);
+    expect(other.messages).toEqual([{ type: 'READY' }]);
+  });
+
+  describe('while a stream is being opened', () => {
+    /** Starts opening a stream whose access check is held, and waits until it is. */
+    async function anOpening() {
+      const service = aService();
+      service.contracts.hold = true;
+      const response = new FakeResponse();
+      const opening = service.open(response);
+      await settle();
+      expect(service.contracts.held).toHaveLength(1);
+      return { ...service, response, opening };
+    }
+
+    /** Nothing at all was kept for the opening, or written to it. */
+    function expectNothingOpened({
+      bus,
+      streams,
+      response,
+    }: Awaited<ReturnType<typeof anOpening>>) {
+      expect(response.chunks).toEqual([]);
+      expect(response.ends).toBe(0);
+      expect(response.listenerCount('close')).toBe(0);
+      expect(streams.size).toBe(0);
+      expect(bus.listenerCount()).toBe(0);
+    }
+
+    it('answers shutdown at once, and opens nothing when the check completes later', async () => {
+      const timers = recheckTimers();
+      const opening = await anOpening();
+
+      opening.streams.onModuleDestroy();
+
+      // Before the check is answered.
+      expect(await opening.opening).toBe('shutting-down');
+      expect(opening.contracts.held).toHaveLength(1);
+      opening.contracts.release();
+      await settle();
+      expectNothingOpened(opening);
+      expect(timers()).toBe(0);
+    });
+
+    it('opens nothing when the check fails after shutdown', async () => {
+      const timers = recheckTimers();
+      const opening = await anOpening();
+
+      opening.streams.onModuleDestroy();
+      expect(await opening.opening).toBe('shutting-down');
+      opening.contracts.fail();
+      await settle();
+
+      expectNothingOpened(opening);
+      expect(timers()).toBe(0);
+    });
+
+    it('answers a client that left at once, and opens nothing when the check completes', async () => {
+      const timers = recheckTimers();
+      const opening = await anOpening();
+
+      opening.response.emit('close');
+
+      expect(await opening.opening).toBe('client-gone');
+      expect(opening.contracts.held).toHaveLength(1);
+      opening.contracts.release();
+      await settle();
+      expectNothingOpened(opening);
+      expect(timers()).toBe(0);
+      // A shutdown afterwards finds nothing left to end.
+      opening.streams.onModuleDestroy();
+      expectNothingOpened(opening);
+    });
+
+    it('creates nothing once shut down', async () => {
+      const timers = recheckTimers();
+      const { bus, contracts, streams, open } = aService();
+      streams.onModuleDestroy();
+      const response = new FakeResponse();
+
+      expect(await open(response)).toBe('shutting-down');
+
+      expect(contracts.checks).toBe(0);
+      expect(response.chunks).toEqual([]);
+      expect(response.listenerCount('close')).toBe(0);
+      expect(streams.size).toBe(0);
+      expect(bus.listenerCount()).toBe(0);
+      expect(timers()).toBe(0);
+    });
   });
 });

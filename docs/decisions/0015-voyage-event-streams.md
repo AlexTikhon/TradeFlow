@@ -78,7 +78,9 @@ same race any request in flight has.
 Signals waiting for a check are coalesced per contract and type, so one stream holds at most
 `2 × contracts` of them; more than 32 contracts with pending signals closes the stream. A client
 that stops reading (the socket buffer is full) is closed rather than buffered for. Closing is
-always safe: the client reconnects and reads again. On shutdown every stream is ended.
+always safe: the client reconnects and reads again. On shutdown every stream is ended, a stream
+still being opened is answered 503 at once (its access check is not waited for), and none opens
+afterwards.
 
 ### The client
 
