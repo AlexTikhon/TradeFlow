@@ -655,9 +655,11 @@ src/
   position.
 - **Live updates** (`useVoyageLiveUpdates`, [ADR 0015](decisions/0015-voyage-event-streams.md)).
   Once the voyage has loaded, the page opens the voyage's event stream with `EventSource`
-  (same origin, so the browser sends the session cookie). Each signal invalidates exactly two
-  queries of the current identity scope, the voyage's notices and its timeline; at most one
-  such refresh runs, with one more queued however many signals arrive. Every connection starts
+  (same origin, so the browser sends the session cookie). Each signal reads exactly two
+  queries of the current identity scope again, the voyage's notices and its timeline, with
+  requests sent after the signal: a read already on its way is cancelled rather than joined, since
+  it may have been answered from before the change (on the first load, invalidating alone would
+  join it). At most one such refresh runs, with one more queued however many signals arrive. Every connection starts
   with `READY`, which triggers the same refresh: that is how the page catches up after a
   reconnect, since nothing is replayed. The connection belongs to the voyage and to the session
   epoch it was opened in: unmounting or moving to another voyage closes it, and so does the
@@ -747,7 +749,7 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
 | API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, chain rules, config |
 | API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs        |
 | Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client       |
-| End-to-end       | Playwright (planned)       | none                           | Critical user journeys                            |
+| End-to-end       | Playwright (Chromium)      | injected transport faults only | Smoke: sign-in, live notices, tabs, stream faults |
 
 Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized against a dedicated
 `*_test` database that is truncated between tests. Authorization tests sign in through the real
@@ -817,12 +819,29 @@ that can receive none, two heartbeats after the command was answered. Unit tests
 hard to provoke over HTTP: coalescing while a check runs, the pending-signal limit, a client
 that stops reading, and a check that fails.
 
-No test runs in a real browser yet: web tests render in jsdom, so layout (the responsive trade
-string included) is not covered automatically. Playwright is the planned answer. The same goes
-for the browser's `EventSource`: web tests replace it with a fake the test drives by hand
-(simulated transport), and the API's tests send the cookie themselves, so whether a real browser
-attaches the `SameSite=Strict` cookie to the stream, and how it reconnects, is not verified
-automatically.
+A small end-to-end suite (`e2e/`, `pnpm test:e2e`, never part of `pnpm check`) runs Chromium
+against the production web build served by `vite preview` (whose same-origin `/api` proxy is the
+development one), the compiled API and a dedicated `tradeflow_e2e` database, all started by the
+run on ports of their own and released afterwards, on failure too. It signs in through the form
+and survives a reload on the HttpOnly cookie; carries a notice and its acknowledgement between
+two browser contexts over the browser's own `EventSource`; signs two tabs of one context out
+and back in (the same user, then another), checking that both tabs follow, protected content
+disappears, and each old stream is closed by the page and at the API before a new one opens; and
+recovers from transport faults. Causality is read off the browser's own network log (DevTools
+protocol, observation only): the refetch follows the stream message, nothing was refetched
+between a quiet point and the message, and moving the page's timers past the 30 s fallback poll
+interval sends nothing while the stream is live. Faults are injected only by a transport proxy
+between the web server and the API, labelled as such: a 503 it answers itself, stream requests
+it holds, and streams it ends cleanly. EventSource, authentication, data and stream messages
+are never faked. A probe on the browser's native `EventSource` records what Chromium actually
+does: a 503 leaves it `CLOSED` (so the page must reconnect itself), and a dropped stream reports
+`CONNECTING` and reconnects by itself after the server's `retry`, sending the cookie again.
+
+What that suite does not establish: anything over HTTPS (the run is plain HTTP on `127.0.0.1`,
+so the `Secure` attribute and the `__Host-` cookie name production uses are never exercised),
+other browsers (Firefox and WebKit, whose `EventSource` and cookie handling may differ), layout
+(the responsive trade string included), the browser's own `datetime-local` and file pickers,
+downloads, or anything beyond notices that the stream does not carry yet.
 
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
 cross-tab changes run through the real router, query client and cache. They assert, among other
@@ -855,6 +874,7 @@ their way when another tab signs in as someone else (aborted, never shown, never
 cursor). Live updates drive a fake `EventSource`: the stream opens only once the voyage has
 loaded (never for a voyage that answered 404), `READY` and each change refetch the notices and
 timeline of the current identity only (nothing else, and not another identity's cached data),
+with reads of their own even while the first reads are still on their way,
 the buyer sees the seller's new notice and its acknowledgement appear, unknown messages are
 ignored, signals arriving during a refresh cause one more refresh rather than one each, polling
 runs while the stream is not live and stops once it is (and pauses while the page is hidden), a

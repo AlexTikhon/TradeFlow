@@ -34,7 +34,8 @@ export interface VoyageLiveUpdates {
 /**
  * Keeps the voyage's notices and timeline fresh while the page shows them, for the identity it
  * renders under. Connects to the voyage's event stream (once `enabled`, i.e. the voyage has
- * loaded) and, on each signal, invalidates exactly those two queries of the current scope.
+ * loaded) and, on each signal, reads exactly those two queries of the current scope again, with
+ * requests sent after the signal (a read already on its way is cancelled, not waited for).
  *
  * - Reconciliation: every connection starts with READY, and READY reads both again, so whatever
  *   changed while disconnected (the stream has no replay) is caught up through REST.
@@ -78,7 +79,13 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
       }
       refreshing = true;
       void Promise.allSettled(
-        queryKeys.map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
+        queryKeys.map(async (queryKey) => {
+          // A read already on its way was sent before this message, so its answer may predate
+          // the change. Invalidating alone would wait for it when the query has no data yet
+          // (the first load): cancel it, so the refresh always sends a read of its own.
+          await queryClient.cancelQueries({ queryKey, exact: true });
+          await queryClient.invalidateQueries({ queryKey, exact: true });
+        }),
       ).finally(() => {
         refreshing = false;
         if (refreshAgain) {

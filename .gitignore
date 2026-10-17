@@ -9,6 +9,15 @@ apps/api/src/generated/
 # Uploaded document bytes in local development (DOCUMENT_STORAGE_DIR default)
 apps/api/var/
 
+# End-to-end runs: reports, results (failure screenshots), server logs, and any browser
+# storage state or auth file, which would hold session cookies
+e2e/.output/
+playwright-report/
+blob-report/
+test-results/
+playwright/.auth/
+*.storage-state.json
+
 # Local environment
 .env
 .env.*

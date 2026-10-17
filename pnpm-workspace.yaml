@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - e2e
 
 # Dependency install scripts are denied by default; each allowance is deliberate.
 allowBuilds:

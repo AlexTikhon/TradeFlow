@@ -134,6 +134,7 @@ afterwards.
   issuer's timeline current, which the mutation hooks did not do.
 - Tests: the API streams over real HTTP connections against PostgreSQL (who receives what,
   rollbacks, a race, a failing bus, revocation, expiry, organization and participation changes,
-  disconnects, shutdown); the web tests drive a fake `EventSource`. No test opens a stream from a
-  real browser, so the browser's own cookie handling and reconnection are not covered
-  automatically.
+  disconnects, shutdown); the web tests drive a fake `EventSource`. The end-to-end smoke suite
+  (`e2e/`) later added streams from real Chromium: the cookie sent with the stream, signals
+  between two browsers, streams replaced across sign-out and sign-in in two tabs, and recovery
+  from injected transport faults. Other browsers and HTTPS are still not covered.

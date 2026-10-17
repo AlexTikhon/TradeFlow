@@ -37,7 +37,7 @@ Next come further notices, deadlines and workflow.
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                   |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices and timeline kept current from the voyage's event stream (polling while it is down), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 936 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), GitHub Actions CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 943 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), a Chromium end-to-end smoke suite run separately (`pnpm test:e2e`), GitHub Actions CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Voyage creation, ETA notices, documentary instructions, documents and their review write data; trade strings
 come from the seed and are read-only.
@@ -98,6 +98,7 @@ apps/
       test/            MSW server, fixtures, render helpers
 packages/
   contracts/           Zod schemas + inferred types shared by api and web
+e2e/                   Playwright smoke tests in Chromium (support/: run setup, fixtures, proxy)
 docs/                  architecture, domain model, ADRs
 docker/                Postgres init scripts
 ```
@@ -178,10 +179,27 @@ API docs are at <http://localhost:3000/api/docs>.
 | `pnpm typecheck` | `tsc --noEmit` in every package                          |
 | `pnpm build`     | Production builds of contracts, API and web              |
 | `pnpm check`     | Everything CI runs: format, lint, typecheck, test, build |
+| `pnpm test:e2e`  | Browser smoke tests in Chromium (not part of `check`)    |
 | `pnpm db:reset`  | Drop, re-migrate and re-seed the development database    |
 
 Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database needed),
 `pnpm --filter @tradeflow/api test:integration`.
+
+### End-to-end smoke tests
+
+`pnpm test:e2e` needs `pnpm db:up` and, once per machine, Playwright's Chromium:
+`pnpm --filter @tradeflow/e2e exec playwright install chromium`. Each run then owns everything
+it uses and releases it at the end, whether the tests pass or fail:
+
+- a dedicated database, `tradeflow_e2e` on the same Postgres server (`E2E_DATABASE_URL` to
+  change it; the name must end in `_e2e`), dropped, recreated with the real migrations, and
+  dropped again afterwards. The development and integration-test databases are never touched;
+- a temporary directory with the API build, the production web build and the document storage;
+- the API and `vite preview` (with the same-origin `/api` proxy) on ports the operating system
+  picks, so a running `pnpm dev` on 3000 and 5173 is neither reused nor stopped.
+
+Server logs, failure screenshots and the HTML report go to `e2e/.output/` (ignored by Git).
+Traces, videos and saved browser state are off: they would record the session cookie.
 
 ### How tests work
 
@@ -260,15 +278,35 @@ Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database n
   after session checks or another tab go to someone else and back. The timeline: every kind of
   event, paging, failures, and pages cancelled by an identity change. Live updates, with a fake
   `EventSource` driven by hand (simulated transport): refetching only the current identity's
-  notices and timeline on each signal and on every (re)connection, polling only while
+  notices and timeline on each signal and on every (re)connection (with reads of their own, even
+  while the first reads are still on their way), polling only while
   disconnected and visible, reopening a stream the browser gave up on, closing on unmount, and
   late events ignored after a sign-out, a same-user sign-in, and session checks going to someone
   else and back. The suite runs in `America/Sao_Paulo` time so date- and time-shifting bugs show up.
-- **Not covered:** nothing runs in a real browser yet (web tests use jsdom), so layout, including
-  the responsive trade string and the notice, instruction and document panels, the browser's own `datetime-local`
-  picker, its file picker and how it saves a download are not verified automatically. Nor is the
-  browser's own `EventSource`: whether it sends the session cookie with the stream and how it
-  reconnects (the API tests send the cookie themselves). Playwright end-to-end tests are planned.
+- **e2e** (`pnpm test:e2e`, Chromium only): four smoke journeys against the real web build, API
+  and PostgreSQL, through the same-origin `/api` proxy, with real sign-in and the browser's own
+  `EventSource`. (1) Sign in through the form, reload, stay signed in: the cookie is `HttpOnly`
+  and `SameSite=Strict`, invisible to scripts, and the reload is confirmed by the server from it
+  alone. (2) A seller and a buyer in separate browser contexts: the seller issues a notice, the
+  buyer's notice panel and timeline show it, the buyer acknowledges, the seller's page shows who
+  did. (3) Two tabs of one context sign out and back in, as the same user and then as another:
+  both tabs follow, protected content disappears, each old stream is closed by the page and at
+  the API, and a new one opens. (4) Recovery: a page catches up after its stream is dropped,
+  and connects again after a first stream answered 503; a probe records what Chromium's own
+  `EventSource` does in each case (`CLOSED` after a 503, reconnecting by itself after a drop,
+  honouring the server's `retry`).
+  That a stream message, not polling, refreshed a page is read off the browser's own network log
+  (DevTools protocol, observation only): the stream was open throughout, nothing was refetched
+  between a quiet point and the message, both queries were refetched after it, and moving the
+  page's timers past the 30 s fallback interval sent nothing. Faults are injected only by a
+  transport proxy between the web server and the API, and labelled as such: a 503 it answers
+  itself, stream requests it holds, streams it ends. EventSource, authentication, data and
+  stream messages are never faked.
+- **Not covered:** HTTPS, so the `Secure` attribute and the `__Host-` cookie name used in
+  production (the E2E run is plain HTTP on `127.0.0.1`); browsers other than Chromium, whose
+  `EventSource` and cookie handling may differ; layout, including the responsive trade string
+  and the notice, instruction and document panels; the browser's own `datetime-local` picker
+  (the E2E tests type into it), its file picker and how it saves a download.
 
 ## Roadmap
 

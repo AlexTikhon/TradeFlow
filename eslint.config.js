@@ -38,7 +38,7 @@ export default defineConfig(
     extends: [tseslint.configs.disableTypeChecked],
   },
   {
-    files: ['apps/api/**/*.ts', 'packages/**/*.ts', 'apps/web/vite.config.ts'],
+    files: ['apps/api/**/*.ts', 'packages/**/*.ts', 'apps/web/vite.config.ts', 'e2e/**/*.ts'],
     languageOptions: { globals: globals.node },
     rules: {
       // Nest modules are intentionally empty classes configured by decorators.

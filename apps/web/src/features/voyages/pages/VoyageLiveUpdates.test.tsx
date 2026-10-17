@@ -28,7 +28,7 @@ import { FALLBACK_POLL_INTERVAL_MS, RECONNECT_DELAYS_MS } from '../hooks/use-voy
  * Live updates on the voyage page, through the real route tree, providers and query client.
  * The network is MSW; the event stream is `FakeEventSource`, a simulated transport the tests
  * drive by hand. Nothing here involves a real EventSource or the browser's cookies: the API's
- * integration tests stream over real HTTP, and no test yet runs in a real browser.
+ * integration tests stream over real HTTP, and the end-to-end suite (`e2e/`) in real Chromium.
  */
 
 const voyage = aVoyageDetail();
@@ -218,6 +218,56 @@ describe('Live updates on the voyage page', () => {
       notices: 2,
       timeline: 2,
     });
+  });
+
+  it('reads again on READY even while the first reads are still on their way', async () => {
+    // The first reads were sent before the stream listened, so their answers may predate a
+    // change nobody will signal: READY must send reads of its own, not wait for those.
+    const { state, requests } = servePage();
+    const releases: (() => void)[] = [];
+    const held = (endpoint: 'notices' | 'timeline', respond: () => Response) => async () => {
+      requests[endpoint] += 1;
+      if (requests[endpoint] === 1) {
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      }
+      return respond();
+    };
+    server.use(
+      http.get(
+        `*/api/voyages/${voyage.id}/notices`,
+        held('notices', () => HttpResponse.json({ items: state.notices })),
+      ),
+      http.get(
+        `*/api/voyages/${voyage.id}/timeline`,
+        held('timeline', () => HttpResponse.json(timelinePage(state.events))),
+      ),
+    );
+    renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    await waitFor(() => {
+      expect(releases).toHaveLength(2);
+    });
+
+    // Committed after the first reads were answered from the database, before READY.
+    state.notices = [aNotice({ contract: asBuyer })];
+    state.events = [noticeIssued(2)];
+    act(() => {
+      source.emit({ type: 'READY' });
+    });
+
+    await waitFor(() => {
+      expect(requests.notices).toBe(2);
+      expect(requests.timeline).toBe(2);
+    });
+    releases.forEach((release) => {
+      release();
+    });
+    const notices = await screen.findByRole('list', { name: 'Notices' });
+    expect(within(notices).getAllByRole('listitem')).toHaveLength(1);
+    const timeline = await screen.findByRole('list', { name: 'Timeline' });
+    expect(within(timeline).getByText('Issued a notice')).toBeInTheDocument();
   });
 
   it("shows the buyer the seller's new notice, then its acknowledgement, as they are signalled", async () => {
