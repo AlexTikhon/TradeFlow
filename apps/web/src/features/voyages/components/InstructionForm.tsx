@@ -177,7 +177,9 @@ export function InstructionForm({
   const [reviewing, setReviewing] = useState(false);
 
   // After a successful write the cache holds the version just written, until the form closes.
-  const stale = !isSuccess && (latest?.version ?? null) !== (basis?.version ?? null);
+  // While a write is on its way, its answer decides: a refresh can bring in the very version it
+  // is writing (its own stream signal may arrive before the response) before the form knows.
+  const stale = !isPending && !isSuccess && (latest?.version ?? null) !== (basis?.version ?? null);
   const conflict = isPreconditionFailure(error);
   const serverProblems =
     error instanceof ApiError && error.status === 400

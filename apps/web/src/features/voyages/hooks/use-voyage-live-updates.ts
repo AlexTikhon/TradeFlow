@@ -1,4 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
+import type { VoyageStreamMessage } from '@tradeflow/contracts';
 import { useEffect, useState } from 'react';
 import {
   identityKey,
@@ -15,11 +16,28 @@ import {
 import { canStreamVoyageEvents, connectToVoyageEvents } from '../api/voyage-events.api';
 import { voyageQueries } from '../api/voyage.queries';
 
-/** How often the notices and timeline are read again while no stream is live. */
+/** How often the live resources are read again while no stream is live. */
 export const FALLBACK_POLL_INTERVAL_MS = 30_000;
 
 /** Waits before connecting again after the browser gave up on a stream; the last one repeats. */
 export const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000] as const;
+
+/** The voyage's queries the stream keeps fresh. */
+type LiveResource = 'notices' | 'documentaryInstructions' | 'timeline';
+
+/**
+ * What each message makes the page read again. READY starts every (re)connection, after which
+ * anything may have changed unseen, so it reads everything; a change reads what it touched, and
+ * the timeline, where every change is recorded. Exhaustive: a new message type does not compile
+ * until it says what it refreshes.
+ */
+const REFRESHED_BY: Record<VoyageStreamMessage['type'], readonly LiveResource[]> = {
+  READY: ['notices', 'documentaryInstructions', 'timeline'],
+  NOTICE_ISSUED: ['notices', 'timeline'],
+  NOTICE_ACKNOWLEDGED: ['notices', 'timeline'],
+  DOCUMENTARY_INSTRUCTION_REVISED: ['documentaryInstructions', 'timeline'],
+  DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: ['documentaryInstructions', 'timeline'],
+};
 
 export interface VoyageLiveUpdates {
   /** A stream is connected and has said READY: changes arrive as they happen. */
@@ -32,13 +50,14 @@ export interface VoyageLiveUpdates {
 }
 
 /**
- * Keeps the voyage's notices and timeline fresh while the page shows them, for the identity it
- * renders under. Connects to the voyage's event stream (once `enabled`, i.e. the voyage has
- * loaded) and, on each signal, reads exactly those two queries of the current scope again, with
- * requests sent after the signal (a read already on its way is cancelled, not waited for).
+ * Keeps the voyage's notices, documentary instructions and timeline fresh while the page shows
+ * them, for the identity it renders under. Connects to the voyage's event stream (once
+ * `enabled`, i.e. the voyage has loaded) and, on each message, reads again exactly the queries
+ * of the current scope it concerns (`REFRESHED_BY`), with requests sent after the message (a
+ * read already on its way is cancelled, not waited for).
  *
- * - Reconciliation: every connection starts with READY, and READY reads both again, so whatever
- *   changed while disconnected (the stream has no replay) is caught up through REST.
+ * - Reconciliation: every connection starts with READY, and READY reads all three again, so
+ *   whatever changed while disconnected (the stream has no replay) is caught up through REST.
  * - Tied to the session epoch it started in: the first transition that ends that epoch closes
  *   the connection, and any callback arriving afterwards is ignored. That covers signing out
  *   and back in as the same user, and session checks going to someone else and back, where the
@@ -47,8 +66,15 @@ export interface VoyageLiveUpdates {
  * - Fallback: while not live, the caller polls with `refetchInterval` (TanStack Query skips it
  *   while the tab is hidden). If the browser gives up on the stream (a refused or failed
  *   connection), it is opened again after a growing delay.
- * - Bounded: one connection, at most one reconnect timer, and at most one refresh running with
- *   one more queued, however many signals arrive. Everything is released on unmount.
+ * - Bounded: one connection, at most one reconnect timer, and at most one refresh running.
+ *   Messages that arrive during a refresh add what they concern to one pending set, read by a
+ *   single refresh once the running one ends: nothing a message asked for is lost, and each
+ *   resource is read once however many messages asked for it. Everything is released on
+ *   unmount.
+ *
+ * Reads only: a refresh replaces cached data and nothing else. An open draft keeps its content
+ * and the version it was based on (the form shows the newer version beside it), and no write is
+ * ever sent or retried from here.
  */
 export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): VoyageLiveUpdates {
   const queryClient = useQueryClient();
@@ -62,24 +88,27 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
     if (!sameIdentity(epoch.identity, identity)) return;
 
     const scope: ProtectedScope = [PROTECTED_QUERY_ROOT, identityKey(identity)];
-    const queryKeys = [
-      voyageQueries.notices(scope, voyageId).queryKey,
-      voyageQueries.timeline(scope, voyageId).queryKey,
-    ];
+    const queryKeys: Record<LiveResource, readonly unknown[]> = {
+      notices: voyageQueries.notices(scope, voyageId).queryKey,
+      documentaryInstructions: voyageQueries.documentaryInstructions(scope, voyageId).queryKey,
+      timeline: voyageQueries.timeline(scope, voyageId).queryKey,
+    };
     let stopped = false;
     const isCurrent = () => !stopped && isCurrentSession(queryClient, epoch);
 
     let refreshing = false;
-    let refreshAgain = false;
-    const refresh = () => {
+    /** Resources a message asked for that no refresh has started reading yet. */
+    const pending = new Set<LiveResource>();
+    const refresh = (resources: readonly LiveResource[]) => {
       if (!isCurrent()) return;
-      if (refreshing) {
-        refreshAgain = true;
-        return;
-      }
+      for (const resource of resources) pending.add(resource);
+      if (refreshing || pending.size === 0) return;
       refreshing = true;
+      const batch = [...pending];
+      pending.clear();
       void Promise.allSettled(
-        queryKeys.map(async (queryKey) => {
+        batch.map(async (resource) => {
+          const queryKey = queryKeys[resource];
           // A read already on its way was sent before this message, so its answer may predate
           // the change. Invalidating alone would wait for it when the query has no data yet
           // (the first load): cancel it, so the refresh always sends a read of its own.
@@ -88,10 +117,8 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
         }),
       ).finally(() => {
         refreshing = false;
-        if (refreshAgain) {
-          refreshAgain = false;
-          refresh();
-        }
+        // Whatever messages asked for meanwhile, each resource once.
+        refresh([]);
       });
     };
 
@@ -106,7 +133,7 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
             failures = 0;
             setLive(true);
           }
-          refresh();
+          refresh(REFRESHED_BY[message.type]);
         },
         onDisconnect: (retrying) => {
           if (!isCurrent()) return;
@@ -127,6 +154,7 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      pending.clear();
       clearTimeout(reconnectTimer);
       connection?.close();
       setLive(false);

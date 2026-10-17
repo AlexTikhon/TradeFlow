@@ -7,18 +7,40 @@ import {
 } from './browser-network.js';
 
 /*
- * Reading a voyage page's live updates off its browser's network record. The page keeps two
- * queries fresh from the stream, the notices and the timeline: it refetches both on every stream
- * message, and polls them only while no stream is live (every 30 s).
+ * Reading a voyage page's live updates off its browser's network record. The page keeps three
+ * queries fresh from the stream, the notices, the documentary instructions and the timeline: it
+ * refetches all three on READY, those a change concerns on each change message (`REFRESHED_BY`),
+ * and polls all three only while no stream is live (every 30 s).
  */
 
 const eventsPath = (voyageId: string) => `/api/voyages/${voyageId}/events`;
 
+export type LiveQuery = 'notices' | 'documentary-instructions' | 'timeline';
+
+/**
+ * What the web app refetches for each stream message (its own `REFRESHED_BY`), kept here by
+ * hand: the tests check the browser against this, not against the app's code.
+ */
+const REFRESHED_BY: Record<string, readonly LiveQuery[]> = {
+  READY: ['notices', 'documentary-instructions', 'timeline'],
+  NOTICE_ISSUED: ['notices', 'timeline'],
+  NOTICE_ACKNOWLEDGED: ['notices', 'timeline'],
+  DOCUMENTARY_INSTRUCTION_REVISED: ['documentary-instructions', 'timeline'],
+  DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: ['documentary-instructions', 'timeline'],
+};
+
+function refreshedBy(type: string | undefined): readonly LiveQuery[] {
+  const queries = type === undefined ? undefined : REFRESHED_BY[type];
+  if (!queries) throw new Error(`No refresh is known for stream message ${String(type)}`);
+  return queries;
+}
+
 /** A GET of one of the queries the stream keeps fresh. */
-function liveQuery(voyageId: string, request: RequestEntry): 'notices' | 'timeline' | undefined {
+function liveQuery(voyageId: string, request: RequestEntry): LiveQuery | undefined {
   if (request.method !== 'GET') return undefined;
   const base = `/api/voyages/${voyageId}`;
   if (request.path === `${base}/notices`) return 'notices';
+  if (request.path === `${base}/documentary-instructions`) return 'documentary-instructions';
   if (request.path === `${base}/timeline` || request.path.startsWith(`${base}/timeline?`)) {
     return 'timeline';
   }
@@ -77,10 +99,18 @@ export function waitForMessage(
   );
 }
 
-/** Waits until a refetch of the notices and of the timeline, both sent after `after`, finished. */
-export async function waitForRefresh(network: BrowserNetwork, voyageId: string, after: number) {
+/**
+ * Waits until a refetch of each query `message` makes the page read again, sent after it, has
+ * finished.
+ */
+export async function waitForRefresh(
+  network: BrowserNetwork,
+  voyageId: string,
+  message: MessageEntry,
+) {
+  const after = message.seq;
   await Promise.all(
-    (['notices', 'timeline'] as const).map((query) =>
+    refreshedBy(messageType(message)).map((query) =>
       network.waitFor(
         'finished',
         (finished) => {
@@ -106,7 +136,7 @@ export async function waitUntilLive(
     after,
     ...(timeoutMs !== undefined && { timeoutMs }),
   });
-  await waitForRefresh(network, voyageId, ready.seq);
+  await waitForRefresh(network, voyageId, ready);
   return ready;
 }
 
@@ -127,9 +157,9 @@ export function liveQueriesSent(
  *
  * - the stream that carried it was open since before `quiet` and still is, and no other stream
  *   connection was made meanwhile, so the page was live throughout and polling was off;
- * - no refetch of the notices or the timeline was in flight at `quiet`, and none was sent
- *   between `quiet` and the message;
- * - both were refetched after it.
+ * - no refetch of a live query was in flight at `quiet`, and none was sent between `quiet` and
+ *   the message;
+ * - after it, exactly the queries that message concerns were refetched, and no other live query.
  */
 export function expectRefreshCausedBy(
   network: BrowserNetwork,
@@ -162,8 +192,9 @@ export function expectRefreshCausedBy(
     liveQueriesSent(network, voyageId, { after: quiet, before: signal.seq }),
     `nothing refetched between #${quiet} and the signal #${signal.seq}${log}`,
   ).toEqual([]);
+  const expected = [...refreshedBy(messageType(signal))].sort();
   expect(
     [...new Set(liveQueriesSent(network, voyageId, { after: signal.seq }))].sort(),
-    `notices and timeline refetched after the signal #${signal.seq}${log}`,
-  ).toEqual(['notices', 'timeline']);
+    `${expected.join(', ')} refetched after the signal #${signal.seq}${log}`,
+  ).toEqual(expected);
 }

@@ -35,5 +35,6 @@ loading flags, caching, deduplication and invalidation.
 
 - Filter state survives reloads, works with back and forward, and can be shared as a link.
 - SSE signals map to `invalidateQueries` on the exact keys they affect, under the current
-  identity scope (today the notices and timeline of one voyage; [ADR 0015](0015-voyage-event-streams.md)).
+  identity scope (today the notices, documentary instructions and timeline of one voyage;
+  [ADR 0015](0015-voyage-event-streams.md)).
 - Teams must resist "just put it in the store". This ADR is the reference.

@@ -39,7 +39,8 @@ export class VoyageEventsController {
       'A `text/event-stream`. The first event is `READY`, sent once changes are being ' +
       'listened for: read what you display again after it, on every (re)connection. Then one ' +
       'event per change, only to the two counterparties of the contract it happened under ' +
-      '(today `NOTICE_ISSUED` and `NOTICE_ACKNOWLEDGED`), carrying its type and nothing else: ' +
+      '(today `NOTICE_ISSUED`, `NOTICE_ACKNOWLEDGED`, `DOCUMENTARY_INSTRUCTION_REVISED` and ' +
+      '`DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED`), carrying its type and nothing else: ' +
       'read the data through the REST endpoints. The session and participation are checked ' +
       `again before every event and at least every ${RECHECK_SECONDS} s; the stream ends ` +
       'when either is gone. Best effort: no ids, no replay, and only changes made through ' +

@@ -12,7 +12,12 @@ import { apiSchemaRegistry } from './registry.js';
  */
 
 /** Changes the stream signals. Each one is sent only to the two counterparties of its contract. */
-export const VOYAGE_CHANGE_TYPES = ['NOTICE_ISSUED', 'NOTICE_ACKNOWLEDGED'] as const;
+export const VOYAGE_CHANGE_TYPES = [
+  'NOTICE_ISSUED',
+  'NOTICE_ACKNOWLEDGED',
+  'DOCUMENTARY_INSTRUCTION_REVISED',
+  'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+] as const;
 
 export const VoyageChangeTypeSchema = z.enum(VOYAGE_CHANGE_TYPES);
 

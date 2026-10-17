@@ -1,9 +1,19 @@
 import { focusManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
-import type { Notice, TimelineEvent, VoyageDetail } from '@tradeflow/contracts';
+import type {
+  DocumentaryInstruction,
+  Notice,
+  TimelineEvent,
+  VoyageDetail,
+} from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
+import {
+  acknowledgedRevision,
+  anInstruction,
+  aRevision,
+} from '../../../test/fixtures/documentary-instructions';
 import {
   aCounterpartyContract,
   acknowledged,
@@ -44,6 +54,55 @@ const ana = aCurrentUser();
 const claire = anotherUser();
 const asBuyer = aCounterpartyContract({ side: 'BUYER' });
 
+/** Instructions under contract 1 as Claire's organization, its buyer, sees them. */
+const buyersView = (instruction: DocumentaryInstruction): DocumentaryInstruction => ({
+  ...instruction,
+  contract: asBuyer,
+});
+
+/** Revision 2, given by Lea, Claire's colleague, on top of `base`. */
+const revisedByColleague = (base: DocumentaryInstruction) =>
+  buyersView({
+    ...base,
+    version: base.version + 1,
+    currentRevision: aRevision({
+      number: base.currentRevision.number + 1,
+      consignee: 'To order of Another Bank AG',
+      createdBy: { name: 'Lea Brunner', organization: claire.organization },
+      createdAt: '2030-10-17T09:00:00.000Z',
+    }),
+    previousRevisions: [base.currentRevision, ...base.previousRevisions],
+  });
+
+const instructionEvent = (revisionNumber: number, version: number) => ({
+  contract: timelineContract1,
+  instructionId: anInstruction().id,
+  revisionNumber,
+  version,
+});
+/** Revision `revisionNumber`, given by Claire's side. */
+const instructionRevised = (n: number, revisionNumber: number, version = 1): TimelineEvent => ({
+  ...eventBase(n, undefined, claireActor),
+  ...instructionEvent(revisionNumber, version),
+  action: 'DOCUMENTARY_INSTRUCTION_REVISED',
+});
+/** Revision `revisionNumber`, acknowledged by Ana for the seller. */
+const instructionAcknowledged = (
+  n: number,
+  revisionNumber: number,
+  version: number,
+): TimelineEvent => ({
+  ...eventBase(n),
+  ...instructionEvent(revisionNumber, version),
+  action: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+});
+
+const contractName = 'Contract 1 · Cerrado Grãos Exportadora S.A. → Lacustra Commodities SA';
+
+/** The documentary instructions under contract 1. */
+const instructionPanel = async () =>
+  within(await screen.findByRole('listitem', { name: contractName }));
+
 type Endpoint =
   | 'voyage'
   | 'trade-string'
@@ -59,7 +118,11 @@ type Endpoint =
  * per endpoint.
  */
 function servePage(detail: VoyageDetail = voyage) {
-  const state = { notices: [] as Notice[], events: [] as TimelineEvent[] };
+  const state = {
+    notices: [] as Notice[],
+    instructions: [] as DocumentaryInstruction[],
+    events: [] as TimelineEvent[],
+  };
   const requests: Record<Endpoint, number> = {
     voyage: 0,
     'trade-string': 0,
@@ -93,7 +156,7 @@ function servePage(detail: VoyageDetail = voyage) {
     ),
     http.get(
       `${base}/documentary-instructions`,
-      counted('documentary-instructions', () => HttpResponse.json({ items: [] })),
+      counted('documentary-instructions', () => HttpResponse.json({ items: state.instructions })),
     ),
     http.get(
       `${base}/documents`,
@@ -194,7 +257,7 @@ describe('Live updates on the voyage page', () => {
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
-  it('reads the notices and the timeline again on READY, and nothing else', async () => {
+  it('reads the notices, the instructions and the timeline again on READY, and nothing else', async () => {
     const { requests } = servePage();
     renderRoute(page, { signedInAs: claire });
     const source = await theStream();
@@ -206,14 +269,15 @@ describe('Live updates on the voyage page', () => {
 
     await waitFor(() => {
       expect(requests.notices).toBe(2);
+      expect(requests['documentary-instructions']).toBe(2);
       expect(requests.timeline).toBe(2);
     });
     await quietly();
-    expect(requests).toMatchObject({
+    expect(requests).toEqual({
       voyage: 1,
       'trade-string': 1,
       'my-contracts': 1,
-      'documentary-instructions': 1,
+      'documentary-instructions': 2,
       documents: 1,
       notices: 2,
       timeline: 2,
@@ -225,19 +289,25 @@ describe('Live updates on the voyage page', () => {
     // change nobody will signal: READY must send reads of its own, not wait for those.
     const { state, requests } = servePage();
     const releases: (() => void)[] = [];
-    const held = (endpoint: 'notices' | 'timeline', respond: () => Response) => async () => {
-      requests[endpoint] += 1;
-      if (requests[endpoint] === 1) {
-        await new Promise<void>((resolve) => {
-          releases.push(resolve);
-        });
-      }
-      return respond();
-    };
+    const held =
+      (endpoint: 'notices' | 'documentary-instructions' | 'timeline', respond: () => Response) =>
+      async () => {
+        requests[endpoint] += 1;
+        if (requests[endpoint] === 1) {
+          await new Promise<void>((resolve) => {
+            releases.push(resolve);
+          });
+        }
+        return respond();
+      };
     server.use(
       http.get(
         `*/api/voyages/${voyage.id}/notices`,
         held('notices', () => HttpResponse.json({ items: state.notices })),
+      ),
+      http.get(
+        `*/api/voyages/${voyage.id}/documentary-instructions`,
+        held('documentary-instructions', () => HttpResponse.json({ items: state.instructions })),
       ),
       http.get(
         `*/api/voyages/${voyage.id}/timeline`,
@@ -247,18 +317,21 @@ describe('Live updates on the voyage page', () => {
     renderRoute(page, { signedInAs: claire });
     const source = await theStream();
     await waitFor(() => {
-      expect(releases).toHaveLength(2);
+      expect(releases).toHaveLength(3);
     });
+    expect(screen.getByLabelText('Loading documentary instructions')).toBeInTheDocument();
 
     // Committed after the first reads were answered from the database, before READY.
     state.notices = [aNotice({ contract: asBuyer })];
-    state.events = [noticeIssued(2)];
+    state.instructions = [buyersView(anInstruction())];
+    state.events = [instructionRevised(3, 1), noticeIssued(2)];
     act(() => {
       source.emit({ type: 'READY' });
     });
 
     await waitFor(() => {
       expect(requests.notices).toBe(2);
+      expect(requests['documentary-instructions']).toBe(2);
       expect(requests.timeline).toBe(2);
     });
     releases.forEach((release) => {
@@ -266,8 +339,11 @@ describe('Live updates on the voyage page', () => {
     });
     const notices = await screen.findByRole('list', { name: 'Notices' });
     expect(within(notices).getAllByRole('listitem')).toHaveLength(1);
+    const panel = await instructionPanel();
+    expect(await panel.findByRole('region', { name: 'Revision 1' })).toBeVisible();
     const timeline = await screen.findByRole('list', { name: 'Timeline' });
     expect(within(timeline).getByText('Issued a notice')).toBeInTheDocument();
+    expect(within(timeline).getByText('Gave documentary instructions')).toBeInTheDocument();
   });
 
   it("shows the buyer the seller's new notice, then its acknowledgement, as they are signalled", async () => {
@@ -406,6 +482,391 @@ describe('Live updates on the voyage page', () => {
   });
 });
 
+/** The query key of the voyage's documentary instructions for `identity`. */
+const diKey = (identity: typeof ana) => [
+  'protected',
+  `${identity.user.id}:${identity.organization.id}`,
+  'voyages',
+  'detail',
+  voyage.id,
+  'documentary-instructions',
+];
+
+describe('Documentary instructions over the stream', () => {
+  /** Renders the page for Claire, connected, past READY and its reads. */
+  async function liveForClaire(served: ReturnType<typeof servePage>) {
+    const rendered = renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    await loaded(served.requests);
+    act(() => {
+      source.emit({ type: 'READY' });
+    });
+    await waitFor(() => {
+      expect(served.requests).toMatchObject({
+        notices: 2,
+        'documentary-instructions': 2,
+        timeline: 2,
+      });
+    });
+    await quietly();
+    return { ...rendered, source };
+  }
+
+  it('reads each signal’s own resource and the timeline, and nothing else', async () => {
+    const served = servePage();
+    const { source } = await liveForClaire(served);
+
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+    });
+    await waitFor(() => {
+      expect(served.requests['documentary-instructions']).toBe(3);
+      expect(served.requests.timeline).toBe(3);
+    });
+    await quietly();
+    expect(served.requests.notices).toBe(2);
+
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+    });
+    await waitFor(() => {
+      expect(served.requests['documentary-instructions']).toBe(4);
+      expect(served.requests.timeline).toBe(4);
+    });
+
+    act(() => {
+      source.emit({ type: 'NOTICE_ISSUED' });
+    });
+    await waitFor(() => {
+      expect(served.requests.notices).toBe(3);
+      expect(served.requests.timeline).toBe(5);
+    });
+    await quietly();
+    expect(served.requests).toEqual({
+      voyage: 1,
+      'trade-string': 1,
+      'my-contracts': 1,
+      notices: 3,
+      'documentary-instructions': 4,
+      documents: 1,
+      timeline: 5,
+    });
+  });
+
+  it("shows the buyer a colleague's revision, then the seller's acknowledgement, as they are signalled", async () => {
+    const served = servePage();
+    const first = buyersView(anInstruction());
+    served.state.instructions = [first];
+    served.state.events = [instructionRevised(2, 1)];
+    const { source } = await liveForClaire(served);
+    const panel = await instructionPanel();
+    expect(panel.getByRole('region', { name: 'Revision 1' })).toBeVisible();
+
+    // Lea, Claire's colleague, revises elsewhere; the server signals it.
+    const second = revisedByColleague(first);
+    served.state.instructions = [second];
+    served.state.events = [instructionRevised(3, 2, 2), instructionRevised(2, 1)];
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+    });
+    const revision = await panel.findByRole('region', { name: 'Revision 2' });
+    expect(revision).toHaveTextContent('To order of Another Bank AG');
+    expect(revision).toHaveTextContent('Not acknowledged');
+    const timeline = await screen.findByRole('list', { name: 'Timeline' });
+    expect(
+      await within(timeline).findByText('Revised the documentary instructions (revision 2)'),
+    ).toBeInTheDocument();
+
+    // Ana acknowledges revision 2 for the seller.
+    served.state.instructions = [
+      { ...second, version: 3, currentRevision: acknowledgedRevision(second.currentRevision) },
+    ];
+    served.state.events = [instructionAcknowledged(4, 2, 3), ...served.state.events];
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+    });
+    await waitFor(() => {
+      expect(panel.getByRole('region', { name: 'Revision 2' })).toHaveTextContent(
+        'Acknowledged by the seller',
+      );
+    });
+    expect(
+      await within(timeline).findByText('Acknowledged revision 2 of the documentary instructions'),
+    ).toBeInTheDocument();
+  });
+
+  it('reads every resource that mixed signals asked for during a refresh, once each', async () => {
+    const served = servePage();
+    const { requests, state } = served;
+    const holding = new Set<'notices' | 'documentary-instructions'>();
+    const releases = new Map<string, () => void>();
+    const holdable =
+      (endpoint: 'notices' | 'documentary-instructions', respond: () => Response) => async () => {
+        requests[endpoint] += 1;
+        if (holding.delete(endpoint)) {
+          await new Promise<void>((resolve) => releases.set(endpoint, resolve));
+        }
+        return respond();
+      };
+    server.use(
+      http.get(
+        `*/api/voyages/${voyage.id}/notices`,
+        holdable('notices', () => HttpResponse.json({ items: state.notices })),
+      ),
+      http.get(
+        `*/api/voyages/${voyage.id}/documentary-instructions`,
+        holdable('documentary-instructions', () =>
+          HttpResponse.json({ items: state.instructions }),
+        ),
+      ),
+    );
+    const { source } = await liveForClaire(served);
+    const release = (endpoint: string) => {
+      const resolve = releases.get(endpoint);
+      releases.delete(endpoint);
+      resolve?.();
+    };
+
+    // A notice refresh is held; instruction and notice signals pile up meanwhile.
+    holding.add('notices');
+    act(() => {
+      source.emit({ type: 'NOTICE_ISSUED' });
+    });
+    await waitFor(() => {
+      expect(releases.has('notices')).toBe(true);
+    });
+    act(() => {
+      for (let i = 0; i < 5; i += 1) {
+        source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+        source.emit({ type: 'NOTICE_ACKNOWLEDGED' });
+        source.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      }
+    });
+    await quietly();
+    // Nothing more while one refresh runs.
+    expect(requests).toMatchObject({ notices: 3, 'documentary-instructions': 2, timeline: 3 });
+    act(() => {
+      release('notices');
+    });
+    // One more refresh, with reads sent after the signals: each resource once.
+    await waitFor(() => {
+      expect(requests).toMatchObject({ notices: 4, 'documentary-instructions': 3, timeline: 4 });
+    });
+    await quietly();
+    expect(requests).toMatchObject({ notices: 4, 'documentary-instructions': 3, timeline: 4 });
+
+    // The other way round: an instruction refresh is held, and a notice signal arrives.
+    holding.add('documentary-instructions');
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+    });
+    await waitFor(() => {
+      expect(releases.has('documentary-instructions')).toBe(true);
+    });
+    act(() => {
+      source.emit({ type: 'NOTICE_ISSUED' });
+    });
+    await quietly();
+    expect(requests).toMatchObject({ notices: 4, 'documentary-instructions': 4, timeline: 5 });
+    act(() => {
+      release('documentary-instructions');
+    });
+    await waitFor(() => {
+      expect(requests).toMatchObject({ notices: 5, timeline: 6 });
+    });
+    await quietly();
+    expect(requests).toMatchObject({ notices: 5, 'documentary-instructions': 4, timeline: 6 });
+  });
+
+  it("invalidates only this identity's instructions and timeline", async () => {
+    const { requests } = servePage();
+    const { queryClient } = renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    await loaded(requests);
+    // Data cached for someone else, for the same voyage.
+    queryClient.setQueryData(diKey(ana), { items: [] });
+
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+    });
+    await waitFor(() => {
+      expect(requests['documentary-instructions']).toBe(2);
+    });
+
+    expect(queryClient.getQueryState(diKey(ana))?.isInvalidated).toBe(false);
+    const claireScope = ['protected', `${claire.user.id}:${claire.organization.id}`];
+    const invalidated = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: claireScope })
+      .filter((query) => query.state.isInvalidated || query.state.dataUpdateCount > 1)
+      .map((query) => query.queryKey.at(-1));
+    expect(invalidated.sort()).toEqual(['documentary-instructions', 'timeline']);
+  });
+});
+
+describe('An open draft while revisions are pushed', () => {
+  interface Put {
+    body: unknown;
+    ifMatch: string | null;
+    ifNoneMatch: string | null;
+  }
+
+  /** Serves the PUT of contract 1's instructions with `respond`, recording what was sent. */
+  function servePut(respond: () => Promise<Response> | Response) {
+    const sent: Put[] = [];
+    server.use(
+      http.put(
+        `*/api/voyages/${voyage.id}/contracts/${asBuyer.id}/documentary-instructions`,
+        async ({ request }) => {
+          sent.push({
+            body: await request.json(),
+            ifMatch: request.headers.get('if-match'),
+            ifNoneMatch: request.headers.get('if-none-match'),
+          });
+          return respond();
+        },
+      ),
+    );
+    return sent;
+  }
+
+  async function openDraft(user: ReturnType<typeof renderRoute>['user']) {
+    const panel = await instructionPanel();
+    await user.click(await panel.findByRole('button', { name: 'Revise instructions' }));
+    const form = within(panel.getByRole('form', { name: 'Revise documentary instructions' }));
+    await user.clear(form.getByLabelText(/Consignee/));
+    await user.type(form.getByLabelText(/Consignee/), 'To order of My Bank');
+    return form;
+  }
+
+  it('keeps the draft and its version, and sends nothing until the user chooses', async () => {
+    const { state, requests } = servePage();
+    const first = buyersView(anInstruction());
+    state.instructions = [first];
+    const sent = servePut(() => {
+      const [current] = state.instructions;
+      if (!current) throw new Error('No instructions to revise');
+      const mine = buyersView({
+        ...current,
+        version: 4,
+        currentRevision: aRevision({ number: 3, consignee: 'To order of My Bank' }),
+        previousRevisions: [current.currentRevision, ...current.previousRevisions],
+      });
+      state.instructions = [mine];
+      return HttpResponse.json(mine, { headers: { ETag: '"4"' } });
+    });
+    const { user } = renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    act(() => {
+      source.emit({ type: 'READY' });
+    });
+    const form = await openDraft(user);
+    const before = requests['documentary-instructions'];
+
+    // Lea's revision 2 is pushed while Claire's draft, based on revision 1, is open.
+    const theirs = revisedByColleague(first);
+    state.instructions = [theirs];
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+    });
+    const latest = within(await form.findByRole('region', { name: 'Latest version' }));
+    expect(latest.getByText(/Revision 2 was given by Lea Brunner/)).toBeVisible();
+    expect(latest.getByText('To order of Another Bank AG')).toBeVisible();
+    expect(form.getByLabelText(/Consignee/)).toHaveValue('To order of My Bank');
+    expect(form.getByRole('button', { name: 'Send revision 2' })).toBeDisabled();
+
+    // Then the seller acknowledges it: still Claire's draft, still based on revision 1.
+    state.instructions = [
+      { ...theirs, version: 3, currentRevision: acknowledgedRevision(theirs.currentRevision) },
+    ];
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+    });
+    await waitFor(() => {
+      expect(latest.getByText('Acknowledged by the seller')).toBeVisible();
+    });
+    expect(requests['documentary-instructions']).toBe(before + 2);
+    expect(form.getByLabelText(/Consignee/)).toHaveValue('To order of My Bank');
+    expect(form.getByRole('button', { name: 'Send revision 2' })).toBeDisabled();
+    await quietly();
+    // Nothing was sent, rebased or retried behind the user's back.
+    expect(sent).toEqual([]);
+
+    // Only the user's choice bases the draft on the newer version, which is what is then sent.
+    await user.click(latest.getByRole('button', { name: 'Base my draft on revision 2' }));
+    expect(form.getByLabelText(/Consignee/)).toHaveValue('To order of My Bank');
+    await user.click(form.getByRole('button', { name: 'Send revision 3' }));
+    expect(
+      await screen.findByText(
+        'Revision 3 has been sent to Cerrado Grãos Exportadora S.A. for acknowledgement.',
+      ),
+    ).toBeVisible();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      ifMatch: '"3"',
+      ifNoneMatch: null,
+      body: { consignee: 'To order of My Bank' },
+    });
+  });
+
+  it('shows no conflict when its own revision is signalled before the response', async () => {
+    const { state, requests } = servePage();
+    const first = buyersView(anInstruction());
+    state.instructions = [first];
+    const mine = buyersView({
+      ...first,
+      version: 2,
+      currentRevision: aRevision({ number: 2, consignee: 'To order of My Bank' }),
+      previousRevisions: [first.currentRevision],
+    });
+    let arrived: () => void = () => undefined;
+    const received = new Promise<void>((resolve) => (arrived = resolve));
+    let respond: () => void = () => undefined;
+    const answered = new Promise<void>((resolve) => (respond = resolve));
+    const sent = servePut(async () => {
+      // Committed: the server signals it before this response reaches the browser.
+      state.instructions = [mine];
+      arrived();
+      await answered;
+      return HttpResponse.json(mine, { headers: { ETag: '"2"' } });
+    });
+    const { user, queryClient } = renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    act(() => {
+      source.emit({ type: 'READY' });
+    });
+    const form = await openDraft(user);
+    await user.click(form.getByRole('button', { name: 'Send revision 2' }));
+    await received;
+
+    const before = requests['documentary-instructions'];
+    act(() => {
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+    });
+    await waitFor(() => {
+      expect(
+        queryClient.getQueryData<{ items: DocumentaryInstruction[] }>(diKey(claire))?.items[0]
+          ?.version,
+      ).toBe(2);
+    });
+    expect(requests['documentary-instructions']).toBe(before + 1);
+    // The write is still on its way: its answer decides, not the refresh.
+    expect(form.queryByRole('region', { name: 'Latest version' })).not.toBeInTheDocument();
+    expect(form.getByLabelText(/Consignee/)).toHaveValue('To order of My Bank');
+
+    respond();
+    expect(
+      await screen.findByText(
+        'Revision 2 has been sent to Cerrado Grãos Exportadora S.A. for acknowledgement.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('form', { name: 'Revise documentary instructions' }),
+    ).not.toBeInTheDocument();
+    expect(sent.map(({ ifMatch }) => ifMatch)).toEqual(['"1"']);
+  });
+});
+
 describe('Reconnecting and polling', () => {
   it('reads again after the browser reconnects, and polls while it is away', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -418,11 +879,13 @@ describe('Reconnecting and polling', () => {
     });
     await waitFor(() => {
       expect(requests.notices).toBe(2);
+      expect(requests['documentary-instructions']).toBe(2);
     });
 
     // Live: no polling.
     await act(() => vi.advanceTimersByTimeAsync(2 * FALLBACK_POLL_INTERVAL_MS));
     expect(requests.notices).toBe(2);
+    expect(requests['documentary-instructions']).toBe(2);
     expect(requests.timeline).toBe(2);
 
     // The connection drops; the browser reconnects by itself. Meanwhile, the page polls.
@@ -432,6 +895,7 @@ describe('Reconnecting and polling', () => {
     await act(() => vi.advanceTimersByTimeAsync(FALLBACK_POLL_INTERVAL_MS));
     await waitFor(() => {
       expect(requests.notices).toBe(3);
+      expect(requests['documentary-instructions']).toBe(3);
       expect(requests.timeline).toBe(3);
     });
 
@@ -441,10 +905,12 @@ describe('Reconnecting and polling', () => {
     });
     await waitFor(() => {
       expect(requests.notices).toBe(4);
+      expect(requests['documentary-instructions']).toBe(4);
       expect(requests.timeline).toBe(4);
     });
     await act(() => vi.advanceTimersByTimeAsync(2 * FALLBACK_POLL_INTERVAL_MS));
     expect(requests.notices).toBe(4);
+    expect(requests['documentary-instructions']).toBe(4);
     // Nothing else was ever refetched.
     expect(requests.documents).toBe(1);
     expect(FakeEventSource.instances).toHaveLength(1);
@@ -460,6 +926,7 @@ describe('Reconnecting and polling', () => {
     await act(() => vi.advanceTimersByTimeAsync(FALLBACK_POLL_INTERVAL_MS));
     await waitFor(() => {
       expect(requests.notices).toBe(2);
+      expect(requests['documentary-instructions']).toBe(2);
       expect(requests.timeline).toBe(2);
     });
 
@@ -468,6 +935,7 @@ describe('Reconnecting and polling', () => {
     });
     await act(() => vi.advanceTimersByTimeAsync(3 * FALLBACK_POLL_INTERVAL_MS));
     expect(requests.notices).toBe(2);
+    expect(requests['documentary-instructions']).toBe(2);
     expect(requests.timeline).toBe(2);
   });
 
@@ -542,9 +1010,11 @@ describe('The stream belongs to the voyage and the session it was opened for', (
     expect(source.readyState).toBe(FakeEventSource.CLOSED);
     act(() => {
       source.emit({ type: 'NOTICE_ISSUED' });
+      source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
     });
     await quietly();
     expect(requests.notices).toBe(1);
+    expect(requests['documentary-instructions']).toBe(1);
     expect(
       await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
     ).toBeInTheDocument();
@@ -563,20 +1033,29 @@ describe('The stream belongs to the voyage and the session it was opened for', (
     expect(after).not.toBe(before);
     await quietly();
     const settled = requests.notices;
+    const settledInstructions = requests['documentary-instructions'];
 
     // The old stream speaks for the session that was signed out, though it was Claire's too.
     act(() => {
       before.emit({ type: 'READY' });
       before.emit({ type: 'NOTICE_ISSUED' });
+      before.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
     });
     await quietly();
     expect(requests.notices).toBe(settled);
+    expect(requests['documentary-instructions']).toBe(settledInstructions);
 
     act(() => {
       after.emit({ type: 'NOTICE_ISSUED' });
     });
     await waitFor(() => {
       expect(requests.notices).toBe(settled + 1);
+    });
+    act(() => {
+      after.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+    });
+    await waitFor(() => {
+      expect(requests['documentary-instructions']).toBe(settledInstructions + 1);
     });
   });
 
@@ -603,19 +1082,28 @@ describe('The stream belongs to the voyage and the session it was opened for', (
       expect(requests.notices).toBe(3);
     });
 
+    await waitFor(() => {
+      expect(requests['documentary-instructions']).toBe(3);
+    });
+
     // Claire's first stream speaks for a session that has ended, though she is back.
     act(() => {
       claires.emit({ type: 'NOTICE_ISSUED' });
+      claires.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
       anas.emit({ type: 'NOTICE_ISSUED' });
+      anas.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
     });
     await quietly();
     expect(requests.notices).toBe(3);
+    expect(requests['documentary-instructions']).toBe(3);
 
     act(() => {
       clairesAgain.emit({ type: 'NOTICE_ISSUED' });
+      clairesAgain.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
     });
     await waitFor(() => {
       expect(requests.notices).toBe(4);
+      expect(requests['documentary-instructions']).toBe(4);
     });
     expect(FakeEventSource.open()).toEqual([clairesAgain]);
   });

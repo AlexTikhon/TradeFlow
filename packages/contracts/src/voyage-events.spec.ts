@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { VoyageStreamMessageSchema } from './voyage-events.js';
 
 describe('VoyageStreamMessageSchema', () => {
-  it.each(['READY', 'NOTICE_ISSUED', 'NOTICE_ACKNOWLEDGED'])('accepts %s', (type) => {
+  it.each([
+    'READY',
+    'NOTICE_ISSUED',
+    'NOTICE_ACKNOWLEDGED',
+    'DOCUMENTARY_INSTRUCTION_REVISED',
+    'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+  ])('accepts %s', (type) => {
     expect(VoyageStreamMessageSchema.parse({ type })).toEqual({ type });
   });
 
@@ -14,6 +20,14 @@ describe('VoyageStreamMessageSchema', () => {
         payload: { message: 'secret' },
       }),
     ).toEqual({ type: 'NOTICE_ISSUED' });
+    expect(
+      VoyageStreamMessageSchema.parse({
+        type: 'DOCUMENTARY_INSTRUCTION_REVISED',
+        instructionId: '01990000-0000-7000-800a-000000000001',
+        version: 2,
+        consignee: 'To order of a confidential bank',
+      }),
+    ).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
   });
 
   it.each([

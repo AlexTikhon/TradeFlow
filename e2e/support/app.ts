@@ -48,6 +48,60 @@ export const timelineEntry = (page: Page, description: string) =>
     .getByRole('listitem')
     .filter({ hasText: description });
 
+/** The documentary instructions under the voyage's only contract. */
+export const instructionPanel = (page: Page) =>
+  page
+    .getByRole('list', { name: 'Documentary instructions by contract' })
+    .getByRole('listitem', { name: /^Contract 1 · / });
+
+/** One revision as the panel shows it (outside any open form). */
+export const instructionRevision = (page: Page, number: number) =>
+  instructionPanel(page).getByRole('region', { name: `Revision ${number}`, exact: true });
+
+/** Opens the buyer's form: for the first instructions, or for a revision of the current ones. */
+export async function openInstructionForm(page: Page, kind: 'give' | 'revise') {
+  const [button, form] =
+    kind === 'give'
+      ? ['Give documentary instructions', 'Give documentary instructions']
+      : ['Revise instructions', 'Revise documentary instructions'];
+  const panel = instructionPanel(page);
+  await panel.getByRole('button', { name: button }).click();
+  return panel.getByRole('form', { name: form });
+}
+
+/** Gives the first instructions through the panel's form, as the buyer, and waits for success. */
+export async function giveInstructions(page: Page, scenario: Scenario, consignee: string) {
+  const form = await openInstructionForm(page, 'give');
+  await form.getByLabel('Consignee').fill(consignee);
+  const row = form.getByRole('listitem', { name: 'Required document 1' });
+  await row.getByLabel('Document', { exact: true }).selectOption('BILL_OF_LADING');
+  await row.getByLabel('Originals', { exact: true }).fill('3');
+  await row.getByLabel('Copies', { exact: true }).fill('2');
+  await form.getByRole('button', { name: 'Send instructions' }).click();
+  await expectInstructionsSent(page, scenario, 1);
+}
+
+/** Revises the current instructions with a new consignee, and waits for success. */
+export async function reviseInstructions(
+  page: Page,
+  scenario: Scenario,
+  consignee: string,
+  revision: number,
+) {
+  const form = await openInstructionForm(page, 'revise');
+  await form.getByLabel('Consignee').fill(consignee);
+  await form.getByRole('button', { name: `Send revision ${revision}` }).click();
+  await expectInstructionsSent(page, scenario, revision);
+}
+
+export async function expectInstructionsSent(page: Page, scenario: Scenario, revision: number) {
+  await expect(
+    instructionPanel(page).getByText(
+      `Revision ${revision} has been sent to ${scenario.seller.organizationName} for acknowledgement.`,
+    ),
+  ).toBeVisible();
+}
+
 /** A `datetime-local` value. Contexts run in UTC, so the local time is the UTC time. */
 const localInput = (epochMs: number) => new Date(epochMs).toISOString().slice(0, 16);
 

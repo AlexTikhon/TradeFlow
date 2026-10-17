@@ -22,9 +22,14 @@ export interface Scenario {
   seller: Party;
   /** An operator of the final buyer, who buys under it. */
   buyer: Party;
+  /** Another operator of the final buyer: the buyer's colleague, on a machine of their own. */
+  buyerColleague: Party;
 }
 
-/** Exporter → final buyer, one contract between them, each side with one operator. */
+/**
+ * Exporter → final buyer, one contract between them; one operator for the seller, two for the
+ * buyer.
+ */
 export async function createScenario(pool: pg.Pool, passwordHash: string): Promise<Scenario> {
   const tag = randomBytes(4).toString('hex');
   const seller: Party = {
@@ -36,6 +41,11 @@ export async function createScenario(pool: pg.Pool, passwordHash: string): Promi
     email: `buyer.${tag}@buyer.e2e.example`,
     fullName: `Bruno Buyer ${tag}`,
     organizationName: `Final Buyer ${tag} GmbH`,
+  };
+  const buyerColleague: Party = {
+    email: `colleague.${tag}@buyer.e2e.example`,
+    fullName: `Carla Colleague ${tag}`,
+    organizationName: buyer.organizationName,
   };
   const reference = `E2E-${tag.toUpperCase()}`;
 
@@ -59,6 +69,7 @@ export async function createScenario(pool: pg.Pool, passwordHash: string): Promi
     const buyerOrganization = await organization(buyer.organizationName, 'DE');
     await user(sellerOrganization.id, seller);
     await user(buyerOrganization.id, buyer);
+    await user(buyerOrganization.id, buyerColleague);
 
     const voyage = await one<{ id: string }>(
       client,
@@ -92,7 +103,7 @@ export async function createScenario(pool: pg.Pool, passwordHash: string): Promi
       [voyage.id, exporter.id, finalBuyer.id],
     );
     await client.query('COMMIT');
-    return { voyage: { id: voyage.id, reference }, seller, buyer };
+    return { voyage: { id: voyage.id, reference }, seller, buyer, buyerColleague };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

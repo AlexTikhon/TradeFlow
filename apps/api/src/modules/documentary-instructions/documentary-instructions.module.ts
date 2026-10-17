@@ -7,8 +7,9 @@ import { InstructionRevisions } from './instruction-revisions.js';
 
 /**
  * Owns `documentary_instructions` and their revisions and acknowledgements. Resolves sale
- * contracts through the voyages module's `CounterpartyContracts` and records its actions
- * through `AuditTrail`; it reads neither module's tables itself.
+ * contracts through the voyages module's `CounterpartyContracts`, records its actions through
+ * `AuditTrail`, and announces committed changes through the voyages module's `VoyageEventBus`;
+ * it reads neither module's tables itself.
  */
 @Module({
   imports: [VoyagesModule, AuditModule],

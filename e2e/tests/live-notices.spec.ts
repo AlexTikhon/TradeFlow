@@ -57,7 +57,7 @@ test('a notice and its acknowledgement reach the other side over the event strea
   const sellerIssued = await waitForMessage(sellerTab.network, voyage.id, 'NOTICE_ISSUED', {
     after: sellerBeforeIssue,
   });
-  await waitForRefresh(sellerTab.network, voyage.id, sellerIssued.seq);
+  await waitForRefresh(sellerTab.network, voyage.id, sellerIssued);
   const sellerNotice = noticeItem(sellerTab.page, message);
   await expect(sellerNotice).toContainText('Awaiting acknowledgement');
 

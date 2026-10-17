@@ -1,4 +1,6 @@
 import {
+  type DocumentaryInstructionContent,
+  DocumentaryInstructionSchema,
   type IssueNoticeRequest,
   NoticeSchema,
   ProblemDetailsSchema,
@@ -45,6 +47,22 @@ const MISSING_ID = '01990000-0000-7000-8009-999999999999';
 const READY = JSON.stringify({ type: 'READY' });
 const ISSUED = JSON.stringify({ type: 'NOTICE_ISSUED' });
 const ACKNOWLEDGED = JSON.stringify({ type: 'NOTICE_ACKNOWLEDGED' });
+const REVISED = JSON.stringify({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+const DI_ACKNOWLEDGED = JSON.stringify({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+
+const firstContent: DocumentaryInstructionContent = {
+  consignee: 'To order of Confidential Bank S.A.',
+  notifyParty: 'Trader SA\nRue du Rhône 1, Geneva',
+  requirements: [{ document: 'BILL_OF_LADING', originals: 3, copies: 3 }],
+};
+
+const secondContent: DocumentaryInstructionContent = {
+  consignee: 'To order of Confidential Bank S.A.',
+  requirements: [
+    { document: 'BILL_OF_LADING', originals: 3, copies: 2 },
+    { document: 'CERTIFICATE_OF_ORIGIN', originals: 1, copies: 1 },
+  ],
+};
 
 /** Rechecks often, so idle streams notice an ended session and heartbeats serve as barriers. */
 const FAST_RECHECK_MS = 100;
@@ -194,6 +212,61 @@ describe('Voyage event streams', () => {
   async function settled(stream: EventStream) {
     await stream.comment(stream.comments.length + 2);
   }
+
+  const instructionPath = (voyageId: string, contractId: string) =>
+    `/api/voyages/${voyageId}/contracts/${contractId}/documentary-instructions`;
+
+  const putInstruction = (
+    cookie: string,
+    voyageId: string,
+    contractId: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ) =>
+    http()
+      .put(instructionPath(voyageId, contractId))
+      .set('Cookie', cookie)
+      .set(headers)
+      .send(body as object);
+
+  /** The first instructions under `contractId` (If-None-Match: *). */
+  const give = (cookie: string, voyageId: string, contractId: string, body = firstContent) =>
+    putInstruction(cookie, voyageId, contractId, body, { 'If-None-Match': '*' });
+
+  /** The next revision, based on `version` (If-Match). */
+  const revise = (
+    cookie: string,
+    voyageId: string,
+    contractId: string,
+    version: number,
+    body: unknown = secondContent,
+  ) => putInstruction(cookie, voyageId, contractId, body, { 'If-Match': `"${version}"` });
+
+  /** Acknowledges revision `revision` as read at `version`; no If-Match when it is omitted. */
+  const acknowledgeRevision = (
+    cookie: string,
+    voyageId: string,
+    contractId: string,
+    revision: number,
+    version?: number,
+  ) => {
+    const call = http()
+      .post(`${instructionPath(voyageId, contractId)}/revisions/${revision}/acknowledgement`)
+      .set('Cookie', cookie);
+    return version === undefined ? call : call.set('If-Match', `"${version}"`);
+  };
+
+  async function given(cookie: string, voyageId: string, contractId: string) {
+    const response = await give(cookie, voyageId, contractId).expect(201);
+    return DocumentaryInstructionSchema.parse(response.body);
+  }
+
+  const instructionWrites = async () => ({
+    instructions: await ctx.prisma.documentaryInstruction.count(),
+    revisions: await ctx.prisma.documentaryInstructionRevision.count(),
+    acknowledgements: await ctx.prisma.documentaryInstructionAcknowledgement.count(),
+    auditEvents: await ctx.prisma.auditEvent.count(),
+  });
 
   describe('opening a stream', () => {
     it('streams to a participant: event-stream headers, then READY', async () => {
@@ -410,6 +483,271 @@ describe('Voyage event streams', () => {
       expect(await buyer.next()).toEqual({ type: 'NOTICE_ISSUED' });
       expect(seller.data).toEqual([READY, ISSUED]);
       expect(buyer.data).toEqual([READY, ISSUED]);
+    });
+  });
+
+  describe('documentary instructions', () => {
+    // Under c1 the exporter sells and the trader buys: the trader gives, the exporter acknowledges.
+
+    it("tells only the contract's counterparties, and only the type of change", async () => {
+      const s = await scenario();
+      const sellerOperator = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const sellerViewer = await listen(s.exporter.viewer.cookie, s.voyage.id);
+      const buyerViewer = await listen(s.trader.viewer.cookie, s.voyage.id);
+      // A party to c2 only, a service provider, and a party to a contract on another voyage.
+      const nextBuyer = await listen(s.buyer.viewer.cookie, s.voyage.id);
+      const surveyor = await listen(s.surveyor.viewer.cookie, s.voyage.id);
+      const exporterElsewhere = await listen(s.exporter.viewer.cookie, s.other.id);
+      const c1Parties = [sellerOperator, sellerViewer, buyerViewer];
+
+      const instruction = await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+      for (const stream of c1Parties) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      }
+      await acknowledgeRevision(s.exporter.operator.cookie, s.voyage.id, s.c1, 1, 1).expect(200);
+      for (const stream of c1Parties) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      }
+      await revise(s.trader.operator.cookie, s.voyage.id, s.c1, 2).expect(200);
+      for (const stream of c1Parties) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      }
+
+      // Barriers: instructions under c2 reach both its parties, under d1 both parties there.
+      await given(s.buyer.operator.cookie, s.voyage.id, s.c2);
+      await given(s.buyer.operator.cookie, s.other.id, s.d1);
+      for (const stream of [nextBuyer, buyerViewer, exporterElsewhere]) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      }
+      await settled(surveyor);
+      await settled(sellerOperator);
+
+      expect(sellerOperator.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED, REVISED]);
+      expect(sellerViewer.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED, REVISED]);
+      expect(buyerViewer.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED, REVISED, REVISED]);
+      expect(nextBuyer.data).toEqual([READY, REVISED]);
+      expect(surveyor.data).toEqual([READY]);
+      expect(exporterElsewhere.data).toEqual([READY, REVISED]);
+      // Exactly the type: no ids, no version, no contents.
+      for (const raw of buyerViewer.data) {
+        expect(Object.keys(JSON.parse(raw) as object)).toEqual(['type']);
+        expect(raw).not.toContain(instruction.id);
+        expect(raw).not.toContain(s.c1);
+        expect(raw).not.toContain('Confidential');
+      }
+    });
+
+    it('tells nobody about a refused or failed-precondition command', async () => {
+      const s = await scenario();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.operator.cookie, s.voyage.id);
+      const { cookie: buyerCookie } = s.trader.operator;
+      const { cookie: sellerCookie } = s.exporter.operator;
+      const bothHear = async (type: string) => {
+        for (const stream of [seller, buyer]) expect(await stream.next()).toEqual({ type });
+      };
+
+      // The seller giving (403), a viewer of the buyer (403), no precondition (428), invalid
+      // content (400), someone else's contract (404), and a revision of nothing (412).
+      await give(sellerCookie, s.voyage.id, s.c1).expect(403);
+      await give(s.trader.viewer.cookie, s.voyage.id, s.c1).expect(403);
+      await putInstruction(buyerCookie, s.voyage.id, s.c1, firstContent, {}).expect(428);
+      await give(buyerCookie, s.voyage.id, s.c1, { ...firstContent, requirements: [] }).expect(400);
+      await give(sellerCookie, s.voyage.id, s.c2).expect(404);
+      await revise(buyerCookie, s.voyage.id, s.c1, 1).expect(412);
+      expect(bus.published).toEqual([]);
+
+      await given(buyerCookie, s.voyage.id, s.c1);
+      await bothHear('DOCUMENTARY_INSTRUCTION_REVISED');
+
+      // A second creation (412), a stale If-Match (412), a revision that changes nothing (400);
+      // an acknowledgement without If-Match (428), at a stale version (412), by the buyer (403),
+      // of a revision that does not exist (404).
+      await give(buyerCookie, s.voyage.id, s.c1).expect(412);
+      await revise(buyerCookie, s.voyage.id, s.c1, 7).expect(412);
+      await revise(buyerCookie, s.voyage.id, s.c1, 1, firstContent).expect(400);
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 1).expect(428);
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 1, 7).expect(412);
+      await acknowledgeRevision(buyerCookie, s.voyage.id, s.c1, 1, 1).expect(403);
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 2, 1).expect(404);
+
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 1, 1).expect(200);
+      await bothHear('DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED');
+      // Acknowledged once already (409); then superseded by revision 2 (409).
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 1, 2).expect(409);
+      await revise(buyerCookie, s.voyage.id, s.c1, 2).expect(200);
+      await bothHear('DOCUMENTARY_INSTRUCTION_REVISED');
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 1, 3).expect(409);
+
+      // The barrier: one more change, after every refusal above.
+      await acknowledgeRevision(sellerCookie, s.voyage.id, s.c1, 2, 3).expect(200);
+      await bothHear('DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED');
+      for (const stream of [seller, buyer]) {
+        expect(stream.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED, REVISED, DI_ACKNOWLEDGED]);
+      }
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENTARY_INSTRUCTION_REVISED',
+        'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+        'DOCUMENTARY_INSTRUCTION_REVISED',
+        'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+      ]);
+    });
+
+    it('signals nothing when a write rolls back', async () => {
+      const s = await scenario();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+
+      await failAuditWrites(ctx.prisma, async () => {
+        await give(s.trader.operator.cookie, s.voyage.id, s.c1).expect(500);
+      });
+      expect(await instructionWrites()).toEqual({
+        instructions: 0,
+        revisions: 0,
+        acknowledgements: 0,
+        auditEvents: 0,
+      });
+      expect(bus.published).toEqual([]);
+
+      // The barrier: the next change is the first either stream hears of.
+      await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+
+      await failAuditWrites(ctx.prisma, async () => {
+        await acknowledgeRevision(s.exporter.operator.cookie, s.voyage.id, s.c1, 1, 1).expect(500);
+        await revise(s.trader.operator.cookie, s.voyage.id, s.c1, 1).expect(500);
+      });
+      expect(await instructionWrites()).toEqual({
+        instructions: 1,
+        revisions: 1,
+        acknowledgements: 0,
+        auditEvents: 1,
+      });
+      await acknowledgeRevision(s.exporter.operator.cookie, s.voyage.id, s.c1, 1, 1).expect(200);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+
+      expect(seller.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED]);
+      expect(buyer.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED]);
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENTARY_INSTRUCTION_REVISED',
+        'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+      ]);
+    });
+
+    /** Holds the instruction row's lock until both requests are blocked on it, then releases. */
+    async function race(instructionId: string, contenders: (() => PromiseLike<number>)[]) {
+      const lock = await holdLock(
+        ctx.prisma,
+        (tx) =>
+          tx.$queryRaw`SELECT id FROM documentary_instructions WHERE id = ${instructionId}::uuid FOR UPDATE`,
+      );
+      const statuses = Promise.all(contenders.map((send) => Promise.resolve(send())));
+      await waitForLockWaiters(ctx.prisma, contenders.length);
+      await lock.release();
+      return (await statuses).sort();
+    }
+
+    it('signals one acknowledgement when two race', async () => {
+      const s = await scenario();
+      const instruction = await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+      const colleague = await createUser(ctx.prisma, s.exporter.organization.id, {
+        role: 'OPERATOR',
+      });
+      const colleagueCookie = await signIn(ctx.server, colleague.email);
+      const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+
+      const statuses = await race(
+        instruction.id,
+        [s.exporter.operator.cookie, colleagueCookie].map(
+          (cookie) => () =>
+            acknowledgeRevision(cookie, s.voyage.id, s.c1, 1, 1).then(({ status }) => status),
+        ),
+      );
+      // The loser finds the version moved on.
+      expect(statuses).toEqual([200, 412]);
+      expect(await ctx.prisma.documentaryInstructionAcknowledgement.count()).toBe(1);
+
+      // The barrier: a revision based on the acknowledged version.
+      await revise(s.trader.operator.cookie, s.voyage.id, s.c1, 2).expect(200);
+      for (const stream of [seller, buyer]) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+        expect(stream.data).toEqual([READY, DI_ACKNOWLEDGED, REVISED]);
+      }
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENTARY_INSTRUCTION_REVISED',
+        'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+        'DOCUMENTARY_INSTRUCTION_REVISED',
+      ]);
+    });
+
+    it('signals one revision when two revisions of the same version race', async () => {
+      const s = await scenario();
+      const instruction = await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+      const colleague = await createUser(ctx.prisma, s.trader.organization.id, {
+        role: 'OPERATOR',
+      });
+      const colleagueCookie = await signIn(ctx.server, colleague.email);
+      const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
+
+      const statuses = await race(instruction.id, [
+        () => revise(s.trader.operator.cookie, s.voyage.id, s.c1, 1).then(({ status }) => status),
+        () =>
+          revise(colleagueCookie, s.voyage.id, s.c1, 1, {
+            ...secondContent,
+            consignee: 'To order of Another Bank AG',
+          }).then(({ status }) => status),
+      ]);
+      expect(statuses).toEqual([200, 412]);
+
+      // The barrier: the seller acknowledges the winning revision.
+      await acknowledgeRevision(s.exporter.operator.cookie, s.voyage.id, s.c1, 2, 2).expect(200);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      expect(await seller.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      expect(seller.data).toEqual([READY, REVISED, DI_ACKNOWLEDGED]);
+    });
+
+    it('keeps a committed command successful when the notification fails', async () => {
+      const s = await scenario();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.operator.cookie, s.voyage.id);
+
+      bus.failNext();
+      const created = await give(s.trader.operator.cookie, s.voyage.id, s.c1).expect(201);
+      expect(created.headers.etag).toBe('"1"');
+      expect(DocumentaryInstructionSchema.parse(created.body).version).toBe(1);
+
+      bus.failNext();
+      const acknowledged = await acknowledgeRevision(
+        s.exporter.operator.cookie,
+        s.voyage.id,
+        s.c1,
+        1,
+        1,
+      ).expect(200);
+      expect(
+        DocumentaryInstructionSchema.parse(acknowledged.body).currentRevision.acknowledgement,
+      ).not.toBeNull();
+
+      bus.failNext();
+      const revised = await revise(s.trader.operator.cookie, s.voyage.id, s.c1, 2).expect(200);
+      expect(revised.headers.etag).toBe('"3"');
+      expect(await instructionWrites()).toEqual({
+        instructions: 1,
+        revisions: 2,
+        acknowledgements: 1,
+        auditEvents: 3,
+      });
+
+      // Nothing was signalled, and the streams are still open and working (the barrier).
+      await acknowledgeRevision(s.exporter.operator.cookie, s.voyage.id, s.c1, 2, 3).expect(200);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      expect(seller.data).toEqual([READY, DI_ACKNOWLEDGED]);
+      expect(buyer.data).toEqual([READY, DI_ACKNOWLEDGED]);
     });
   });
 

@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   PreconditionFailedException,
 } from '@nestjs/common';
@@ -19,6 +20,7 @@ import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { requireOperator } from '../auth/user-permissions.js';
 import { CounterpartyContracts } from '../voyages/counterparty-contracts.js';
+import { type VoyageChange, VoyageEventBus } from '../voyages/voyage-event-bus.js';
 import { sameContent, toStoredContent } from './instruction-rules.js';
 import {
   instructionSelect,
@@ -43,14 +45,18 @@ export interface PutResult {
  * Each read takes the contracts and the instructions from one snapshot (`readSnapshot`).
  * Commands check the user's role and the organization's side of the contract here, then make
  * one conditional write (`instruction.writes.ts`) and record its audit event in the same
- * transaction. A failed precondition changes nothing and records nothing.
+ * transaction. A failed precondition changes nothing and records nothing. Once that transaction
+ * has committed, and only then, they announce the change to open voyage streams.
  */
 @Injectable()
 export class DocumentaryInstructionsService {
+  private readonly logger = new Logger(DocumentaryInstructionsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly contracts: CounterpartyContracts,
     private readonly audit: AuditTrail,
+    private readonly events: VoyageEventBus,
   ) {}
 
   /**
@@ -136,7 +142,7 @@ export class DocumentaryInstructionsService {
     requireOperator(principal, 'give documentary instructions');
     const content = toStoredContent(request);
 
-    return this.prisma.$transaction(async (tx) => {
+    const written = await this.prisma.$transaction(async (tx) => {
       const contract = await this.contracts.findForVoyage(principal, voyageId, contractId, tx);
       if (!contract) {
         return null;
@@ -234,6 +240,13 @@ export class DocumentaryInstructionsService {
         created: precondition.kind === 'absent',
       };
     });
+    if (!written) return null;
+    this.announce({
+      type: 'DOCUMENTARY_INSTRUCTION_REVISED',
+      voyageId,
+      contractId: written.instruction.contract.id,
+    });
+    return written;
   }
 
   /**
@@ -250,7 +263,7 @@ export class DocumentaryInstructionsService {
   ): Promise<DocumentaryInstruction | null> {
     requireOperator(principal, 'acknowledge documentary instructions');
 
-    return this.prisma.$transaction(async (tx) => {
+    const acknowledged = await this.prisma.$transaction(async (tx) => {
       const contract = await this.contracts.findForVoyage(principal, voyageId, contractId, tx);
       if (!contract) {
         return null;
@@ -303,6 +316,30 @@ export class DocumentaryInstructionsService {
       });
       return readWritten(tx, instruction.id, contract);
     });
+    if (!acknowledged) return null;
+    this.announce({
+      type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED',
+      voyageId,
+      contractId: acknowledged.contract.id,
+    });
+    return acknowledged;
+  }
+
+  /**
+   * Tells open voyage streams about a change that has committed. Called after the transaction,
+   * never inside it: a write that rolled back, failed its precondition (412) or lost its race is
+   * never announced. Best effort: the change stands whatever happens here, so a failure is
+   * logged and the command still succeeds.
+   */
+  private announce(change: VoyageChange): void {
+    try {
+      this.events.publish(change);
+    } catch (error) {
+      this.logger.error(
+        `Could not announce ${change.type} on voyage ${change.voyageId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 }
 

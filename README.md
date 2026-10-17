@@ -13,7 +13,7 @@ Every party in that chain works on the same physical shipment, but each has sepa
 documents and obligations. TradeFlow models that shared workspace. Today that means voyages, the
 organizations taking part in them, the trade string, ETA notices from sellers to buyers,
 documentary instructions from buyers to sellers, the documents sellers present against them, and
-the buyers' decisions on those documents, with a timeline of who did what; notices and the timeline update live as notices change.
+the buyers' decisions on those documents, with a timeline of who did what; notices, documentary instructions and the timeline update live as notices and instructions change.
 Next come further notices, deadlines and workflow.
 
 > This is an engineering portfolio project. It is inspired by real commodity-shipping workflow
@@ -33,7 +33,7 @@ Next come further notices, deadlines and workflow.
 | Instructions | Documentary instructions from the buyer to the seller under one contract (consignee, notify party, up to eight required documents), counterparty-only; immutable revisions, the seller acknowledges an exact revision, a new revision starts unacknowledged; every write is one conditional SQL statement, so races end in one success and one 412 ([ADR 0012](docs/decisions/0012-documentary-instructions.md))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Documents    | PDFs the seller presents for each document the current instruction revision requires: multipart upload (PDF by content, at most 10 MiB, enforced while streaming), immutable versions with size, SHA-256, uploader and time, `If-Match` for replacements, attachment downloads for both counterparties; bytes staged outside the transaction in private storage under server-generated keys, compensated on every failure ([ADR 0013](docs/decisions/0013-documents.md)). The buyer's operators approve or reject the latest version, a rejection with its reason; one final decision per file version, kept with that file when it is replaced; the document's version counts uploads and decisions, so a replacement never passes over a decision unseen ([ADR 0014](docs/decisions/0014-document-review.md))                                                                                                      |
 | Timeline     | `GET .../timeline`: the audit trail as a read-only timeline, newest first, cursor-paginated; the voyage's creation for every participant, notice, instruction and document events only for that contract's two counterparties; who, for which organization, when and identifiers, never the recorded contents ([ADR 0009](docs/decisions/0009-transactional-audit-events.md))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Live updates | `GET .../events`: a server-sent-event stream per voyage that signals issued and acknowledged notices after commit, carrying only the type of change, only to the contract's current counterparties, with the session and participation re-checked before every delivery and every 30 s; in-process and best effort (no replay, one API instance); the page refetches its notices and timeline, catches up on every (re)connection and polls while disconnected ([ADR 0015](docs/decisions/0015-voyage-event-streams.md))                                                                                                                                                                                                                                                                                                                                                                                             |
+| Live updates | `GET .../events`: a server-sent-event stream per voyage that signals issued and acknowledged notices and revised and acknowledged documentary instructions after commit, carrying only the type of change, only to the contract's current counterparties, with the session and participation re-checked before every delivery and every 30 s; in-process and best effort (no replay, one API instance); the page refetches what each signal concerns (notices or instructions) and its timeline, all three on every (re)connection, and polls them while disconnected ([ADR 0015](docs/decisions/0015-voyage-event-streams.md))                                                                                                                                                                                                                                                                                      |
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                   |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices and timeline kept current from the voyage's event stream (polling while it is down), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -253,9 +253,10 @@ Traces, videos and saved browser state are off: they would record the session co
   which events, exactly the fields of each entry and none of the recorded contents, full pages
   despite hidden events, equal times split across pages, and cursors confined to the bearer's
   scope. Event streams, over real HTTP connections: who receives which signal (counterparties
-  only; not other participants or other voyages) and only its type, nothing for refused or
-  rolled-back commands, one signal when two acknowledgements race, a committed command that
-  succeeds although publishing fails, streams closed after sign-out, revocation, expiry, a change
+  only; not other participants or other voyages) and only its type, for notices and for
+  documentary instructions; nothing for refused, failed-precondition or rolled-back commands;
+  one signal when two acknowledgements (or two revisions of one version) race; a committed
+  command that succeeds although publishing fails; streams closed after sign-out, revocation, expiry, a change
   of organization or of participation, cleanup on disconnect and on shutdown.
 - **web**: renders the real route tree with real providers. Only the network is faked, by MSW, and
   unhandled requests fail the test. Auth flows run against a stateful fake of the auth API,
@@ -278,12 +279,15 @@ Traces, videos and saved browser state are off: they would record the session co
   after session checks or another tab go to someone else and back. The timeline: every kind of
   event, paging, failures, and pages cancelled by an identity change. Live updates, with a fake
   `EventSource` driven by hand (simulated transport): refetching only the current identity's
-  notices and timeline on each signal and on every (re)connection (with reads of their own, even
-  while the first reads are still on their way), polling only while
-  disconnected and visible, reopening a stream the browser gave up on, closing on unmount, and
+  queries a signal concerns (notices or instructions, and the timeline) and all three on every
+  (re)connection, with reads of their own even while the first reads are still on their way;
+  signals of both kinds arriving during a refresh read each resource once more, losing none; an
+  open instruction draft kept with its version while revisions and acknowledgements are pushed,
+  and no conflict shown when the buyer's own revision is signalled before its response; polling
+  only while disconnected and visible, reopening a stream the browser gave up on, closing on unmount, and
   late events ignored after a sign-out, a same-user sign-in, and session checks going to someone
   else and back. The suite runs in `America/Sao_Paulo` time so date- and time-shifting bugs show up.
-- **e2e** (`pnpm test:e2e`, Chromium only): four smoke journeys against the real web build, API
+- **e2e** (`pnpm test:e2e`, Chromium only): five smoke journeys against the real web build, API
   and PostgreSQL, through the same-origin `/api` proxy, with real sign-in and the browser's own
   `EventSource`. (1) Sign in through the form, reload, stay signed in: the cookie is `HttpOnly`
   and `SameSite=Strict`, invisible to scripts, and the reload is confirmed by the server from it
@@ -294,10 +298,14 @@ Traces, videos and saved browser state are off: they would record the session co
   the API, and a new one opens. (4) Recovery: a page catches up after its stream is dropped,
   and connects again after a first stream answered 503; a probe records what Chromium's own
   `EventSource` does in each case (`CLOSED` after a 503, reconnecting by itself after a drop,
-  honouring the server's `retry`).
+  honouring the server's `retry`). (5) Documentary instructions: the buyer gives them, the
+  seller's page shows them and acknowledges, the buyer's page shows who did, and a revision
+  reaches the seller; and a revision a colleague sends while the buyer drafts leaves the draft
+  and its basis alone (no write sent) until the buyer bases it on the newer version.
   That a stream message, not polling, refreshed a page is read off the browser's own network log
   (DevTools protocol, observation only): the stream was open throughout, nothing was refetched
-  between a quiet point and the message, both queries were refetched after it, and moving the
+  between a quiet point and the message, exactly the queries that message concerns were
+  refetched after it, and moving the
   page's timers past the 30 s fallback interval sent nothing. Faults are injected only by a
   transport proxy between the web server and the API, and labelled as such: a 503 it answers
   itself, stream requests it holds, streams it ends. EventSource, authentication, data and
@@ -328,9 +336,9 @@ Traces, videos and saved browser state are off: they would record the session co
    rejection with its reason. Next: S3-compatible storage and pre-signed uploads, a scheduled
    orphan sweep, amending decisions.
 5. **Workflow, tasks and deadlines; real-time updates (SSE); background jobs and transactional outbox.**
-   Started: a read-only voyage timeline of audit events, and live updates of notices over a
-   per-voyage SSE stream, in process and best effort. Next: live updates for instructions and
-   documents, then an outbox and a shared bus for durable, multi-instance delivery.
+   Started: a read-only voyage timeline of audit events, and live updates of notices and
+   documentary instructions over a per-voyage SSE stream, in process and best effort. Next: live
+   updates for documents, then an outbox and a shared bus for durable, multi-instance delivery.
 6. **AI-assisted document extraction and comparison**, with human approval for any critical action.
 
 See [docs/architecture.md](docs/architecture.md#evolution) for how the current design leaves room

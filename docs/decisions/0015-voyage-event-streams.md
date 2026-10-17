@@ -43,16 +43,21 @@ route. A participant of the voyage may open it; anyone else gets the voyage's 40
 JSON `data` lines matching `VoyageStreamMessageSchema`:
 
 - `{"type":"READY"}` first, written only once the connection is subscribed.
-- `{"type":"NOTICE_ISSUED"}` or `{"type":"NOTICE_ACKNOWLEDGED"}` per change. No ids, no
+- `{"type":"NOTICE_ISSUED"}`, `{"type":"NOTICE_ACKNOWLEDGED"}`,
+  `{"type":"DOCUMENTARY_INSTRUCTION_REVISED"}` (the first instructions and every revision) or
+  `{"type":"DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED"}` per change. No ids, no versions, no
   contents, no audit payload. The client reads the data again through the REST endpoints, which
-  apply their own rules.
+  apply their own rules. Instructions are bilateral like notices, so their signals follow the
+  same per-contract rule below.
 
 No `id:` field is sent, so browsers send no `Last-Event-ID`: there is nothing to resume from.
 
 ### Publishing
 
-`NoticesService` calls `VoyageEventBus.publish({ type, voyageId, contractId })` **after**
-`$transaction` resolved: rollbacks and the 409 of a lost race throw before it. Publishing is
+`NoticesService` and `DocumentaryInstructionsService` call
+`VoyageEventBus.publish({ type, voyageId, contractId })` **after** `$transaction` resolved:
+rollbacks, refusals, failed preconditions (412) and the 409 or 412 of a lost race throw before
+it. Publishing is
 synchronous and only schedules work; it is wrapped so that a failure is logged and the command
 still answers 201/200. The bus is a `Map` of listeners per voyage in the API's memory, exported
 by the voyages module (which owns contracts and participation, and so decides who is told).
@@ -76,7 +81,7 @@ same race any request in flight has.
 ### Bounds
 
 Signals waiting for a check are coalesced per contract and type, so one stream holds at most
-`2 × contracts` of them; more than 32 contracts with pending signals closes the stream. A client
+`4 × contracts` of them (one per change type); more than 32 contracts with pending signals closes the stream. A client
 that stops reading (the socket buffer is full) is closed rather than buffered for. Closing is
 always safe: the client reconnects and reads again. On shutdown every stream is ended, a stream
 still being opened is answered 503 at once (its access check is not waited for), and none opens
@@ -87,14 +92,19 @@ afterwards.
 `useVoyageLiveUpdates` on the voyage page:
 
 - connects once the voyage has loaded, for that voyage, under the session epoch current then;
-- on `READY` (every connection, so also after a reconnect) and on every change, invalidates
-  exactly the current scope's notices and timeline queries, with at most one refresh running
-  and one queued;
+- on `READY` (every connection, so also after a reconnect) invalidates the current scope's
+  notices, documentary instructions and timeline queries; on a change, exactly the queries it
+  concerns (a notice signal: notices and timeline; an instruction signal: instructions and
+  timeline). At most one refresh runs; what signals ask for meanwhile is merged into one
+  pending set and read once after it, so mixed signals lose nothing;
+- never writes: a refresh replaces cached data only, so an open instruction draft keeps its
+  content and the version it is based on (its `If-Match`), and only the user's choice moves it
+  onto a newer version;
 - closes the connection when a transition ends its epoch (`subscribeToSessionTransitions`) and
   ignores any callback after that, so signing out and back in as the same user, or session
   checks going to someone else and back, never act on an old stream; the page connects again
   for the new session;
-- while not live (connecting, reconnecting, or no `EventSource`), polls both queries every 30 s
+- while not live (connecting, reconnecting, or no `EventSource`), polls the three queries every 30 s
   with `refetchInterval`, which TanStack Query pauses while the tab is hidden; when the browser
   gives up on a stream, opens a new one after 5 s, 15 s, then every 60 s.
 
@@ -127,14 +137,18 @@ afterwards.
 - Every delivery costs two queries per open stream of the voyage, and every 30 s every stream
   costs two more. Fine for the number of users of one voyage; a per-voyage cache of the check
   is the first optimization if needed.
-- Only notices are wired. Instructions, documents and reviews announce nothing yet; adding one
-  means a `VoyageChangeType`, a publish after its transaction, and the queries the client
-  invalidates for it.
+- Notices and documentary instructions are wired. Documents and reviews announce nothing yet;
+  adding one means a `VoyageChangeType`, a publish after its transaction, and the queries the
+  client invalidates for it (`REFRESHED_BY`, which does not compile until every type has an
+  entry).
 - The issuer's own browser receives the signal too and refreshes; harmless, and it keeps the
-  issuer's timeline current, which the mutation hooks did not do.
+  issuer's timeline current, which the mutation hooks did not do. It may arrive before the
+  command's own response: an instruction form whose write is still on its way therefore lets
+  that response, not the refresh, decide whether the draft is stale.
 - Tests: the API streams over real HTTP connections against PostgreSQL (who receives what,
   rollbacks, a race, a failing bus, revocation, expiry, organization and participation changes,
   disconnects, shutdown); the web tests drive a fake `EventSource`. The end-to-end smoke suite
   (`e2e/`) later added streams from real Chromium: the cookie sent with the stream, signals
-  between two browsers, streams replaced across sign-out and sign-in in two tabs, and recovery
-  from injected transport faults. Other browsers and HTTPS are still not covered.
+  between two browsers (notices, then documentary instructions, including a draft kept while a
+  colleague's revision is pushed), streams replaced across sign-out and sign-in in two tabs, and
+  recovery from injected transport faults. Other browsers and HTTPS are still not covered.
