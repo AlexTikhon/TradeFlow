@@ -1,32 +1,37 @@
 import { expect, type Page } from '@playwright/test';
+import { expectVoyagePage, signIn, voyagePath } from './app.js';
 import {
   type BrowserNetwork,
   type MessageEntry,
   messageType,
   type RequestEntry,
 } from './browser-network.js';
+import type { Tab } from './fixtures.js';
+import type { Party, Scenario } from './scenario.js';
 
 /*
- * Reading a voyage page's live updates off its browser's network record. The page keeps three
- * queries fresh from the stream, the notices, the documentary instructions and the timeline: it
- * refetches all three on READY, those a change concerns on each change message (`REFRESHED_BY`),
- * and polls all three only while no stream is live (every 30 s).
+ * Reading a voyage page's live updates off its browser's network record. The page keeps four
+ * queries fresh from the stream, the notices, the documentary instructions, the documents and the
+ * timeline: it refetches all four on READY, those a change concerns on each change message
+ * (`REFRESHED_BY`), and polls all four only while no stream is live (every 30 s).
  */
 
 const eventsPath = (voyageId: string) => `/api/voyages/${voyageId}/events`;
 
-export type LiveQuery = 'notices' | 'documentary-instructions' | 'timeline';
+export type LiveQuery = 'notices' | 'documentary-instructions' | 'documents' | 'timeline';
 
 /**
  * What the web app refetches for each stream message (its own `REFRESHED_BY`), kept here by
  * hand: the tests check the browser against this, not against the app's code.
  */
 const REFRESHED_BY: Record<string, readonly LiveQuery[]> = {
-  READY: ['notices', 'documentary-instructions', 'timeline'],
+  READY: ['notices', 'documentary-instructions', 'documents', 'timeline'],
   NOTICE_ISSUED: ['notices', 'timeline'],
   NOTICE_ACKNOWLEDGED: ['notices', 'timeline'],
   DOCUMENTARY_INSTRUCTION_REVISED: ['documentary-instructions', 'timeline'],
   DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: ['documentary-instructions', 'timeline'],
+  DOCUMENT_VERSION_UPLOADED: ['documents', 'timeline'],
+  DOCUMENT_VERSION_REVIEWED: ['documents', 'timeline'],
 };
 
 function refreshedBy(type: string | undefined): readonly LiveQuery[] {
@@ -41,6 +46,7 @@ function liveQuery(voyageId: string, request: RequestEntry): LiveQuery | undefin
   const base = `/api/voyages/${voyageId}`;
   if (request.path === `${base}/notices`) return 'notices';
   if (request.path === `${base}/documentary-instructions`) return 'documentary-instructions';
+  if (request.path === `${base}/documents`) return 'documents';
   if (request.path === `${base}/timeline` || request.path.startsWith(`${base}/timeline?`)) {
     return 'timeline';
   }
@@ -197,4 +203,20 @@ export function expectRefreshCausedBy(
     [...new Set(liveQueriesSent(network, voyageId, { after: signal.seq }))].sort(),
     `${expected.join(', ')} refetched after the signal #${signal.seq}${log}`,
   ).toEqual(expected);
+}
+
+/** Signs `party` in on the voyage page, with the page's own clock, and waits until it is live. */
+export async function liveTab(tab: Tab, scenario: Scenario, party: Party) {
+  // The page's own clock, so a test can move its timers on (see expectNotPolling).
+  await tab.page.clock.install();
+  await tab.page.goto(voyagePath(scenario));
+  await signIn(tab.page, party);
+  await expectVoyagePage(tab.page, scenario, party);
+  await waitUntilLive(tab.network, scenario.voyage.id);
+}
+
+/** Waits until the page has been told of a change of `type` after `after`, and has read it again. */
+export async function settle(tab: Tab, voyageId: string, type: string, after: number) {
+  const message = await waitForMessage(tab.network, voyageId, type, { after });
+  await waitForRefresh(tab.network, voyageId, message);
 }

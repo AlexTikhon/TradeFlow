@@ -62,11 +62,11 @@ interface Stream {
  * Open event streams of voyages (`GET /voyages/:voyageId/events`) and what is sent on them.
  *
  * Signals about a contract reveal activity under it even without data, so they follow the same
- * rule as the contract's notices, documentary instructions and timeline events (ADR 0011, ADR
- * 0012): only its current two counterparties are told. Nothing is decided when the stream opens
- * beyond participation; every delivery first reads the session again (it may have expired or
- * been revoked, or the user may have moved organization) and the organization's contracts on the
- * voyage now. A stream whose
+ * rule as the contract's notices, documentary instructions, documents and timeline events (ADR
+ * 0011 to ADR 0014): only its current two counterparties are told. Nothing is decided when the
+ * stream opens beyond participation; every delivery first reads the session again (it may have
+ * expired or been revoked, or the user may have moved organization) and the organization's
+ * contracts on the voyage now. A stream whose
  * session or participation is gone is closed instead. Idle streams are re-checked every
  * `recheckIntervalMs`.
  *

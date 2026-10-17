@@ -10,8 +10,9 @@ import { DocumentsService } from './documents.service.js';
 /**
  * Owns `documents` and `document_versions`, and the bytes in document storage. Resolves sale
  * contracts through the voyages module's `CounterpartyContracts`, instruction revisions through
- * `InstructionRevisions`, the session as it is now through `SessionPrincipals`, and records its
- * actions through `AuditTrail`; it reads none of those modules' tables itself.
+ * `InstructionRevisions`, the session as it is now through `SessionPrincipals`, records its
+ * actions through `AuditTrail`, and announces committed changes through the voyages module's
+ * `VoyageEventBus`; it reads none of those modules' tables itself.
  */
 @Module({
   imports: [

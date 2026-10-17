@@ -1,26 +1,22 @@
 import type { Page } from '@playwright/test';
 import {
   expectInstructionsSent,
-  expectVoyagePage,
   giveInstructions,
   instructionPanel,
   instructionRevision,
   openInstructionForm,
   reviseInstructions,
-  signIn,
   timelineEntry,
-  voyagePath,
 } from '../support/app.js';
 import type { BrowserNetwork } from '../support/browser-network.js';
-import { expect, type Tab, test } from '../support/fixtures.js';
+import { expect, test } from '../support/fixtures.js';
 import {
   expectNotPolling,
   expectRefreshCausedBy,
+  liveTab,
+  settle,
   waitForMessage,
-  waitForRefresh,
-  waitUntilLive,
 } from '../support/live-updates.js';
-import type { Party, Scenario } from '../support/scenario.js';
 
 /*
  * Documentary instructions between the buyer and the seller of the voyage's only contract, each
@@ -30,22 +26,6 @@ import type { Party, Scenario } from '../support/scenario.js';
 
 const REVISED = 'DOCUMENTARY_INSTRUCTION_REVISED';
 const ACKNOWLEDGED = 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED';
-
-/** Signs `party` in on the voyage page, with the page's own clock, and waits until it is live. */
-async function liveTab(tab: Tab, scenario: Scenario, party: Party) {
-  // The page's own clock, so a test can move its timers on (see expectNotPolling).
-  await tab.page.clock.install();
-  await tab.page.goto(voyagePath(scenario));
-  await signIn(tab.page, party);
-  await expectVoyagePage(tab.page, scenario, party);
-  await waitUntilLive(tab.network, scenario.voyage.id);
-}
-
-/** Waits until the page has been told of its own change of `type` and has read it again. */
-async function settle(tab: Tab, voyageId: string, type: string, after: number) {
-  const message = await waitForMessage(tab.network, voyageId, type, { after });
-  await waitForRefresh(tab.network, voyageId, message);
-}
 
 /** The instruction writes (PUT) the page sent after `after`. */
 const instructionWrites = (network: BrowserNetwork, after: number) =>

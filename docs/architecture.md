@@ -460,18 +460,23 @@ first, a page at a time:
 `GET /api/voyages/:voyageId/events` is a server-sent-event stream that tells the voyage page
 _that_ something changed, never _what_ ([ADR 0015](decisions/0015-voyage-event-streams.md)).
 Today it carries `NOTICE_ISSUED`, `NOTICE_ACKNOWLEDGED`, `DOCUMENTARY_INSTRUCTION_REVISED` (the
-first instructions and every revision) and `DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED`.
+first instructions and every revision), `DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED`,
+`DOCUMENT_VERSION_UPLOADED` (a first file or a replacement) and `DOCUMENT_VERSION_REVIEWED` (an
+approval or a rejection).
 
 - **Opening.** Guards (401), the voyage id (400), participation through
   `CounterpartyContracts.listForVoyage` (the voyage's 404). The stream then subscribes to
   `VoyageEventBus` and only after that writes `READY`, so a client that reads after `READY`
   misses nothing. Headers: `text/event-stream`, `no-store`, `X-Accel-Buffering: no`; `retry` is
   5 s.
-- **Publishing.** `NoticesService` and `DocumentaryInstructionsService` publish
-  `{ type, voyageId, contractId }` after `$transaction` resolved, never inside it: rollbacks,
-  refusals, failed preconditions (412) and the 409 or 412 of a lost race publish nothing.
-  `publish` only schedules deliveries and is wrapped, so a failure is logged and the committed
-  command still answers 201/200.
+- **Publishing.** `NoticesService`, `DocumentaryInstructionsService` and `DocumentsService`
+  publish `{ type, voyageId, contractId }` after `$transaction` resolved, never inside it:
+  rollbacks, refusals, failed preconditions (412) and the 409 or 412 of a lost race publish
+  nothing. `publish` only schedules deliveries and is wrapped, so a failure is logged and the
+  committed command still answers 201/200. An upload publishes once its commit step has
+  returned, outside the compensation around it: a failure to publish never removes the bytes a
+  committed version names, and an upload whose commit has an unknown outcome (kept for
+  reconciliation) publishes nothing.
 - **Delivering.** Before writing to a stream, `VoyageEventStreams` re-reads its session
   (`SessionPrincipals.refresh`) and the organization's contracts on the voyage. A session that
   expired or was revoked, a user now in another organization, or an organization no longer in
@@ -660,22 +665,25 @@ src/
   (same origin, so the browser sends the session cookie). Each signal reads again exactly the
   queries of the current identity scope it concerns (`REFRESHED_BY`): a notice signal the
   voyage's notices and its timeline, an instruction signal its documentary instructions and its
-  timeline. Requests are sent after the signal: a read already on its way is cancelled rather
-  than joined, since it may have been answered from before the change (on the first load,
-  invalidating alone would join it). At most one refresh runs; signals arriving meanwhile add
-  what they concern to one pending set, read by a single refresh after it, so mixed signals lose
-  nothing and each resource is read once. Every connection starts with `READY`, which reads all
-  three: that is how the page catches up after a reconnect, since nothing is replayed. Refreshes
-  only replace cached data: an open instruction draft keeps its content and its basis, the form
-  shows the newer version beside it, and nothing is written or retried from the stream (while
-  the draft's own write is on its way, its response, not a refresh, decides). The connection belongs to the voyage and to the session
+  timeline, a document signal its documents and its timeline. Requests are sent after the
+  signal: a read already on its way is cancelled rather than joined, since it may have been
+  answered from before the change (on the first load, invalidating alone would join it). At most
+  one refresh runs; signals arriving meanwhile add what they concern to one pending set, read by
+  a single refresh after it, so mixed signals lose nothing and each resource is read once. Every
+  connection starts with `READY`, which reads all four: that is how the page catches up after a
+  reconnect, since nothing is replayed. Refreshes only replace cached data: an open instruction
+  draft, a chosen file and a decision being made keep their content and their basis (the
+  document version sent in `If-Match`, and for a decision the exact file version), the form shows
+  what changed beside it, and nothing is written, retried or downloaded from the stream (while
+  the draft's own write is on its way, its response, not a refresh, decides). The document list
+  is replaced as read; the commands' own cache writes still keep the newest document version. The connection belongs to the voyage and to the session
   epoch it was opened in: unmounting or moving to another voyage closes it, and so does the
   first transition that ends the epoch (`subscribeToSessionTransitions` in `session.ts`, called
   synchronously as the transition starts). Every callback checks the epoch too, so a late event
   from a closed stream does nothing, including after the same user signed out and back in, or
   after session checks went to someone else and back. The auth boundary remounts the page for
   the new session, which connects anew. While no stream is live (connecting, the browser
-  reconnecting, no `EventSource`), notices, instructions and timeline are polled every 30 s through
+  reconnecting, no `EventSource`), notices, instructions, documents and timeline are polled every 30 s through
   `refetchInterval` (paused while the tab is hidden; `staleTime` alone never refetches). If the
   browser gives up on a stream (the server refused it), a new one is opened after 5 s, 15 s,
   then every 60 s; one timer at most.
@@ -917,7 +925,7 @@ How later requirements land on the current structure:
 | Optimistic concurrency   | **Started (M6)**: `version` on documentary instructions; one conditional `UPDATE ... WHERE version = ANY(...)`; `ETag`, `If-Match` (412), `If-None-Match: *`, 428 without a precondition ([ADR 0012](decisions/0012-documentary-instructions.md)). Documents since M8: one version for uploads and reviews ([ADR 0014](decisions/0014-document-review.md)). Next: the same for recording the trade string                                                                                                                                   |
 | Idempotency              | `Idempotency-Key` header persisted with the response for unsafe requests                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Audit trail              | **Started (M3)**: append-only `audit_events`, written in the same transaction ([ADR 0009](decisions/0009-transactional-audit-events.md)). A read-only voyage timeline, scoped per contract. Next: more actions                                                                                                                                                                                                                                                                                                                              |
-| Real-time                | **Started**: an SSE stream per voyage signals notice and documentary instruction changes after commit, only to the contract's current counterparties, re-checked before each delivery; the client invalidates what each signal concerns and the timeline, and polls while disconnected ([ADR 0015](decisions/0015-voyage-event-streams.md)). Next: documents, then a shared bus (outbox) for several API instances                                                                                                                          |
+| Real-time                | **Started**: an SSE stream per voyage signals notice, documentary instruction and document changes after commit, only to the contract's current counterparties, re-checked before each delivery; the client invalidates what each signal concerns and the timeline, and polls while disconnected ([ADR 0015](decisions/0015-voyage-event-streams.md)). Next: a shared bus (outbox) for several API instances                                                                                                                                |
 | Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Documents                | **Started (M7)**: PDF versions per required document of an exact revision, counterparty-only, uploaded by the seller with `If-Match`; bytes staged outside the transaction in a private local directory, compensated on failure ([ADR 0013](decisions/0013-documents.md)). Buyer review since M8: one final decision per file version, a rejection with its reason ([ADR 0014](decisions/0014-document-review.md)). Next: S3-compatible storage behind the same interface, pre-signed uploads, a scheduled orphan sweep, amending decisions |
 | AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                                                                                                                                                                                                                                  |

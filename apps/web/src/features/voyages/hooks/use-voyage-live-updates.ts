@@ -23,7 +23,7 @@ export const FALLBACK_POLL_INTERVAL_MS = 30_000;
 export const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000] as const;
 
 /** The voyage's queries the stream keeps fresh. */
-type LiveResource = 'notices' | 'documentaryInstructions' | 'timeline';
+type LiveResource = 'notices' | 'documentaryInstructions' | 'documents' | 'timeline';
 
 /**
  * What each message makes the page read again. READY starts every (re)connection, after which
@@ -32,11 +32,13 @@ type LiveResource = 'notices' | 'documentaryInstructions' | 'timeline';
  * until it says what it refreshes.
  */
 const REFRESHED_BY: Record<VoyageStreamMessage['type'], readonly LiveResource[]> = {
-  READY: ['notices', 'documentaryInstructions', 'timeline'],
+  READY: ['notices', 'documentaryInstructions', 'documents', 'timeline'],
   NOTICE_ISSUED: ['notices', 'timeline'],
   NOTICE_ACKNOWLEDGED: ['notices', 'timeline'],
   DOCUMENTARY_INSTRUCTION_REVISED: ['documentaryInstructions', 'timeline'],
   DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: ['documentaryInstructions', 'timeline'],
+  DOCUMENT_VERSION_UPLOADED: ['documents', 'timeline'],
+  DOCUMENT_VERSION_REVIEWED: ['documents', 'timeline'],
 };
 
 export interface VoyageLiveUpdates {
@@ -50,13 +52,13 @@ export interface VoyageLiveUpdates {
 }
 
 /**
- * Keeps the voyage's notices, documentary instructions and timeline fresh while the page shows
- * them, for the identity it renders under. Connects to the voyage's event stream (once
+ * Keeps the voyage's notices, documentary instructions, documents and timeline fresh while the
+ * page shows them, for the identity it renders under. Connects to the voyage's event stream (once
  * `enabled`, i.e. the voyage has loaded) and, on each message, reads again exactly the queries
  * of the current scope it concerns (`REFRESHED_BY`), with requests sent after the message (a
  * read already on its way is cancelled, not waited for).
  *
- * - Reconciliation: every connection starts with READY, and READY reads all three again, so
+ * - Reconciliation: every connection starts with READY, and READY reads all four again, so
  *   whatever changed while disconnected (the stream has no replay) is caught up through REST.
  * - Tied to the session epoch it started in: the first transition that ends that epoch closes
  *   the connection, and any callback arriving afterwards is ignored. That covers signing out
@@ -72,9 +74,10 @@ export interface VoyageLiveUpdates {
  *   resource is read once however many messages asked for it. Everything is released on
  *   unmount.
  *
- * Reads only: a refresh replaces cached data and nothing else. An open draft keeps its content
- * and the version it was based on (the form shows the newer version beside it), and no write is
- * ever sent or retried from here.
+ * Reads only: a refresh replaces cached data and nothing else. An open draft (instructions being
+ * revised, a file chosen for upload, a decision being made) keeps its content and the version it
+ * was based on (the form shows the newer version beside it), and no write or download is ever
+ * sent or retried from here.
  */
 export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): VoyageLiveUpdates {
   const queryClient = useQueryClient();
@@ -91,6 +94,7 @@ export function useVoyageLiveUpdates(voyageId: string, enabled: boolean): Voyage
     const queryKeys: Record<LiveResource, readonly unknown[]> = {
       notices: voyageQueries.notices(scope, voyageId).queryKey,
       documentaryInstructions: voyageQueries.documentaryInstructions(scope, voyageId).queryKey,
+      documents: voyageQueries.documents(scope, voyageId).queryKey,
       timeline: voyageQueries.timeline(scope, voyageId).queryKey,
     };
     let stopped = false;

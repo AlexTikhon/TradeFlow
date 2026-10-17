@@ -44,23 +44,31 @@ JSON `data` lines matching `VoyageStreamMessageSchema`:
 
 - `{"type":"READY"}` first, written only once the connection is subscribed.
 - `{"type":"NOTICE_ISSUED"}`, `{"type":"NOTICE_ACKNOWLEDGED"}`,
-  `{"type":"DOCUMENTARY_INSTRUCTION_REVISED"}` (the first instructions and every revision) or
-  `{"type":"DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED"}` per change. No ids, no versions, no
-  contents, no audit payload. The client reads the data again through the REST endpoints, which
-  apply their own rules. Instructions are bilateral like notices, so their signals follow the
-  same per-contract rule below.
+  `{"type":"DOCUMENTARY_INSTRUCTION_REVISED"}` (the first instructions and every revision),
+  `{"type":"DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED"}`, `{"type":"DOCUMENT_VERSION_UPLOADED"}` (a
+  first file or a replacement) or `{"type":"DOCUMENT_VERSION_REVIEWED"}` (an approval or a
+  rejection) per change. No ids, no versions, no contents, no file names, checksums, storage
+  keys or reasons, no audit payload. The client reads the data again through the REST endpoints,
+  which apply their own rules. Instructions and documents are bilateral like notices, so their
+  signals follow the same per-contract rule below.
 
 No `id:` field is sent, so browsers send no `Last-Event-ID`: there is nothing to resume from.
 
 ### Publishing
 
-`NoticesService` and `DocumentaryInstructionsService` call
+`NoticesService`, `DocumentaryInstructionsService` and `DocumentsService` call
 `VoyageEventBus.publish({ type, voyageId, contractId })` **after** `$transaction` resolved:
 rollbacks, refusals, failed preconditions (412) and the 409 or 412 of a lost race throw before
 it. Publishing is
 synchronous and only schedules work; it is wrapped so that a failure is logged and the command
 still answers 201/200. The bus is a `Map` of listeners per voyage in the API's memory, exported
 by the voyages module (which owns contracts and participation, and so decides who is told).
+
+An upload ([ADR 0013](0013-documents.md)) publishes only once its commit step has returned, and
+outside the compensation that removes kept bytes when that step fails. So publishing can neither
+fail a committed upload nor remove the bytes its version names; and an upload whose commit
+failed while committing (an unknown outcome, whose bytes are kept for reconciliation) publishes
+nothing, as any other failed command.
 
 ### Delivery: who, and checked when
 
@@ -81,7 +89,7 @@ same race any request in flight has.
 ### Bounds
 
 Signals waiting for a check are coalesced per contract and type, so one stream holds at most
-`4 × contracts` of them (one per change type); more than 32 contracts with pending signals closes the stream. A client
+`6 × contracts` of them (one per change type); more than 32 contracts with pending signals closes the stream. A client
 that stops reading (the socket buffer is full) is closed rather than buffered for. Closing is
 always safe: the client reconnects and reads again. On shutdown every stream is ended, a stream
 still being opened is answered 503 at once (its access check is not waited for), and none opens
@@ -93,18 +101,20 @@ afterwards.
 
 - connects once the voyage has loaded, for that voyage, under the session epoch current then;
 - on `READY` (every connection, so also after a reconnect) invalidates the current scope's
-  notices, documentary instructions and timeline queries; on a change, exactly the queries it
-  concerns (a notice signal: notices and timeline; an instruction signal: instructions and
-  timeline). At most one refresh runs; what signals ask for meanwhile is merged into one
-  pending set and read once after it, so mixed signals lose nothing;
-- never writes: a refresh replaces cached data only, so an open instruction draft keeps its
-  content and the version it is based on (its `If-Match`), and only the user's choice moves it
-  onto a newer version;
+  notices, documentary instructions, documents and timeline queries; on a change, exactly the
+  queries it concerns (a notice signal: notices and timeline; an instruction signal:
+  instructions and timeline; a document signal: documents and timeline). At most one refresh
+  runs; what signals ask for meanwhile is merged into one pending set and read once after it, so
+  mixed signals lose nothing;
+- never writes: a refresh replaces cached data only, so an open instruction draft, a chosen file
+  and a decision being made keep their content and the version they are based on (their
+  `If-Match`, and for a decision the exact file version), and only the user's choice moves them
+  onto a newer version; nothing is retried or downloaded from the stream;
 - closes the connection when a transition ends its epoch (`subscribeToSessionTransitions`) and
   ignores any callback after that, so signing out and back in as the same user, or session
   checks going to someone else and back, never act on an old stream; the page connects again
   for the new session;
-- while not live (connecting, reconnecting, or no `EventSource`), polls the three queries every 30 s
+- while not live (connecting, reconnecting, or no `EventSource`), polls the four queries every 30 s
   with `refetchInterval`, which TanStack Query pauses while the tab is hidden; when the browser
   gives up on a stream, opens a new one after 5 s, 15 s, then every 60 s.
 
@@ -137,18 +147,20 @@ afterwards.
 - Every delivery costs two queries per open stream of the voyage, and every 30 s every stream
   costs two more. Fine for the number of users of one voyage; a per-voyage cache of the check
   is the first optimization if needed.
-- Notices and documentary instructions are wired. Documents and reviews announce nothing yet;
-  adding one means a `VoyageChangeType`, a publish after its transaction, and the queries the
-  client invalidates for it (`REFRESHED_BY`, which does not compile until every type has an
-  entry).
+- Notices, documentary instructions, documents and their reviews are wired. Adding a change
+  means a `VoyageChangeType`, a publish after its transaction, and the queries the client
+  invalidates for it (`REFRESHED_BY`, which does not compile until every type has an entry).
 - The issuer's own browser receives the signal too and refreshes; harmless, and it keeps the
   issuer's timeline current, which the mutation hooks did not do. It may arrive before the
-  command's own response: an instruction form whose write is still on its way therefore lets
-  that response, not the refresh, decide whether the draft is stale.
+  command's own response: an instruction form, an upload form or a review form whose write is
+  still on its way therefore lets that response, not the refresh, decide whether the draft is
+  stale.
 - Tests: the API streams over real HTTP connections against PostgreSQL (who receives what,
-  rollbacks, a race, a failing bus, revocation, expiry, organization and participation changes,
-  disconnects, shutdown); the web tests drive a fake `EventSource`. The end-to-end smoke suite
+  rollbacks, an unknown commit outcome, races, a failing bus with the committed files still
+  downloadable, revocation, expiry, organization and participation changes, disconnects,
+  shutdown); the web tests drive a fake `EventSource`. The end-to-end smoke suite
   (`e2e/`) later added streams from real Chromium: the cookie sent with the stream, signals
   between two browsers (notices, then documentary instructions, including a draft kept while a
-  colleague's revision is pushed), streams replaced across sign-out and sign-in in two tabs, and
+  colleague's revision is pushed, then documents: an upload, its download and approval, a
+  replacement and its rejection), streams replaced across sign-out and sign-in in two tabs, and
   recovery from injected transport faults. Other browsers and HTTPS are still not covered.

@@ -72,6 +72,31 @@ export async function waitForLockWaiters(prisma: PrismaService, count: number): 
   }
 }
 
+/**
+ * Runs `act` while every transaction that inserts into `table` fails at COMMIT: a deferred
+ * trigger raises only once COMMIT has been sent, as a connection lost while committing would
+ * look to the API, which cannot tell whether the transaction committed. (It did not.)
+ */
+export async function failCommitsWriting(
+  prisma: PrismaService,
+  table: string,
+  act: () => Promise<void>,
+): Promise<void> {
+  await prisma.$executeRawUnsafe(`
+    CREATE FUNCTION test_commit_unavailable() RETURNS trigger LANGUAGE plpgsql
+    AS $$ BEGIN RAISE EXCEPTION 'commit outcome unknown'; END $$`);
+  await prisma.$executeRawUnsafe(`
+    CREATE CONSTRAINT TRIGGER test_commit_unavailable AFTER INSERT ON ${table}
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION test_commit_unavailable()`);
+  try {
+    await act();
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER test_commit_unavailable ON ${table}`);
+    await prisma.$executeRawUnsafe('DROP FUNCTION test_commit_unavailable()');
+  }
+}
+
 /** Runs `act` while every insert into `audit_events` fails, like an unavailable audit store. */
 export async function failAuditWrites(
   prisma: PrismaService,

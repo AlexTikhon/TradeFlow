@@ -1,7 +1,11 @@
 import { focusManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import type {
+  ContractDocument,
+  CounterpartyContract,
   DocumentaryInstruction,
+  DocumentListResponse,
+  DocumentReviewDecision,
   Notice,
   TimelineEvent,
   VoyageDetail,
@@ -14,6 +18,14 @@ import {
   anInstruction,
   aRevision,
 } from '../../../test/fixtures/documentary-instructions';
+import {
+  aDocument,
+  aDocumentVersion,
+  brunoUploads,
+  davidReviews,
+  replacedBy,
+  reviewedAs,
+} from '../../../test/fixtures/documents';
 import {
   aCounterpartyContract,
   acknowledged,
@@ -52,6 +64,7 @@ const otherVoyage: VoyageDetail = {
 /** Ana operates for Cerrado, the seller under contract 1; Claire for Lacustra, its buyer. */
 const ana = aCurrentUser();
 const claire = anotherUser();
+const asSeller = aCounterpartyContract();
 const asBuyer = aCounterpartyContract({ side: 'BUYER' });
 
 /** Instructions under contract 1 as Claire's organization, its buyer, sees them. */
@@ -103,6 +116,48 @@ const contractName = 'Contract 1 · Cerrado Grãos Exportadora S.A. → Lacustra
 const instructionPanel = async () =>
   within(await screen.findByRole('listitem', { name: contractName }));
 
+/** The bill of lading under contract 1's current revision, with its upload or review form. */
+const billOfLading = async () =>
+  within(await (await instructionPanel()).findByRole('listitem', { name: 'Bill of lading' }));
+
+/** `document` as Claire's organization, the buyer under contract 1, sees it. */
+const buyersDocument = (document: ContractDocument): ContractDocument => ({
+  ...document,
+  contract: asBuyer,
+});
+
+const documentEvent = (versionNumber: number) => ({
+  contract: timelineContract1,
+  documentId: aDocument().id,
+  revisionNumber: 1,
+  documentType: 'BILL_OF_LADING' as const,
+  versionNumber,
+});
+/** File version `versionNumber` of the bill of lading, uploaded by Ana for the seller. */
+const documentUploaded = (n: number, versionNumber: number, version = versionNumber) =>
+  ({
+    ...eventBase(n),
+    ...documentEvent(versionNumber),
+    action: 'DOCUMENT_VERSION_UPLOADED',
+    version,
+  }) satisfies TimelineEvent;
+/** File version `versionNumber` of the bill of lading, decided on by Claire's side. */
+const documentReviewed = (
+  n: number,
+  versionNumber: number,
+  version: number,
+  decision: DocumentReviewDecision,
+) =>
+  ({
+    ...eventBase(n, undefined, claireActor),
+    ...documentEvent(versionNumber),
+    action: 'DOCUMENT_VERSION_REVIEWED',
+    decision,
+    version,
+  }) satisfies TimelineEvent;
+
+const REASON = 'The consignee does not match the instructions.';
+
 type Endpoint =
   | 'voyage'
   | 'trade-string'
@@ -113,14 +168,15 @@ type Endpoint =
   | 'timeline';
 
 /**
- * Serves the details page of `detail`. `state` is the fake server's data: a test changes it as
- * another user's command would, and every request answers what it holds then. Counts requests
- * per endpoint.
+ * Serves the details page of `detail`, from `contract`'s side (the buyer's unless stated).
+ * `state` is the fake server's data: a test changes it as another user's command would, and
+ * every request answers what it holds then. Counts requests per endpoint.
  */
-function servePage(detail: VoyageDetail = voyage) {
+function servePage(detail: VoyageDetail = voyage, contract: CounterpartyContract = asBuyer) {
   const state = {
     notices: [] as Notice[],
     instructions: [] as DocumentaryInstruction[],
+    documents: [] as ContractDocument[],
     events: [] as TimelineEvent[],
   };
   const requests: Record<Endpoint, number> = {
@@ -148,7 +204,7 @@ function servePage(detail: VoyageDetail = voyage) {
     ),
     http.get(
       `${base}/my-contracts`,
-      counted('my-contracts', () => HttpResponse.json(contractList(asBuyer))),
+      counted('my-contracts', () => HttpResponse.json(contractList(contract))),
     ),
     http.get(
       `${base}/notices`,
@@ -160,7 +216,7 @@ function servePage(detail: VoyageDetail = voyage) {
     ),
     http.get(
       `${base}/documents`,
-      counted('documents', () => HttpResponse.json({ items: [] })),
+      counted('documents', () => HttpResponse.json({ items: state.documents })),
     ),
     http.get(
       `${base}/timeline`,
@@ -257,7 +313,7 @@ describe('Live updates on the voyage page', () => {
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
-  it('reads the notices, the instructions and the timeline again on READY, and nothing else', async () => {
+  it('reads the notices, the instructions, the documents and the timeline again on READY, and nothing else', async () => {
     const { requests } = servePage();
     renderRoute(page, { signedInAs: claire });
     const source = await theStream();
@@ -270,6 +326,7 @@ describe('Live updates on the voyage page', () => {
     await waitFor(() => {
       expect(requests.notices).toBe(2);
       expect(requests['documentary-instructions']).toBe(2);
+      expect(requests.documents).toBe(2);
       expect(requests.timeline).toBe(2);
     });
     await quietly();
@@ -278,7 +335,7 @@ describe('Live updates on the voyage page', () => {
       'trade-string': 1,
       'my-contracts': 1,
       'documentary-instructions': 2,
-      documents: 1,
+      documents: 2,
       notices: 2,
       timeline: 2,
     });
@@ -290,7 +347,10 @@ describe('Live updates on the voyage page', () => {
     const { state, requests } = servePage();
     const releases: (() => void)[] = [];
     const held =
-      (endpoint: 'notices' | 'documentary-instructions' | 'timeline', respond: () => Response) =>
+      (
+        endpoint: 'notices' | 'documentary-instructions' | 'documents' | 'timeline',
+        respond: () => Response,
+      ) =>
       async () => {
         requests[endpoint] += 1;
         if (requests[endpoint] === 1) {
@@ -310,6 +370,10 @@ describe('Live updates on the voyage page', () => {
         held('documentary-instructions', () => HttpResponse.json({ items: state.instructions })),
       ),
       http.get(
+        `*/api/voyages/${voyage.id}/documents`,
+        held('documents', () => HttpResponse.json({ items: state.documents })),
+      ),
+      http.get(
         `*/api/voyages/${voyage.id}/timeline`,
         held('timeline', () => HttpResponse.json(timelinePage(state.events))),
       ),
@@ -317,14 +381,15 @@ describe('Live updates on the voyage page', () => {
     renderRoute(page, { signedInAs: claire });
     const source = await theStream();
     await waitFor(() => {
-      expect(releases).toHaveLength(3);
+      expect(releases).toHaveLength(4);
     });
     expect(screen.getByLabelText('Loading documentary instructions')).toBeInTheDocument();
 
     // Committed after the first reads were answered from the database, before READY.
     state.notices = [aNotice({ contract: asBuyer })];
     state.instructions = [buyersView(anInstruction())];
-    state.events = [instructionRevised(3, 1), noticeIssued(2)];
+    state.documents = [buyersDocument(aDocument())];
+    state.events = [documentUploaded(4, 1), instructionRevised(3, 1), noticeIssued(2)];
     act(() => {
       source.emit({ type: 'READY' });
     });
@@ -332,6 +397,7 @@ describe('Live updates on the voyage page', () => {
     await waitFor(() => {
       expect(requests.notices).toBe(2);
       expect(requests['documentary-instructions']).toBe(2);
+      expect(requests.documents).toBe(2);
       expect(requests.timeline).toBe(2);
     });
     releases.forEach((release) => {
@@ -341,9 +407,15 @@ describe('Live updates on the voyage page', () => {
     expect(within(notices).getAllByRole('listitem')).toHaveLength(1);
     const panel = await instructionPanel();
     expect(await panel.findByRole('region', { name: 'Revision 1' })).toBeVisible();
+    expect(await (await billOfLading()).findByText('Pending review')).toBeVisible();
     const timeline = await screen.findByRole('list', { name: 'Timeline' });
     expect(within(timeline).getByText('Issued a notice')).toBeInTheDocument();
     expect(within(timeline).getByText('Gave documentary instructions')).toBeInTheDocument();
+    expect(
+      within(timeline).getByText(
+        'Uploaded version 1 of the bill of lading (instructions revision 1)',
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows the buyer the seller's new notice, then its acknowledgement, as they are signalled", async () => {
@@ -434,12 +506,13 @@ describe('Live updates on the voyage page', () => {
 
     act(() => {
       source.emit('not json');
-      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+      source.emit({ type: 'DOCUMENT_DELETED' });
       source.emit({ noticeId: aNotice().id });
     });
     await quietly();
 
     expect(requests.notices).toBe(1);
+    expect(requests.documents).toBe(1);
     expect(requests.timeline).toBe(1);
   });
 
@@ -492,29 +565,30 @@ const diKey = (identity: typeof ana) => [
   'documentary-instructions',
 ];
 
-describe('Documentary instructions over the stream', () => {
-  /** Renders the page for Claire, connected, past READY and its reads. */
-  async function liveForClaire(served: ReturnType<typeof servePage>) {
-    const rendered = renderRoute(page, { signedInAs: claire });
-    const source = await theStream();
-    await loaded(served.requests);
-    act(() => {
-      source.emit({ type: 'READY' });
+/** Renders the page for `identity` (Claire unless stated), connected, past READY and its reads. */
+async function liveFor(served: ReturnType<typeof servePage>, identity = claire) {
+  const rendered = renderRoute(page, { signedInAs: identity });
+  const source = await theStream();
+  await loaded(served.requests);
+  act(() => {
+    source.emit({ type: 'READY' });
+  });
+  await waitFor(() => {
+    expect(served.requests).toMatchObject({
+      notices: 2,
+      'documentary-instructions': 2,
+      documents: 2,
+      timeline: 2,
     });
-    await waitFor(() => {
-      expect(served.requests).toMatchObject({
-        notices: 2,
-        'documentary-instructions': 2,
-        timeline: 2,
-      });
-    });
-    await quietly();
-    return { ...rendered, source };
-  }
+  });
+  await quietly();
+  return { ...rendered, source };
+}
 
+describe('Documentary instructions over the stream', () => {
   it('reads each signal’s own resource and the timeline, and nothing else', async () => {
     const served = servePage();
-    const { source } = await liveForClaire(served);
+    const { source } = await liveFor(served);
 
     act(() => {
       source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
@@ -548,7 +622,7 @@ describe('Documentary instructions over the stream', () => {
       'my-contracts': 1,
       notices: 3,
       'documentary-instructions': 4,
-      documents: 1,
+      documents: 2,
       timeline: 5,
     });
   });
@@ -558,7 +632,7 @@ describe('Documentary instructions over the stream', () => {
     const first = buyersView(anInstruction());
     served.state.instructions = [first];
     served.state.events = [instructionRevised(2, 1)];
-    const { source } = await liveForClaire(served);
+    const { source } = await liveFor(served);
     const panel = await instructionPanel();
     expect(panel.getByRole('region', { name: 'Revision 1' })).toBeVisible();
 
@@ -620,7 +694,7 @@ describe('Documentary instructions over the stream', () => {
         ),
       ),
     );
-    const { source } = await liveForClaire(served);
+    const { source } = await liveFor(served);
     const release = (endpoint: string) => {
       const resolve = releases.get(endpoint);
       releases.delete(endpoint);
@@ -867,6 +941,463 @@ describe('An open draft while revisions are pushed', () => {
   });
 });
 
+/** The query key of the voyage's documents for `identity`. */
+const documentsKey = (identity: typeof ana) => [
+  'protected',
+  `${identity.user.id}:${identity.organization.id}`,
+  'voyages',
+  'detail',
+  voyage.id,
+  'documents',
+];
+
+describe('Documents over the stream', () => {
+  it('reads the documents and the timeline on each document signal, and nothing else', async () => {
+    const served = servePage();
+    const { source } = await liveFor(served);
+
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    await waitFor(() => {
+      expect(served.requests.documents).toBe(3);
+      expect(served.requests.timeline).toBe(3);
+    });
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    await waitFor(() => {
+      expect(served.requests.documents).toBe(4);
+      expect(served.requests.timeline).toBe(4);
+    });
+    await quietly();
+    expect(served.requests).toEqual({
+      voyage: 1,
+      'trade-string': 1,
+      'my-contracts': 1,
+      notices: 2,
+      'documentary-instructions': 2,
+      documents: 4,
+      timeline: 4,
+    });
+  });
+
+  it("shows the buyer the seller's file, a colleague's rejection and the replacement, keeping every version", async () => {
+    const served = servePage();
+    served.state.instructions = [buyersView(anInstruction())];
+    const { source, user } = await liveFor(served);
+    const item = await billOfLading();
+    expect(item.getByText('Not uploaded yet')).toBeVisible();
+
+    // Ana uploads version 1 for the seller; the server signals it.
+    const first = buyersDocument(aDocument());
+    served.state.documents = [first];
+    served.state.events = [documentUploaded(2, 1)];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    expect(await item.findByText('Pending review')).toBeVisible();
+    expect(item.getByText(/^Version 1: bill-of-lading\.pdf/)).toBeVisible();
+    expect(item.getByRole('radio', { name: 'Approve' })).toBeInTheDocument();
+    const timeline = await screen.findByRole('list', { name: 'Timeline' });
+    expect(
+      within(timeline).getByText(
+        'Uploaded version 1 of the bill of lading (instructions revision 1)',
+      ),
+    ).toBeInTheDocument();
+
+    // David, Claire's colleague, rejects it in another browser: nothing is left to decide.
+    const rejected = reviewedAs(first, {
+      decision: 'REJECTED',
+      reason: REASON,
+      reviewedBy: davidReviews,
+    });
+    served.state.documents = [rejected];
+    served.state.events = [documentReviewed(3, 1, 2, 'REJECTED'), ...served.state.events];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    expect(await item.findByText('Rejected')).toBeVisible();
+    expect(item.getByLabelText('Reason for rejecting version 1')).toHaveTextContent(REASON);
+    expect(item.queryByRole('radio', { name: 'Approve' })).not.toBeInTheDocument();
+    expect(
+      await within(timeline).findByText(
+        'Rejected version 1 of the bill of lading (instructions revision 1)',
+      ),
+    ).toBeInTheDocument();
+
+    // Ana replaces it: version 2 waits for a decision, version 1 keeps its rejection.
+    served.state.documents = [replacedBy(rejected)];
+    served.state.events = [documentUploaded(4, 2, 3), ...served.state.events];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    expect(await item.findByText('Pending review')).toBeVisible();
+    expect(item.getByText(/^Version 2: bill-of-lading-v2\.pdf/)).toBeVisible();
+    expect(item.getByRole('radio', { name: 'Approve' })).toBeInTheDocument();
+    expect(
+      await within(timeline).findByText(
+        'Uploaded version 2 of the bill of lading (instructions revision 1)',
+      ),
+    ).toBeInTheDocument();
+    await user.click(item.getByRole('button', { name: 'Earlier versions (1)' }));
+    const earlier = within(
+      item.getByRole('list', { name: 'Earlier versions of the bill of lading' }),
+    );
+    expect(earlier.getByText(/^Version 1: bill-of-lading\.pdf/)).toBeVisible();
+    expect(earlier.getByText(/^Rejected by David Keller/)).toBeVisible();
+    expect(earlier.getByLabelText('Reason for rejecting version 1')).toHaveTextContent(REASON);
+  });
+
+  it('reads every resource that mixed signals asked for during a documents refresh, once each', async () => {
+    const served = servePage();
+    const { requests, state } = served;
+    let hold = false;
+    let release: (() => void) | undefined;
+    server.use(
+      http.get(`*/api/voyages/${voyage.id}/documents`, async () => {
+        requests.documents += 1;
+        if (hold) {
+          hold = false;
+          await new Promise<void>((resolve) => (release = resolve));
+        }
+        return HttpResponse.json({ items: state.documents });
+      }),
+    );
+    const { source } = await liveFor(served);
+
+    // A documents refresh is held; signals of every kind pile up meanwhile.
+    hold = true;
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    await waitFor(() => {
+      expect(release).toBeDefined();
+    });
+    act(() => {
+      for (let i = 0; i < 5; i += 1) {
+        source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+        source.emit({ type: 'NOTICE_ISSUED' });
+        source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+        source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      }
+    });
+    await quietly();
+    // Nothing more while one refresh runs.
+    expect(requests).toMatchObject({
+      notices: 2,
+      'documentary-instructions': 2,
+      documents: 3,
+      timeline: 3,
+    });
+    act(() => {
+      release?.();
+    });
+    // One more refresh, with reads sent after the signals: each resource once.
+    const after = { notices: 3, 'documentary-instructions': 3, documents: 4, timeline: 4 };
+    await waitFor(() => {
+      expect(requests).toMatchObject(after);
+    });
+    await quietly();
+    expect(requests).toMatchObject(after);
+  });
+
+  it("invalidates only this identity's documents and timeline", async () => {
+    const { requests } = servePage();
+    const { queryClient } = renderRoute(page, { signedInAs: claire });
+    const source = await theStream();
+    await loaded(requests);
+    // Data cached for someone else, for the same voyage.
+    queryClient.setQueryData(documentsKey(ana), { items: [] });
+
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    await waitFor(() => {
+      expect(requests.documents).toBe(2);
+    });
+
+    expect(queryClient.getQueryState(documentsKey(ana))?.isInvalidated).toBe(false);
+    const claireScope = ['protected', `${claire.user.id}:${claire.organization.id}`];
+    const invalidated = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: claireScope })
+      .filter((query) => query.state.isInvalidated || query.state.dataUpdateCount > 1)
+      .map((query) => query.queryKey.at(-1));
+    expect(invalidated.sort()).toEqual(['documents', 'timeline']);
+  });
+});
+
+describe('An upload or a decision being made while documents are pushed', () => {
+  const versionsPath = `*/api/voyages/${voyage.id}/contracts/${asSeller.id}/documentary-instructions/revisions/1/documents/BILL_OF_LADING/versions`;
+
+  const aPdf = (name: string) =>
+    new File([new TextEncoder().encode('%PDF-1.7\n')], name, { type: 'application/pdf' });
+
+  /** Holds a response until `release()`; `received` once the request has arrived. */
+  function aGate() {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let arrived: () => void = () => undefined;
+    const received = new Promise<void>((resolve) => (arrived = resolve));
+    return { gate, received, arrived, release };
+  }
+
+  /** Serves uploads of the bill of lading with `respond`, recording what each one carried. */
+  function serveUploads(respond: () => Promise<Response> | Response) {
+    const sent: { fileName: string; ifMatch: string | null; ifNoneMatch: string | null }[] = [];
+    server.use(
+      http.post(versionsPath, async ({ request }) => {
+        const file = (await request.formData()).get('file');
+        sent.push({
+          fileName: file instanceof File ? file.name : '',
+          ifMatch: request.headers.get('if-match'),
+          ifNoneMatch: request.headers.get('if-none-match'),
+        });
+        return respond();
+      }),
+    );
+    return sent;
+  }
+
+  /** Serves decisions on the bill of lading with `respond`, recording what each one carried. */
+  function serveReviews(respond: () => Promise<Response> | Response) {
+    const sent: { version: string; ifMatch: string | null; body: unknown }[] = [];
+    server.use(
+      http.post(`${versionsPath}/:version/review`, async ({ request, params }) => {
+        sent.push({
+          version: String(params.version),
+          ifMatch: request.headers.get('if-match'),
+          body: await request.json(),
+        });
+        return respond();
+      }),
+    );
+    return sent;
+  }
+
+  /** Records downloads of any version: a push must never start one. */
+  function recordDownloads() {
+    const downloads: string[] = [];
+    server.use(
+      http.get(`${versionsPath}/:version/content`, ({ params }) => {
+        downloads.push(String(params.version));
+        return new HttpResponse(new TextEncoder().encode('%PDF-1.7\n'), {
+          headers: { 'Content-Type': 'application/pdf' },
+        });
+      }),
+    );
+    return downloads;
+  }
+
+  const fileInput = (item: Awaited<ReturnType<typeof billOfLading>>) =>
+    item.getByLabelText('PDF file for the bill of lading');
+
+  it("keeps the seller's chosen file and its basis while a colleague's file and the buyer's decision are pushed", async () => {
+    const served = servePage(voyage, asSeller);
+    served.state.instructions = [anInstruction()];
+    const theirs = aDocument({ currentVersion: aDocumentVersion({ uploadedBy: brunoUploads }) });
+    const rejected = reviewedAs(theirs, { decision: 'REJECTED', reason: REASON });
+    const mine = replacedBy(rejected, { fileName: 'bl-signed.pdf' });
+    const sent = serveUploads(() => {
+      served.state.documents = [mine];
+      return HttpResponse.json(mine, { status: 201 });
+    });
+    const downloads = recordDownloads();
+    const { source, user } = await liveFor(served, ana);
+    const item = await billOfLading();
+    await user.upload(fileInput(item), aPdf('bl-signed.pdf'));
+    expect(item.getByRole('button', { name: 'Upload' })).toBeEnabled();
+
+    // Bruno, Ana's colleague, uploads version 1 elsewhere; the server signals it.
+    served.state.documents = [theirs];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    const latest = within(
+      await item.findByRole('region', { name: 'Latest version of Bill of lading' }),
+    );
+    expect(latest.getByText('A new version was uploaded')).toBeVisible();
+    expect(latest.getByText(/uploaded by Bruno Lima/)).toBeVisible();
+    expect(item.getByText(/^bl-signed\.pdf/)).toBeVisible();
+    expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+
+    // Then Claire rejects Bruno's file: still Ana's file, still based on no document at all.
+    served.state.documents = [rejected];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    expect(await item.findByText('Rejected')).toBeVisible();
+    expect(item.getByText(/^bl-signed\.pdf/)).toBeVisible();
+    expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+    await quietly();
+    // Nothing was sent, rebased, retried or downloaded behind Ana's back.
+    expect(sent).toEqual([]);
+    expect(downloads).toEqual([]);
+
+    // Only Ana's choice bases her file on the document as it is now, which is what is sent.
+    await user.click(latest.getByRole('button', { name: 'Replace version 1 with my file' }));
+    await user.click(item.getByRole('button', { name: 'Upload as version 2' }));
+    expect(
+      await item.findByText('Version 2 of the bill of lading has been uploaded.'),
+    ).toBeVisible();
+    expect(sent).toEqual([{ fileName: 'bl-signed.pdf', ifMatch: '"2"', ifNoneMatch: null }]);
+    expect(downloads).toEqual([]);
+  });
+
+  it("keeps the buyer's decision on its exact file while a replacement is pushed", async () => {
+    const served = servePage();
+    served.state.instructions = [buyersView(anInstruction())];
+    served.state.documents = [buyersDocument(aDocument())];
+    const replaced = buyersDocument(replacedBy(aDocument()));
+    const sent = serveReviews(() =>
+      HttpResponse.json(reviewedAs(replaced, { decision: 'REJECTED', reason: REASON })),
+    );
+    const downloads = recordDownloads();
+    const { source, user } = await liveFor(served);
+    const item = await billOfLading();
+    await user.click(item.getByRole('radio', { name: 'Reject' }));
+    await user.type(item.getByRole('textbox', { name: /Reason for rejecting/ }), REASON);
+
+    // Ana replaces version 1 while Claire is deciding on it; the server signals it.
+    served.state.documents = [replaced];
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+    });
+    const notice = within(await item.findByRole('region', { name: 'Changes to Bill of lading' }));
+    expect(notice.getByText('A new version was uploaded')).toBeVisible();
+    expect(notice.getByText(/after you started reviewing version 1/)).toBeVisible();
+    expect(item.getByRole('textbox', { name: /Reason for rejecting/ })).toHaveValue(REASON);
+    expect(item.getByRole('button', { name: 'Reject version 1' })).toBeDisabled();
+    await quietly();
+    // Nothing was sent, moved onto the new file, retried or downloaded behind Claire's back.
+    expect(sent).toEqual([]);
+    expect(downloads).toEqual([]);
+
+    // Only Claire's choice moves the draft onto version 2, which is what is then decided.
+    await user.click(notice.getByRole('button', { name: 'Review version 2 instead' }));
+    expect(item.getByRole('textbox', { name: /Reason for rejecting/ })).toHaveValue(REASON);
+    await user.click(item.getByRole('button', { name: 'Reject version 2' }));
+    expect(
+      await item.findByText('Version 2 of the bill of lading has been rejected.'),
+    ).toBeVisible();
+    expect(sent).toEqual([
+      { version: '2', ifMatch: '"2"', body: { decision: 'REJECTED', reason: REASON } },
+    ]);
+    expect(downloads).toEqual([]);
+  });
+
+  it.each([
+    ['first version', false],
+    ['replacement', true],
+  ] as const)(
+    'shows no conflict when its own %s is signalled before the response',
+    async (_case, replacing) => {
+      const served = servePage(voyage, asSeller);
+      served.state.instructions = [anInstruction()];
+      const before = replacing ? aDocument() : null;
+      served.state.documents = before ? [before] : [];
+      const mine = before
+        ? replacedBy(before, { fileName: 'bl-signed.pdf' })
+        : aDocument({ currentVersion: aDocumentVersion({ fileName: 'bl-signed.pdf' }) });
+      const { gate, received, arrived, release } = aGate();
+      const sent = serveUploads(async () => {
+        // Committed: the server signals it before this response reaches the browser.
+        served.state.documents = [mine];
+        arrived();
+        await gate;
+        return HttpResponse.json(mine, { status: 201 });
+      });
+      const { source, user, queryClient } = await liveFor(served, ana);
+      const item = await billOfLading();
+      await user.upload(fileInput(item), aPdf('bl-signed.pdf'));
+      await user.click(
+        item.getByRole('button', { name: replacing ? 'Upload as version 2' : 'Upload' }),
+      );
+      await received;
+
+      const reads = served.requests.documents;
+      act(() => {
+        source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+      });
+      await waitFor(() => {
+        expect(
+          queryClient.getQueryData<DocumentListResponse>(documentsKey(ana))?.items[0]?.version,
+        ).toBe(mine.version);
+      });
+      expect(served.requests.documents).toBe(reads + 1);
+      // The upload is still on its way: its answer decides, not the refresh.
+      expect(
+        item.queryByRole('region', { name: 'Latest version of Bill of lading' }),
+      ).not.toBeInTheDocument();
+      expect(item.getByText(/^bl-signed\.pdf/)).toBeVisible();
+
+      release();
+      expect(
+        await item.findByText(
+          `Version ${mine.currentVersion.number} of the bill of lading has been uploaded.`,
+        ),
+      ).toBeVisible();
+      expect(
+        item.queryByRole('region', { name: 'Latest version of Bill of lading' }),
+      ).not.toBeInTheDocument();
+      expect(item.queryByText('Not uploaded')).not.toBeInTheDocument();
+      expect(item.getByText('No file chosen')).toBeVisible();
+      expect(sent).toEqual([
+        {
+          fileName: 'bl-signed.pdf',
+          ifMatch: replacing ? '"1"' : null,
+          ifNoneMatch: replacing ? null : '*',
+        },
+      ]);
+    },
+  );
+
+  it('shows no conflict when its own decision is signalled before the response', async () => {
+    const served = servePage();
+    served.state.instructions = [buyersView(anInstruction())];
+    served.state.documents = [buyersDocument(aDocument())];
+    const mine = buyersDocument(reviewedAs(aDocument()));
+    const { gate, received, arrived, release } = aGate();
+    const sent = serveReviews(async () => {
+      // Committed: the server signals it before this response reaches the browser.
+      served.state.documents = [mine];
+      arrived();
+      await gate;
+      return HttpResponse.json(mine);
+    });
+    const { source, user, queryClient } = await liveFor(served);
+    const item = await billOfLading();
+    await user.click(item.getByRole('radio', { name: 'Approve' }));
+    await user.click(item.getByRole('button', { name: 'Approve version 1' }));
+    await received;
+
+    act(() => {
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    await waitFor(() => {
+      expect(
+        queryClient.getQueryData<DocumentListResponse>(documentsKey(claire))?.items[0]?.version,
+      ).toBe(2);
+    });
+    // The decision is still on its way: its answer decides, not the refresh.
+    expect(
+      item.queryByRole('region', { name: 'Changes to Bill of lading' }),
+    ).not.toBeInTheDocument();
+    expect(item.getByRole('radio', { name: 'Approve' })).toBeChecked();
+
+    release();
+    expect(
+      await item.findByText('Version 1 of the bill of lading has been approved.'),
+    ).toBeVisible();
+    expect(
+      item.queryByRole('region', { name: 'Changes to Bill of lading' }),
+    ).not.toBeInTheDocument();
+    expect(item.queryByText('Not recorded')).not.toBeInTheDocument();
+    expect(sent).toEqual([{ version: '1', ifMatch: '"1"', body: { decision: 'APPROVED' } }]);
+  });
+});
+
 describe('Reconnecting and polling', () => {
   it('reads again after the browser reconnects, and polls while it is away', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -877,16 +1408,19 @@ describe('Reconnecting and polling', () => {
     act(() => {
       source.emit({ type: 'READY' });
     });
+    const live = (count: number) => ({
+      notices: count,
+      'documentary-instructions': count,
+      documents: count,
+      timeline: count,
+    });
     await waitFor(() => {
-      expect(requests.notices).toBe(2);
-      expect(requests['documentary-instructions']).toBe(2);
+      expect(requests).toMatchObject(live(2));
     });
 
     // Live: no polling.
     await act(() => vi.advanceTimersByTimeAsync(2 * FALLBACK_POLL_INTERVAL_MS));
-    expect(requests.notices).toBe(2);
-    expect(requests['documentary-instructions']).toBe(2);
-    expect(requests.timeline).toBe(2);
+    expect(requests).toMatchObject(live(2));
 
     // The connection drops; the browser reconnects by itself. Meanwhile, the page polls.
     act(() => {
@@ -894,9 +1428,7 @@ describe('Reconnecting and polling', () => {
     });
     await act(() => vi.advanceTimersByTimeAsync(FALLBACK_POLL_INTERVAL_MS));
     await waitFor(() => {
-      expect(requests.notices).toBe(3);
-      expect(requests['documentary-instructions']).toBe(3);
-      expect(requests.timeline).toBe(3);
+      expect(requests).toMatchObject(live(3));
     });
 
     // Back: whatever changed while away is read through REST, and polling stops.
@@ -904,15 +1436,11 @@ describe('Reconnecting and polling', () => {
       source.emit({ type: 'READY' });
     });
     await waitFor(() => {
-      expect(requests.notices).toBe(4);
-      expect(requests['documentary-instructions']).toBe(4);
-      expect(requests.timeline).toBe(4);
+      expect(requests).toMatchObject(live(4));
     });
     await act(() => vi.advanceTimersByTimeAsync(2 * FALLBACK_POLL_INTERVAL_MS));
-    expect(requests.notices).toBe(4);
-    expect(requests['documentary-instructions']).toBe(4);
     // Nothing else was ever refetched.
-    expect(requests.documents).toBe(1);
+    expect(requests).toEqual({ voyage: 1, 'trade-string': 1, 'my-contracts': 1, ...live(4) });
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
@@ -924,19 +1452,21 @@ describe('Reconnecting and polling', () => {
     await loaded(requests);
 
     await act(() => vi.advanceTimersByTimeAsync(FALLBACK_POLL_INTERVAL_MS));
+    const polledOnce = {
+      notices: 2,
+      'documentary-instructions': 2,
+      documents: 2,
+      timeline: 2,
+    };
     await waitFor(() => {
-      expect(requests.notices).toBe(2);
-      expect(requests['documentary-instructions']).toBe(2);
-      expect(requests.timeline).toBe(2);
+      expect(requests).toMatchObject(polledOnce);
     });
 
     act(() => {
       focusManager.setFocused(false);
     });
     await act(() => vi.advanceTimersByTimeAsync(3 * FALLBACK_POLL_INTERVAL_MS));
-    expect(requests.notices).toBe(2);
-    expect(requests['documentary-instructions']).toBe(2);
-    expect(requests.timeline).toBe(2);
+    expect(requests).toMatchObject(polledOnce);
   });
 
   it('opens a new stream after the browser gives up, waiting longer each time', async () => {
@@ -1011,10 +1541,13 @@ describe('The stream belongs to the voyage and the session it was opened for', (
     act(() => {
       source.emit({ type: 'NOTICE_ISSUED' });
       source.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      source.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
+      source.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
     });
     await quietly();
     expect(requests.notices).toBe(1);
     expect(requests['documentary-instructions']).toBe(1);
+    expect(requests.documents).toBe(1);
     expect(
       await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
     ).toBeInTheDocument();
@@ -1034,16 +1567,19 @@ describe('The stream belongs to the voyage and the session it was opened for', (
     await quietly();
     const settled = requests.notices;
     const settledInstructions = requests['documentary-instructions'];
+    const settledDocuments = requests.documents;
 
     // The old stream speaks for the session that was signed out, though it was Claire's too.
     act(() => {
       before.emit({ type: 'READY' });
       before.emit({ type: 'NOTICE_ISSUED' });
       before.emit({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+      before.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
     });
     await quietly();
     expect(requests.notices).toBe(settled);
     expect(requests['documentary-instructions']).toBe(settledInstructions);
+    expect(requests.documents).toBe(settledDocuments);
 
     act(() => {
       after.emit({ type: 'NOTICE_ISSUED' });
@@ -1056,6 +1592,12 @@ describe('The stream belongs to the voyage and the session it was opened for', (
     });
     await waitFor(() => {
       expect(requests['documentary-instructions']).toBe(settledInstructions + 1);
+    });
+    act(() => {
+      after.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
+    });
+    await waitFor(() => {
+      expect(requests.documents).toBe(settledDocuments + 1);
     });
   });
 
@@ -1084,26 +1626,32 @@ describe('The stream belongs to the voyage and the session it was opened for', (
 
     await waitFor(() => {
       expect(requests['documentary-instructions']).toBe(3);
+      expect(requests.documents).toBe(3);
     });
 
     // Claire's first stream speaks for a session that has ended, though she is back.
     act(() => {
       claires.emit({ type: 'NOTICE_ISSUED' });
       claires.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      claires.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
       anas.emit({ type: 'NOTICE_ISSUED' });
       anas.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      anas.emit({ type: 'DOCUMENT_VERSION_REVIEWED' });
     });
     await quietly();
     expect(requests.notices).toBe(3);
     expect(requests['documentary-instructions']).toBe(3);
+    expect(requests.documents).toBe(3);
 
     act(() => {
       clairesAgain.emit({ type: 'NOTICE_ISSUED' });
       clairesAgain.emit({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      clairesAgain.emit({ type: 'DOCUMENT_VERSION_UPLOADED' });
     });
     await waitFor(() => {
       expect(requests.notices).toBe(4);
       expect(requests['documentary-instructions']).toBe(4);
+      expect(requests.documents).toBe(4);
     });
     expect(FakeEventSource.open()).toEqual([clairesAgain]);
   });

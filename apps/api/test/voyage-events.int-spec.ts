@@ -1,4 +1,6 @@
+import { createHash, randomBytes } from 'node:crypto';
 import {
+  ContractDocumentSchema,
   type DocumentaryInstructionContent,
   DocumentaryInstructionSchema,
   type IssueNoticeRequest,
@@ -13,7 +15,12 @@ import { CounterpartyContracts } from '../src/modules/voyages/counterparty-contr
 import { VoyageEventBus } from '../src/modules/voyages/voyage-event-bus.js';
 import { VoyageEventStreams } from '../src/modules/voyages/voyage-event-streams.js';
 import { sessionCookie, signIn } from './support/auth.js';
-import { failAuditWrites, holdLock, waitForLockWaiters } from './support/concurrency.js';
+import {
+  failAuditWrites,
+  failCommitsWriting,
+  holdLock,
+  waitForLockWaiters,
+} from './support/concurrency.js';
 import {
   createOrganization,
   createReferenceData,
@@ -25,6 +32,7 @@ import {
 } from './support/database.js';
 import { TestEventBus } from './support/event-bus.js';
 import { type EventStream, openEventStream } from './support/event-stream.js';
+import { TestStorage } from './support/storage.js';
 import { createTestApp, type TestApp } from './support/test-app.js';
 
 /*
@@ -49,6 +57,8 @@ const ISSUED = JSON.stringify({ type: 'NOTICE_ISSUED' });
 const ACKNOWLEDGED = JSON.stringify({ type: 'NOTICE_ACKNOWLEDGED' });
 const REVISED = JSON.stringify({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
 const DI_ACKNOWLEDGED = JSON.stringify({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
+const UPLOADED = JSON.stringify({ type: 'DOCUMENT_VERSION_UPLOADED' });
+const REVIEWED = JSON.stringify({ type: 'DOCUMENT_VERSION_REVIEWED' });
 
 const firstContent: DocumentaryInstructionContent = {
   consignee: 'To order of Confidential Bank S.A.',
@@ -71,6 +81,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('Voyage event streams', () => {
   let ctx: TestApp;
+  let storage: TestStorage;
   const bus = new TestEventBus();
   const streamOptions = { recheckIntervalMs: FAST_RECHECK_MS, maxPendingContracts: 32 };
   const opened: EventStream[] = [];
@@ -78,20 +89,24 @@ describe('Voyage event streams', () => {
   const streams = () => ctx.app.get(VoyageEventStreams);
 
   beforeAll(async () => {
-    ctx = await createTestApp({ eventBus: bus, eventStreams: streamOptions });
+    storage = await TestStorage.create();
+    ctx = await createTestApp({ eventBus: bus, eventStreams: streamOptions, storage });
   });
 
   afterAll(async () => {
     await ctx.app.close();
+    await storage.dispose();
   });
 
   beforeEach(async () => {
     streamOptions.recheckIntervalMs = FAST_RECHECK_MS;
     bus.reset();
     await resetDatabase(ctx.prisma);
+    await storage.clear();
   });
 
   afterEach(async () => {
+    storage.reset();
     for (const stream of opened.splice(0)) stream.close();
     // The server has let go of every stream (and stopped rechecking) before the next test.
     await until(() => streams().size === 0 && bus.listenerCount() === 0);
@@ -748,6 +763,479 @@ describe('Voyage event streams', () => {
       expect(await buyer.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED' });
       expect(seller.data).toEqual([READY, DI_ACKNOWLEDGED]);
       expect(buyer.data).toEqual([READY, DI_ACKNOWLEDGED]);
+    });
+  });
+
+  describe('documents and their reviews', () => {
+    // Under c1 the exporter sells and the trader buys: the trader's instructions require a bill
+    // of lading, the exporter presents it, and the trader approves or rejects each file.
+
+    const REASON = 'Confidential: the consignee does not match the instructions.';
+    const APPROVE = { decision: 'APPROVED' };
+    const reject = () => ({ decision: 'REJECTED', reason: REASON });
+
+    /** Bytes that start like a PDF, `size` bytes in all. */
+    const pdf = (size = 16 * 1024) =>
+      Buffer.concat([Buffer.from('%PDF-1.7\n'), randomBytes(size - 9)]);
+    const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+    interface DocumentAt {
+      voyageId: string;
+      contractId: string;
+      revision?: number;
+      type?: string;
+    }
+
+    const versionsPath = ({
+      voyageId,
+      contractId,
+      revision = 1,
+      type = 'BILL_OF_LADING',
+    }: DocumentAt) =>
+      `${instructionPath(voyageId, contractId)}/revisions/${revision}/documents/${type}/versions`;
+
+    interface UploadOptions {
+      bytes?: Buffer;
+      fileName?: string;
+      /** The preconditions; the first version (If-None-Match: *) by default. */
+      headers?: Record<string, string>;
+    }
+
+    /** A real multipart upload, as a browser's FormData would send it. */
+    const upload = (
+      cookie: string,
+      at: DocumentAt,
+      { bytes = pdf(), fileName = 'bill-of-lading.pdf', headers }: UploadOptions = {},
+    ) =>
+      http()
+        .post(versionsPath(at))
+        .set('Cookie', cookie)
+        .set(headers ?? { 'If-None-Match': '*' })
+        .attach('file', bytes, { filename: fileName, contentType: 'application/pdf' });
+
+    /** A replacement of the latest file, based on document version `version` (If-Match). */
+    const replace = (
+      cookie: string,
+      at: DocumentAt,
+      version: number,
+      options: UploadOptions = {},
+    ) =>
+      upload(cookie, at, {
+        fileName: 'bill-of-lading-v2.pdf',
+        ...options,
+        headers: { 'If-Match': `"${version}"` },
+      });
+
+    async function uploaded(cookie: string, at: DocumentAt, options?: UploadOptions) {
+      return ContractDocumentSchema.parse((await upload(cookie, at, options).expect(201)).body);
+    }
+
+    /** A decision on file version `file`, based on document version `version`; null sends none. */
+    const review = (
+      cookie: string,
+      at: DocumentAt,
+      file: number,
+      body: object,
+      version: number | null,
+    ) => {
+      const call = http()
+        .post(`${versionsPath(at)}/${file}/review`)
+        .set('Cookie', cookie);
+      return (version === null ? call : call.set('If-Match', `"${version}"`)).send(body);
+    };
+
+    /** The bytes of file version `file`, as the user of `cookie` downloads them. */
+    const download = async (cookie: string, at: DocumentAt, file: number) =>
+      (
+        await http()
+          .get(`${versionsPath(at)}/${file}/content`)
+          .set('Cookie', cookie)
+          .buffer(true)
+          .parse((response, done) => {
+            const chunks: Buffer[] = [];
+            response.on('data', (chunk: Buffer) => chunks.push(chunk));
+            response.on('end', () => {
+              done(null, Buffer.concat(chunks));
+            });
+          })
+          .expect(200)
+      ).body as Buffer;
+
+    const documentWrites = async () => ({
+      documents: await ctx.prisma.document.count(),
+      versions: await ctx.prisma.documentVersion.count(),
+      reviews: await ctx.prisma.documentReview.count(),
+      auditEvents: await ctx.prisma.auditEvent.count({
+        where: { action: { in: ['DOCUMENT_VERSION_UPLOADED', 'DOCUMENT_VERSION_REVIEWED'] } },
+      }),
+    });
+
+    /** The storage keys document versions name, sorted like `storage.files('objects')`. */
+    const keptObjects = async () =>
+      (await ctx.prisma.documentVersion.findMany()).map(({ storageKey }) => storageKey).sort();
+
+    /** The scenario with revision 1 under c1 given, and nothing published so far. */
+    async function presenting() {
+      const s = await scenario();
+      const instruction = await given(s.trader.operator.cookie, s.voyage.id, s.c1);
+      bus.reset();
+      const bl: DocumentAt = { voyageId: s.voyage.id, contractId: s.c1 };
+      return { ...s, instruction, bl };
+    }
+
+    /** Another operator of the organization, signed in. */
+    async function colleagueOf(organizationId: string) {
+      const user = await createUser(ctx.prisma, organizationId, { role: 'OPERATOR' });
+      return signIn(ctx.server, user.email);
+    }
+
+    /**
+     * Holds a row's lock and starts the contenders one after another, each blocked on the row
+     * before the next starts (so PostgreSQL grants it in that order), then lets them go together.
+     */
+    async function race(
+      table: 'documentary_instructions' | 'documents',
+      id: string,
+      contenders: (() => request.Test)[],
+    ) {
+      const lock = await holdLock(ctx.prisma, (tx) =>
+        tx.$queryRawUnsafe(`SELECT id FROM ${table} WHERE id = $1::uuid FOR UPDATE`, id),
+      );
+      const answers: Promise<request.Response>[] = [];
+      try {
+        for (const [index, send] of contenders.entries()) {
+          answers.push(send().then((answer) => answer));
+          await waitForLockWaiters(ctx.prisma, index + 1);
+        }
+      } finally {
+        await lock.release();
+      }
+      return (await Promise.all(answers)).map(({ status }) => status);
+    }
+
+    it("tells only the contract's counterparties, and only the type of change", async () => {
+      const s = await presenting();
+      const sellerOperator = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const sellerViewer = await listen(s.exporter.viewer.cookie, s.voyage.id);
+      const buyerViewer = await listen(s.trader.viewer.cookie, s.voyage.id);
+      // A party to c2 only, a service provider, and a party to a contract on another voyage.
+      const nextBuyer = await listen(s.buyer.viewer.cookie, s.voyage.id);
+      const surveyor = await listen(s.surveyor.viewer.cookie, s.voyage.id);
+      const exporterElsewhere = await listen(s.exporter.viewer.cookie, s.other.id);
+      const c1Parties = [sellerOperator, sellerViewer, buyerViewer];
+      const c1PartiesHear = async (type: string) => {
+        for (const stream of c1Parties) expect(await stream.next()).toEqual({ type });
+      };
+
+      const firstBytes = pdf();
+      const secondBytes = pdf();
+      const document = await uploaded(s.exporter.operator.cookie, s.bl, {
+        bytes: firstBytes,
+        fileName: 'confidential-bl.pdf',
+      });
+      await c1PartiesHear('DOCUMENT_VERSION_UPLOADED');
+      await review(s.trader.operator.cookie, s.bl, 1, APPROVE, 1).expect(200);
+      await c1PartiesHear('DOCUMENT_VERSION_REVIEWED');
+      await replace(s.exporter.operator.cookie, s.bl, 2, {
+        bytes: secondBytes,
+        fileName: 'confidential-bl-v2.pdf',
+      }).expect(201);
+      await c1PartiesHear('DOCUMENT_VERSION_UPLOADED');
+      await review(s.trader.operator.cookie, s.bl, 2, reject(), 3).expect(200);
+      await c1PartiesHear('DOCUMENT_VERSION_REVIEWED');
+
+      // Barriers: instructions under c2 reach both its parties, under d1 both parties there.
+      await given(s.buyer.operator.cookie, s.voyage.id, s.c2);
+      await given(s.buyer.operator.cookie, s.other.id, s.d1);
+      for (const stream of [nextBuyer, buyerViewer, exporterElsewhere]) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENTARY_INSTRUCTION_REVISED' });
+      }
+      await settled(surveyor);
+      await settled(sellerOperator);
+
+      const c1Changes = [READY, UPLOADED, REVIEWED, UPLOADED, REVIEWED];
+      expect(sellerOperator.data).toEqual(c1Changes);
+      expect(sellerViewer.data).toEqual(c1Changes);
+      expect(buyerViewer.data).toEqual([...c1Changes, REVISED]);
+      expect(nextBuyer.data).toEqual([READY, REVISED]);
+      expect(surveyor.data).toEqual([READY]);
+      expect(exporterElsewhere.data).toEqual([READY, REVISED]);
+      // Exactly the type: no ids, file names, checksums, storage keys or reasons.
+      const storageKeys = await keptObjects();
+      expect(storageKeys).toHaveLength(2);
+      const secrets = [
+        document.id,
+        s.c1,
+        s.instruction.id,
+        'confidential-bl',
+        sha256(firstBytes),
+        sha256(secondBytes),
+        REASON,
+        ...storageKeys,
+      ];
+      for (const raw of [...sellerViewer.data, ...buyerViewer.data]) {
+        expect(Object.keys(JSON.parse(raw) as object)).toEqual(['type']);
+        for (const secret of secrets) expect(raw).not.toContain(secret);
+      }
+    });
+
+    it('tells nobody about a refused or failed-precondition upload or review', async () => {
+      const s = await presenting();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.operator.cookie, s.voyage.id);
+      const { cookie: sellerCookie } = s.exporter.operator;
+      const { cookie: buyerCookie } = s.trader.operator;
+      const bothHear = async (type: string) => {
+        for (const stream of [seller, buyer]) expect(await stream.next()).toEqual({ type });
+      };
+
+      // Uploads by a viewer of the seller or by the buyer (403), without a precondition (428),
+      // replacing nothing (412), of a type or a revision the instructions do not require (404),
+      // under someone else's contract (404), of a file that is not a PDF (415) or is empty (400).
+      await upload(s.exporter.viewer.cookie, s.bl).expect(403);
+      await upload(buyerCookie, s.bl).expect(403);
+      await upload(sellerCookie, s.bl, { headers: {} }).expect(428);
+      await replace(sellerCookie, s.bl, 1).expect(412);
+      await upload(sellerCookie, { ...s.bl, type: 'CERTIFICATE_OF_ORIGIN' }).expect(404);
+      await upload(sellerCookie, { ...s.bl, revision: 2 }).expect(404);
+      await upload(sellerCookie, { ...s.bl, contractId: s.c2 }).expect(404);
+      await upload(sellerCookie, s.bl, { bytes: Buffer.from('<html>not a PDF</html>') }).expect(
+        415,
+      );
+      await upload(sellerCookie, s.bl, { bytes: Buffer.alloc(0) }).expect(400);
+      expect(bus.published).toEqual([]);
+      expect(await storage.files('objects')).toEqual([]);
+
+      await uploaded(sellerCookie, s.bl);
+      await bothHear('DOCUMENT_VERSION_UPLOADED');
+
+      // A second first version and a stale replacement (412); reviews by the seller or a viewer
+      // of the buyer (403), without If-Match (428), at a stale version (412), of a file version
+      // that does not exist (404), and a rejection without its reason (400).
+      await upload(sellerCookie, s.bl).expect(412);
+      await replace(sellerCookie, s.bl, 7).expect(412);
+      await review(sellerCookie, s.bl, 1, APPROVE, 1).expect(403);
+      await review(s.trader.viewer.cookie, s.bl, 1, APPROVE, 1).expect(403);
+      await review(buyerCookie, s.bl, 1, APPROVE, null).expect(428);
+      await review(buyerCookie, s.bl, 1, APPROVE, 7).expect(412);
+      await review(buyerCookie, s.bl, 2, APPROVE, 1).expect(404);
+      await review(buyerCookie, s.bl, 1, { decision: 'REJECTED' }, 1).expect(400);
+
+      await review(buyerCookie, s.bl, 1, APPROVE, 1).expect(200);
+      await bothHear('DOCUMENT_VERSION_REVIEWED');
+      // Decided once already (409); then replaced by version 2, so no longer the latest (409).
+      await review(buyerCookie, s.bl, 1, reject(), 2).expect(409);
+      await replace(sellerCookie, s.bl, 2).expect(201);
+      await bothHear('DOCUMENT_VERSION_UPLOADED');
+      await review(buyerCookie, s.bl, 1, reject(), 3).expect(409);
+
+      // The barrier: one more change, after every refusal above.
+      await review(buyerCookie, s.bl, 2, reject(), 3).expect(200);
+      await bothHear('DOCUMENT_VERSION_REVIEWED');
+      for (const stream of [seller, buyer]) {
+        expect(stream.data).toEqual([READY, UPLOADED, REVIEWED, UPLOADED, REVIEWED]);
+      }
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENT_VERSION_UPLOADED',
+        'DOCUMENT_VERSION_REVIEWED',
+        'DOCUMENT_VERSION_UPLOADED',
+        'DOCUMENT_VERSION_REVIEWED',
+      ]);
+    });
+
+    it('signals nothing when a write rolls back, or its commit has an unknown outcome', async () => {
+      const s = await presenting();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+      const { cookie: sellerCookie } = s.exporter.operator;
+      const { cookie: buyerCookie } = s.trader.operator;
+      const nothingWritten = { documents: 0, versions: 0, reviews: 0, auditEvents: 0 };
+
+      // Rolled back: the audit event cannot be written, or the bytes cannot be kept. Either
+      // way the upload's bytes are compensated.
+      await failAuditWrites(ctx.prisma, async () => {
+        await upload(sellerCookie, s.bl).expect(500);
+      });
+      storage.failNext('promote');
+      await upload(sellerCookie, s.bl).expect(500);
+      expect(await documentWrites()).toEqual(nothingWritten);
+      expect(await storage.files('objects')).toEqual([]);
+      // The commit fails once sent: the API cannot know it did not commit, so it keeps the
+      // bytes for reconciliation, and announces nothing.
+      await failCommitsWriting(ctx.prisma, 'document_versions', async () => {
+        await upload(sellerCookie, s.bl).expect(500);
+      });
+      expect(await documentWrites()).toEqual(nothingWritten);
+      expect(await storage.files('objects')).toHaveLength(1);
+      expect(bus.published).toEqual([]);
+
+      // The barrier: the next change is the first either stream hears of.
+      await uploaded(sellerCookie, s.bl);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENT_VERSION_UPLOADED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENT_VERSION_UPLOADED' });
+
+      await failAuditWrites(ctx.prisma, async () => {
+        await review(buyerCookie, s.bl, 1, APPROVE, 1).expect(500);
+      });
+      await failCommitsWriting(ctx.prisma, 'document_reviews', async () => {
+        await review(buyerCookie, s.bl, 1, APPROVE, 1).expect(500);
+      });
+      expect(await documentWrites()).toEqual({
+        documents: 1,
+        versions: 1,
+        reviews: 0,
+        auditEvents: 1,
+      });
+      await review(buyerCookie, s.bl, 1, reject(), 1).expect(200);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+
+      expect(seller.data).toEqual([READY, UPLOADED, REVIEWED]);
+      expect(buyer.data).toEqual([READY, UPLOADED, REVIEWED]);
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENT_VERSION_UPLOADED',
+        'DOCUMENT_VERSION_REVIEWED',
+      ]);
+    });
+
+    it('signals one upload when two first versions race', async () => {
+      const s = await presenting();
+      const colleague = await colleagueOf(s.exporter.organization.id);
+      const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+
+      // Both have their bytes kept and wait for the revision's lock to commit.
+      const statuses = await race('documentary_instructions', s.instruction.id, [
+        () => upload(s.exporter.operator.cookie, s.bl),
+        () => upload(colleague, s.bl),
+      ]);
+      expect(statuses).toEqual([201, 412]);
+      expect(await documentWrites()).toMatchObject({ versions: 1, auditEvents: 1 });
+      // The loser's bytes were removed; publishing touched neither.
+      expect(await storage.files('objects')).toEqual(await keptObjects());
+
+      // The barrier: the buyer decides on the winning file.
+      await review(s.trader.operator.cookie, s.bl, 1, APPROVE, 1).expect(200);
+      for (const stream of [seller, buyer]) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENT_VERSION_UPLOADED' });
+        expect(await stream.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+        expect(stream.data).toEqual([READY, UPLOADED, REVIEWED]);
+      }
+      expect(bus.published.map(({ type }) => type)).toEqual([
+        'DOCUMENT_VERSION_UPLOADED',
+        'DOCUMENT_VERSION_REVIEWED',
+      ]);
+    });
+
+    it('signals one decision when two reviews of the same file race', async () => {
+      const s = await presenting();
+      const document = await uploaded(s.exporter.operator.cookie, s.bl);
+      const colleague = await colleagueOf(s.trader.organization.id);
+      const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+
+      const statuses = await race('documents', document.id, [
+        () => review(s.trader.operator.cookie, s.bl, 1, APPROVE, 1),
+        () => review(colleague, s.bl, 1, reject(), 1),
+      ]);
+      expect(statuses).toEqual([200, 412]);
+      expect(await documentWrites()).toMatchObject({ reviews: 1 });
+
+      // The barrier: a replacement based on the decision.
+      await replace(s.exporter.operator.cookie, s.bl, 2).expect(201);
+      for (const stream of [seller, buyer]) {
+        expect(await stream.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+        expect(await stream.next()).toEqual({ type: 'DOCUMENT_VERSION_UPLOADED' });
+        expect(stream.data).toEqual([READY, REVIEWED, UPLOADED]);
+      }
+    });
+
+    it.each(['review', 'replacement'] as const)(
+      'signals only the winner when a review and a replacement race and the %s wins',
+      async (winner) => {
+        const s = await presenting();
+        const document = await uploaded(s.exporter.operator.cookie, s.bl);
+        const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
+        const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
+        bus.reset();
+
+        // Both are based on version 1; whichever has the row first moves it to version 2.
+        const decide = () => review(s.trader.operator.cookie, s.bl, 1, reject(), 1);
+        const replaceIt = () => replace(s.exporter.operator.cookie, s.bl, 1);
+        const statuses = await race(
+          'documents',
+          document.id,
+          winner === 'review' ? [decide, replaceIt] : [replaceIt, decide],
+        );
+        expect(statuses).toEqual(winner === 'review' ? [200, 412] : [201, 412]);
+        // A losing replacement's bytes were removed: every object kept is a version's.
+        expect(await storage.files('objects')).toEqual(await keptObjects());
+
+        // The barrier: the next change, based on the winner's version 2.
+        if (winner === 'review') {
+          await replace(s.exporter.operator.cookie, s.bl, 2).expect(201);
+        } else {
+          await review(s.trader.operator.cookie, s.bl, 2, APPROVE, 2).expect(200);
+        }
+        const signals = winner === 'review' ? [REVIEWED, UPLOADED] : [UPLOADED, REVIEWED];
+        for (const stream of [seller, buyer]) {
+          await stream.next();
+          await stream.next();
+          expect(stream.data).toEqual([READY, ...signals]);
+        }
+        expect(bus.published.map(({ type }) => JSON.stringify({ type }))).toEqual(signals);
+      },
+    );
+
+    it('keeps a committed upload or review, and its file downloadable, when the notification fails', async () => {
+      const s = await presenting();
+      const seller = await listen(s.exporter.operator.cookie, s.voyage.id);
+      const buyer = await listen(s.trader.operator.cookie, s.voyage.id);
+      const { cookie: sellerCookie } = s.exporter.operator;
+      const { cookie: buyerCookie } = s.trader.operator;
+      const firstBytes = pdf();
+      const secondBytes = pdf(40_000);
+
+      bus.failNext();
+      const created = await upload(sellerCookie, s.bl, { bytes: firstBytes }).expect(201);
+      expect(created.headers.etag).toBe('"1"');
+      expect(ContractDocumentSchema.parse(created.body).currentVersion.sha256).toBe(
+        sha256(firstBytes),
+      );
+
+      bus.failNext();
+      const approved = await review(buyerCookie, s.bl, 1, APPROVE, 1).expect(200);
+      expect(approved.headers.etag).toBe('"2"');
+      expect(ContractDocumentSchema.parse(approved.body).currentVersion.review?.decision).toBe(
+        'APPROVED',
+      );
+
+      bus.failNext();
+      const replaced = await replace(sellerCookie, s.bl, 2, { bytes: secondBytes }).expect(201);
+      expect(replaced.headers.etag).toBe('"3"');
+      expect(await documentWrites()).toEqual({
+        documents: 1,
+        versions: 2,
+        reviews: 1,
+        auditEvents: 3,
+      });
+
+      // Publishing failed after commit, outside the upload's compensation: both files are kept
+      // under the keys their versions name, and both sides download exactly the bytes uploaded.
+      expect(await storage.files('objects')).toEqual(await keptObjects());
+      expect(await storage.files('objects')).toHaveLength(2);
+      expect(await storage.files('staging')).toEqual([]);
+      for (const cookie of [s.trader.viewer.cookie, s.exporter.viewer.cookie]) {
+        expect(sha256(await download(cookie, s.bl, 1))).toBe(sha256(firstBytes));
+        expect(sha256(await download(cookie, s.bl, 2))).toBe(sha256(secondBytes));
+      }
+
+      // Nothing was signalled, and the streams are still open and working (the barrier).
+      await review(buyerCookie, s.bl, 2, reject(), 3).expect(200);
+      expect(await seller.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+      expect(await buyer.next()).toEqual({ type: 'DOCUMENT_VERSION_REVIEWED' });
+      expect(seller.data).toEqual([READY, REVIEWED]);
+      expect(buyer.data).toEqual([READY, REVIEWED]);
     });
   });
 

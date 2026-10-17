@@ -102,6 +102,48 @@ export async function expectInstructionsSent(page: Page, scenario: Scenario, rev
   ).toBeVisible();
 }
 
+/** The bill of lading the current revision requires, with its versions and its form. */
+export const billOfLading = (page: Page) =>
+  instructionPanel(page).getByRole('listitem', { name: 'Bill of lading', exact: true });
+
+/** Uploads `file` as file version `version` of the bill of lading, as the seller. */
+export async function uploadBillOfLading(
+  page: Page,
+  file: { name: string; buffer: Buffer },
+  version: number,
+) {
+  const item = billOfLading(page);
+  await item
+    .getByLabel('PDF file for the bill of lading')
+    .setInputFiles({ name: file.name, mimeType: 'application/pdf', buffer: file.buffer });
+  await item
+    .getByRole('button', {
+      name: version === 1 ? 'Upload' : `Upload as version ${version}`,
+      exact: true,
+    })
+    .click();
+  await expect(
+    item.getByText(`Version ${version} of the bill of lading has been uploaded.`),
+  ).toBeVisible();
+}
+
+/** Approves file version `version` of the bill of lading, or rejects it with `reason`. */
+export async function reviewBillOfLading(page: Page, version: number, reason?: string) {
+  const item = billOfLading(page);
+  if (reason === undefined) {
+    await item.getByLabel('Approve', { exact: true }).check();
+    await item.getByRole('button', { name: `Approve version ${version}` }).click();
+  } else {
+    await item.getByLabel('Reject', { exact: true }).check();
+    await item.getByLabel('Reason for rejecting').fill(reason);
+    await item.getByRole('button', { name: `Reject version ${version}` }).click();
+  }
+  const verb = reason === undefined ? 'approved' : 'rejected';
+  await expect(
+    item.getByText(`Version ${version} of the bill of lading has been ${verb}.`),
+  ).toBeVisible();
+}
+
 /** A `datetime-local` value. Contexts run in UTC, so the local time is the UTC time. */
 const localInput = (epochMs: number) => new Date(epochMs).toISOString().slice(0, 16);
 

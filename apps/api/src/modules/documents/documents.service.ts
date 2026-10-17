@@ -39,6 +39,7 @@ import {
   type RevisionForDocuments,
 } from '../documentary-instructions/instruction-revisions.js';
 import { CounterpartyContracts } from '../voyages/counterparty-contracts.js';
+import { type VoyageChange, VoyageEventBus } from '../voyages/voyage-event-bus.js';
 import {
   DOCUMENT_TOO_LARGE,
   displayFileName,
@@ -107,6 +108,10 @@ export const CONTRACT_NOT_FOUND = 'Contract was not found.';
  * Whatever fails after step 2 is compensated: staged bytes are discarded, kept bytes removed
  * once the transaction has certainly rolled back. A crash between steps 3 and 4 leaves an object
  * no row names; the architecture describes how such orphans are found and removed.
+ *
+ * Once a transaction has committed, and only then, uploads and reviews announce the change to
+ * open voyage streams. For an upload that is after step 4 returned, outside its compensation:
+ * announcing can neither fail the upload nor remove the bytes it kept.
  */
 @Injectable()
 export class DocumentsService {
@@ -119,6 +124,7 @@ export class DocumentsService {
     private readonly sessions: SessionPrincipals,
     private readonly storage: DocumentStorage,
     private readonly audit: AuditTrail,
+    private readonly events: VoyageEventBus,
   ) {}
 
   /**
@@ -195,7 +201,16 @@ export class DocumentsService {
       });
       throw error;
     }
-    return this.commit(principal, target, precondition, { ...received, storageKey });
+    const document = await this.commit(principal, target, precondition, {
+      ...received,
+      storageKey,
+    });
+    this.announce({
+      type: 'DOCUMENT_VERSION_UPLOADED',
+      voyageId: target.voyageId,
+      contractId: document.contract.id,
+    });
+    return document;
   }
 
   /**
@@ -215,7 +230,7 @@ export class DocumentsService {
   ): Promise<ContractDocument | null> {
     requireOperator(principal, 'review documents');
 
-    return this.prisma.$transaction(async (tx) => {
+    const reviewed = await this.prisma.$transaction(async (tx) => {
       const contract = await this.contracts.findForVoyage(
         principal,
         target.voyageId,
@@ -289,6 +304,13 @@ export class DocumentsService {
       });
       return readWritten(tx, document.id, contract);
     });
+    if (!reviewed) return null;
+    this.announce({
+      type: 'DOCUMENT_VERSION_REVIEWED',
+      voyageId: target.voyageId,
+      contractId: reviewed.contract.id,
+    });
+    return reviewed;
   }
 
   /**
@@ -519,6 +541,23 @@ export class DocumentsService {
         : current !== null && precondition.versions.includes(current.version);
     if (!holds) {
       throw new PreconditionFailedException(whyStale(precondition, current));
+    }
+  }
+
+  /**
+   * Tells open voyage streams about a change that has committed. Called after the transaction,
+   * never inside it: a write that was refused, rolled back, failed its precondition (412), lost
+   * its race, or whose commit has an unknown outcome is never announced. Best effort: the change
+   * stands whatever happens here, so a failure is logged and the command still succeeds.
+   */
+  private announce(change: VoyageChange): void {
+    try {
+      this.events.publish(change);
+    } catch (error) {
+      this.logger.error(
+        `Could not announce ${change.type} on voyage ${change.voyageId}`,
+        stack(error),
+      );
     }
   }
 }

@@ -48,9 +48,9 @@ export function VoyageDetailsPage() {
     ...voyageQueries.myContracts(scope, voyageId),
     enabled: isValidId,
   });
-  // Notices, documentary instructions and the timeline follow the voyage's event stream once the
-  // voyage has loaded (so a voyage the user cannot see is never streamed), and are polled while
-  // no stream is live.
+  // Notices, documentary instructions, documents and the timeline follow the voyage's event
+  // stream once the voyage has loaded (so a voyage the user cannot see is never streamed), and
+  // are polled while no stream is live.
   const { refetchInterval } = useVoyageLiveUpdates(voyageId, Boolean(voyage));
   const notices = useQuery({
     ...voyageQueries.notices(scope, voyageId),
@@ -62,7 +62,11 @@ export function VoyageDetailsPage() {
     enabled: isValidId,
     refetchInterval,
   });
-  const documents = useQuery({ ...voyageQueries.documents(scope, voyageId), enabled: isValidId });
+  const documents = useQuery({
+    ...voyageQueries.documents(scope, voyageId),
+    enabled: isValidId,
+    refetchInterval,
+  });
   const timeline = useInfiniteQuery({
     ...voyageQueries.timeline(scope, voyageId),
     enabled: isValidId,
