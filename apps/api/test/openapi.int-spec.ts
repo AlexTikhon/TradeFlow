@@ -58,6 +58,7 @@ describe('OpenAPI document', () => {
         '/api/vessels',
         '/api/commodities',
         '/api/ports',
+        '/api/organizations',
       ]),
     );
 
@@ -115,6 +116,8 @@ describe('OpenAPI document', () => {
       operation('/api/vessels', 'get'),
       operation('/api/commodities', 'get'),
       operation('/api/ports', 'get'),
+      operation('/api/voyages/{voyageId}/trade-string', 'post'),
+      operation('/api/organizations', 'get'),
     ];
     for (const op of protectedOperations) {
       expect(op?.security).toEqual([{ session: [] }]);
@@ -154,6 +157,71 @@ describe('OpenAPI document', () => {
       expect.arrayContaining(['vesselId', 'commodityId', 'quantity', 'loadPortId', 'laycan']),
     );
     expect(schema?.properties).not.toHaveProperty('organizationId');
+  });
+
+  it('documents trade string setup: a closed body, optional preconditions, 200 and its refusals', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      parameters?: { name: string; in: string; required?: boolean }[];
+      requestBody?: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, { content?: Record<string, unknown> }>;
+    };
+    type Schema = {
+      properties?: Record<string, { items?: Schema; minItems?: number; maxItems?: number }>;
+      required?: string[];
+      additionalProperties?: boolean;
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+
+    const setup = document.paths['/api/voyages/{voyageId}/trade-string']?.post;
+    expect(setup?.requestBody?.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/ConfigureTradeStringRequest',
+    });
+    expect(Object.keys(setup?.responses ?? {}).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '412'].sort(),
+    );
+    expect(setup?.responses['200']?.content?.['application/json']).toEqual({
+      schema: { $ref: '#/components/schemas/TradeString' },
+    });
+    // Neither precondition is required: a plain request sets the voyage up.
+    const headers = (setup?.parameters ?? []).filter((parameter) => parameter.in === 'header');
+    expect(headers.map(({ name, required }) => [name, required]).sort()).toEqual([
+      ['If-Match', false],
+      ['If-None-Match', false],
+    ]);
+
+    const body = document.components.schemas.ConfigureTradeStringRequest;
+    expect(body?.additionalProperties).toBe(false);
+    expect(body?.required).toEqual(['parties']);
+    const parties = body?.properties?.parties;
+    expect([parties?.minItems, parties?.maxItems]).toEqual([2, 10]);
+    expect(parties?.items?.additionalProperties).toBe(false);
+    expect(Object.keys(parties?.items?.properties ?? {})).toEqual(['organizationId']);
+  });
+
+  it('documents organization search as operator-only, bounded, and references only', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      parameters?: { name: string; in: string; required?: boolean }[];
+      responses: Record<string, { content?: Record<string, unknown> }>;
+    };
+    type Schema = { properties?: Record<string, { maxItems?: number; items?: unknown }> };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+
+    const search = document.paths['/api/organizations']?.get;
+    expect(Object.keys(search?.responses ?? {}).sort()).toEqual(['200', '400', '401', '403']);
+    expect(
+      search?.parameters?.map(({ name, in: where, required }) => [name, where, required]),
+    ).toEqual([['search', 'query', true]]);
+    const items = document.components.schemas.OrganizationSearchResponse?.properties?.items;
+    expect(items?.maxItems).toBe(20);
+    expect(items?.items).toEqual({ $ref: '#/components/schemas/OrganizationRef' });
   });
 
   it('documents the trade string as topology only, with its 404', async () => {

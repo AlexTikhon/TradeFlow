@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TradeStringSchema } from './trade-string.js';
+import { ConfigureTradeStringRequestSchema, TradeStringSchema } from './trade-string.js';
 
 const exporter = {
   organization: { id: '01990000-0000-7000-8001-000000000001', name: 'Exporter', countryCode: 'BR' },
@@ -49,5 +49,51 @@ describe('TradeStringSchema', () => {
       'position',
       'sellerOrganizationId',
     ]);
+  });
+});
+
+describe('ConfigureTradeStringRequestSchema', () => {
+  const ids = Array.from(
+    { length: 11 },
+    (_, index) => `01990000-0000-7000-8001-${String(index + 1).padStart(12, '0')}`,
+  );
+  const parties = (count: number) =>
+    ids.slice(0, count).map((organizationId) => ({ organizationId }));
+  const issues = (value: unknown) => {
+    const result = ConfigureTradeStringRequestSchema.safeParse(value);
+    return result.success
+      ? []
+      : result.error.issues.map(({ path, message }) => ({ path: path.join('.'), message }));
+  };
+
+  it.each([2, 3, 10])('accepts %i distinct organizations in order', (count) => {
+    expect(ConfigureTradeStringRequestSchema.parse({ parties: parties(count) })).toEqual({
+      parties: parties(count),
+    });
+  });
+
+  it.each([0, 1, 11])('rejects %i organizations', (count) => {
+    expect(issues({ parties: parties(count) })).not.toEqual([]);
+  });
+
+  it('rejects an organization named twice, at its second place', () => {
+    const [first, second] = parties(2);
+    expect(issues({ parties: [first, second, first] })).toEqual([
+      {
+        path: 'parties.2.organizationId',
+        message: 'This organization is already in the trade string',
+      },
+    ]);
+  });
+
+  it('rejects ids that are not UUIDs', () => {
+    expect(issues({ parties: [{ organizationId: 'cerrado' }, ...parties(1)] })).toHaveLength(1);
+  });
+
+  it('is closed: roles, positions and unknown fields are refused, not ignored', () => {
+    expect(
+      issues({ parties: parties(2).map((party) => ({ ...party, role: 'TRADER' })) }),
+    ).not.toEqual([]);
+    expect(issues({ parties: parties(2), voyageId: ids[0] })).not.toEqual([]);
   });
 });

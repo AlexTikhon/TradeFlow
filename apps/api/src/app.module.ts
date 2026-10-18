@@ -7,6 +7,7 @@ import { AuthModule } from './modules/auth/auth.module.js';
 import { DocumentaryInstructionsModule } from './modules/documentary-instructions/documentary-instructions.module.js';
 import { DocumentsModule } from './modules/documents/documents.module.js';
 import { NoticesModule } from './modules/notices/notices.module.js';
+import { OrganizationsModule } from './modules/organizations/organizations.module.js';
 import { ReferenceDataModule } from './modules/reference-data/reference-data.module.js';
 import { VoyagesModule } from './modules/voyages/voyages.module.js';
 
@@ -18,6 +19,7 @@ import { VoyagesModule } from './modules/voyages/voyages.module.js';
     AuthModule,
     AuditModule,
     ReferenceDataModule,
+    OrganizationsModule,
     VoyagesModule,
     NoticesModule,
     DocumentaryInstructionsModule,

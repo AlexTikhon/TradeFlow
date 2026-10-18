@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "audit_action" ADD VALUE 'VOYAGE_TRADE_STRING_CONFIGURED';

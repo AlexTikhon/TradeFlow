@@ -78,6 +78,9 @@ src/
                                 identifiers-only entries, opaque cursors
     reference-data/
       reference-data.*.ts       GET /vessels, /commodities, /ports; id existence checks
+    organizations/
+      organizations.*.ts        GET /organizations?search=: operators only, at most 20
+                                references (id, name, country), never the caller's own (ADR 0016)
     voyages/
       voyages.controller.ts     HTTP only: parse input, call service, map "missing" to 404
       voyages.service.ts        use cases (list, get, create), each taking the Principal
@@ -86,8 +89,10 @@ src/
       voyage.read-model.ts      Prisma select shapes + row → contract mapping
       trade-string.ts           domain rules for a linear trade string (pure functions)
       trade-string.read-model.ts  allowlisted select + stored contracts → topology
-      trade-string.service.ts   findForVoyage(principal, id): one query, access predicate inside
-      trade-string.controller.ts  GET /voyages/:voyageId/trade-string
+      trade-string-setup.ts     the candidate chain a setup would record; precondition rules
+      trade-string.service.ts   findForVoyage(principal, id): one query, access predicate inside;
+                                configure: the one-time setup of a new voyage (ADR 0016)
+      trade-string.controller.ts  GET and POST /voyages/:voyageId/trade-string
       counterparty-contracts.ts   CounterpartyContracts: a contract as its seller or buyer sees
                                   it; exported, the only way other modules resolve a contract
       counterparty-contracts.controller.ts  GET /voyages/:voyageId/my-contracts
@@ -167,8 +172,8 @@ extraction possible later:
 
 The `auth` module owns identity: it reads `users` (with their organization and role) and owns
 `sessions`. Other modules depend only on what it exports: the `Principal` type, the
-`@CurrentPrincipal()` / `@Public()` decorators and `requireOperator`. There is still no
-`organizations` module, because nothing manages organizations on their own yet. `audit` owns
+`@CurrentPrincipal()` / `@Public()` decorators and `requireOperator`. The `organizations` module
+only searches the curated set of organizations; nothing creates or edits them. `audit` owns
 `audit_events`; `reference-data` owns vessels, commodities and ports; `notices` owns `notices`;
 `documentary-instructions` owns `documentary_instructions` and their revisions and
 acknowledgements; `documents` owns `documents`, `document_versions` and the bytes in document
@@ -446,7 +451,8 @@ first, a page at a time:
    (`CounterpartyContracts.listForVoyage`: no participation is the voyage's 404) and the audit
    module reads the page within it (`AuditTimeline.page`). Visibility and events therefore come
    from one snapshot.
-3. The scope is applied in the `WHERE` clause: `VOYAGE_CREATED` for every participant, notice,
+3. The scope is applied in the `WHERE` clause: `VOYAGE_CREATED` and
+   `VOYAGE_TRADE_STRING_CONFIGURED` (without its parties) for every participant, notice,
    instruction and document events only when their payload's `contractId` is one of the reader's
    contracts now. Hidden events never shorten a page, decide whether another exists, or end up in
    a cursor. An action without a rule (a future one) stays hidden.
@@ -514,6 +520,32 @@ The order of checks, and who decides what:
 Integration tests run all of this against PostgreSQL: concurrent creations get consecutive,
 unique references; a forced audit failure (a temporary trigger) leaves no voyage, participation
 or reference behind; spoofed organization ids in the body, headers or query change nothing.
+
+### Setting up a trade string (`POST /api/voyages/:voyageId/trade-string`)
+
+The one-time setup of a new voyage's chain ([ADR 0016](decisions/0016-initial-voyage-setup.md)),
+offered on the trade-string card to operators of the exporter (`TradeStringSetup`,
+`useConfigureTradeString`: one plain POST, never retried, its outcome ignored once its session
+has ended; 200 and 409 refresh the voyage's detail prefix and the lists). The body names
+organizations in order, exporter first; no version header is
+needed. After the guards, the closed body schema and a malformed-header check (400), and the
+role (403), one interactive transaction:
+
+1. reads the voyage scoped by `accessibleVoyages` (404), then locks its row `FOR NO KEY UPDATE`,
+   so competing setups queue;
+2. reads the session again (`SessionPrincipals.refresh`, 401) and checks the role (403) and the
+   current organization's participation (404, or 403 when it is not the exporter) as they are
+   now. The lock serializes setups only, not sign-outs or role changes;
+3. refuses, in this order, a voyage with any contract (409 "already set up", also for the loser
+   of a race), one not `PLANNED` (409), one with participants besides its exporter (409);
+4. evaluates `If-Match` / `If-None-Match` only if sent (412; the trade string always exists and
+   has no entity tag);
+5. checks the chain (400 per field: exporter first, known organizations, `validateTradeString`),
+   inserts the participants and contracts, reads the string back through the read model and
+   records `VOYAGE_TRADE_STRING_CONFIGURED`.
+
+`200` with the `TradeString`. Any failure rolls everything back. A partial unique index allows
+one setup event per voyage. Nothing is published to event streams.
 
 ### Configuration
 

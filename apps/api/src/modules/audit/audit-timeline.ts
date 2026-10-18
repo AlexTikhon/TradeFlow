@@ -44,7 +44,10 @@ export interface TimelinePageRequest {
 }
 
 /** Events about the voyage itself, visible to every participant. */
-const VOYAGE_ACTIONS = ['VOYAGE_CREATED'] as const satisfies readonly AuditAction[];
+const VOYAGE_ACTIONS = [
+  'VOYAGE_CREATED',
+  'VOYAGE_TRADE_STRING_CONFIGURED',
+] as const satisfies readonly AuditAction[];
 
 /** Events under one sale contract, visible to its two counterparties only (ADR 0011). */
 const CONTRACT_ACTIONS = [
@@ -207,7 +210,9 @@ function toTimelineEvent(row: TimelineEventRow, scope: TimelineScope): TimelineE
   };
 
   switch (row.action) {
+    // The parties a setup records are the trade string's to show, under its own rule (ADR 0010).
     case 'VOYAGE_CREATED':
+    case 'VOYAGE_TRADE_STRING_CONFIGURED':
       return { ...base, action: row.action };
     case 'NOTICE_ISSUED':
     case 'NOTICE_ACKNOWLEDGED': {

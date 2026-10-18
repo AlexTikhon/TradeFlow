@@ -71,6 +71,16 @@ describe('TimelineEventSchema', () => {
     ).toBe(false);
   });
 
+  it('serves the trade string setup without a contract and without its parties', () => {
+    const parsed = TimelineEventSchema.parse({
+      ...base,
+      action: 'VOYAGE_TRADE_STRING_CONFIGURED',
+      parties: [{ organizationId: actor.organization.id, role: 'EXPORTER' }],
+      contracts: [{ contractId: contract.id, position: 1 }],
+    });
+    expect(parsed).toEqual({ ...base, action: 'VOYAGE_TRADE_STRING_CONFIGURED' });
+  });
+
   it('drops anything beyond the event’s identifiers', () => {
     const parsed = TimelineEventSchema.parse({
       ...upload,

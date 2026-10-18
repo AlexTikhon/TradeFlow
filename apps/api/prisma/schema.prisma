@@ -551,6 +551,7 @@ model DocumentReview {
 
 enum AuditAction {
   VOYAGE_CREATED
+  VOYAGE_TRADE_STRING_CONFIGURED
   NOTICE_ISSUED
   NOTICE_ACKNOWLEDGED
   DOCUMENTARY_INSTRUCTION_REVISED
@@ -573,8 +574,10 @@ model AuditEvent {
   voyageId            String      @map("voyage_id") @db.Uuid
   /// Set by the server when the event is written; never accepted from a client.
   occurredAt          DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
-  /// Action-specific facts. VOYAGE_CREATED: the voyage as created. NOTICE_ISSUED: the notice as
-  /// issued. NOTICE_ACKNOWLEDGED: the notice, its contract, when, and whether it was late.
+  /// Action-specific facts. VOYAGE_CREATED: the voyage as created.
+  /// VOYAGE_TRADE_STRING_CONFIGURED: the parties (organization, role, participant) and the
+  /// contracts (id, position, seller and buyer organizations) as committed.
+  /// NOTICE_ISSUED: the notice as issued. NOTICE_ACKNOWLEDGED: the notice, its contract, when, and whether it was late.
   /// DOCUMENTARY_INSTRUCTION_REVISED: the instruction, its contract, the revision as written and
   /// the new version. DOCUMENTARY_INSTRUCTION_ACKNOWLEDGED: the instruction, its contract, the
   /// revision acknowledged, when, and the new version. DOCUMENT_VERSION_UPLOADED: the document,

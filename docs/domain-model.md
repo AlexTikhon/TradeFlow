@@ -144,8 +144,15 @@ The domain rules are a plain walk along the position-ordered contracts, not a gr
 **empty** string is valid: a newly created voyage has no contracts. Not every trade party has to
 be in the string either: a trader may have joined before its contract is recorded.
 
-No endpoint records or edits contracts yet; the demo seed writes them, after checking them with
-the same domain rules. The API validates the stored chain again when it reads it, and answers a
+The demo seed writes contracts after checking them with the same domain rules. The only endpoint
+that records them is the one-time setup of a new voyage, from the voyage page
+([ADR 0016](decisions/0016-initial-voyage-setup.md)): an operator of the exporter names the
+organizations the cargo is sold through, the server derives their roles (traders, then the final
+buyer), validates the complete candidate chain, and writes the participants, the contracts and
+one `VOYAGE_TRADE_STRING_CONFIGURED` audit event in one transaction. Only a `PLANNED` voyage with
+no contracts and no participant but its exporter qualifies, and only once. Naming an
+organization grants it participation at once; it records no acceptance by it. Nothing edits a
+recorded chain. The API validates the stored chain again when it reads it, and answers a
 broken one with a generic 500 instead of presenting it as valid.
 
 **Visibility** ([ADR 0010](decisions/0010-trade-string-visibility.md)): every participant of the
@@ -300,7 +307,8 @@ contract, in answer to its documentary instructions ([ADR 0013](decisions/0013-d
 - `password_hash` is an argon2id PHC string; `token_hash` is exactly 32 bytes;
   `expires_at > created_at`.
 - `audit_events` is append-only (a trigger refuses `UPDATE` and `DELETE`), holds a JSON object
-  payload, and has at most one `VOYAGE_CREATED` per voyage.
+  payload, and has at most one `VOYAGE_CREATED` and one `VOYAGE_TRADE_STRING_CONFIGURED` per
+  voyage.
 - Reference counters: a four-digit year and a non-negative last number.
 - Trade contracts: `position > 0` and unique per voyage; `seller_participant_id <>
 buyer_participant_id`; both reference participants of the same voyage (foreign keys on
@@ -425,9 +433,9 @@ as they are then, since its bytes take time to arrive.
 
 `TradeContract` holds topology only (see [Trade string](#trade-string)). Next steps, none built:
 
-- **Recording and editing the string** through the API, with the domain validation above run
-  inside the writing transaction and an audit event per change (ADR 0009). Who may do it (the
-  exporter's operators? each seller for its own sale?) is still open.
+- **Editing or correcting the string** through the API. The initial setup of a new voyage
+  exists (ADR 0016, the exporter's operators, once); changing a recorded chain, and whether
+  each seller should record its own sale, are still open.
 - **Contract details** (each side's contract reference, terms) as a separate object visible only
   to that contract's two counterparties, with its own endpoint and schema. ADR 0010 explicitly
   does not cover it.

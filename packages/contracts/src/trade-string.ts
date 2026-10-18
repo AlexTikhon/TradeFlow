@@ -51,6 +51,43 @@ export const TradeStringSchema = z
       'while no contracts are recorded for the voyage.',
   });
 
+/** Fewest and most organizations a trade string set up through the API may name. */
+export const TRADE_STRING_MIN_PARTIES = 2;
+export const TRADE_STRING_MAX_PARTIES = 10;
+
+/**
+ * Body of `POST /api/voyages/{voyageId}/trade-string` (ADR 0016): the organizations the cargo is
+ * sold through, in order, the voyage's exporter first. Ids only: roles and positions follow from
+ * the order and are decided by the server. Each organization may appear once.
+ */
+export const ConfigureTradeStringRequestSchema = z
+  .strictObject({
+    parties: z
+      .array(z.strictObject({ organizationId: z.uuid() }))
+      .min(TRADE_STRING_MIN_PARTIES, `Name at least ${TRADE_STRING_MIN_PARTIES} organizations`)
+      .max(TRADE_STRING_MAX_PARTIES, `Name at most ${TRADE_STRING_MAX_PARTIES} organizations`)
+      .superRefine((parties, context) => {
+        const seen = new Set<string>();
+        parties.forEach(({ organizationId }, index) => {
+          if (seen.has(organizationId)) {
+            context.addIssue({
+              code: 'custom',
+              path: [index, 'organizationId'],
+              message: 'This organization is already in the trade string',
+            });
+          }
+          seen.add(organizationId);
+        });
+      }),
+  })
+  .register(apiSchemaRegistry, {
+    id: 'ConfigureTradeStringRequest',
+    description:
+      "The organizations the cargo is sold through, in order: the voyage's exporter first, then " +
+      'each trader, the final buyer last. Each at most once.',
+  });
+
+export type ConfigureTradeStringRequest = z.infer<typeof ConfigureTradeStringRequestSchema>;
 export type TradeRole = z.infer<typeof TradeRoleSchema>;
 export type TradeStringParty = z.infer<typeof TradeStringPartySchema>;
 export type TradeStringEdge = z.infer<typeof TradeStringEdgeSchema>;

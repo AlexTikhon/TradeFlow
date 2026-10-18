@@ -112,6 +112,7 @@ export function VoyageDetailsPage() {
           <Stack spacing={3}>
             <VoyageFacts voyage={voyage} />
             <TradeStringCard
+              voyage={voyage}
               tradeString={tradeString.data}
               error={tradeString.error}
               onRetry={() => void tradeString.refetch()}

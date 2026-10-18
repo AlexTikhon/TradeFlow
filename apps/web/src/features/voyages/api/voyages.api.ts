@@ -1,4 +1,5 @@
 import {
+  type ConfigureTradeStringRequest,
   type CreateVoyageRequest,
   type ListVoyagesQuery,
   type TradeString,
@@ -45,6 +46,21 @@ export function fetchTradeString(voyageId: string, signal?: AbortSignal): Promis
     `/voyages/${encodeURIComponent(voyageId)}/trade-string`,
     ConnectedTradeStringSchema,
     { ...(signal && { signal }) },
+  );
+}
+
+/**
+ * Sets up a new voyage's trade string, once (ADR 0016). A plain POST: no precondition header is
+ * needed, and none is sent. The answer is the string as recorded.
+ */
+export function configureTradeString(
+  voyageId: string,
+  request: ConfigureTradeStringRequest,
+): Promise<TradeString> {
+  return postJson(
+    `/voyages/${encodeURIComponent(voyageId)}/trade-string`,
+    request,
+    ConnectedTradeStringSchema,
   );
 }
 

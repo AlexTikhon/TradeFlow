@@ -11,7 +11,8 @@ import { OrganizationRefSchema } from './voyages.js';
  * names, checksums, rejection reasons, ...) is served here, and the panels that own those facts
  * keep serving them under their own rules.
  *
- * Who sees what follows the facts' own visibility. The voyage's creation: every participant.
+ * Who sees what follows the facts' own visibility. The voyage's creation and the setup of its
+ * trade string: every participant.
  * Notice, instruction and document events: only the two counterparties of the contract they
  * happened under (ADR 0011). Events the organization may not see are left out by the database
  * before a page is cut, so they never shorten a page or show up in its cursor.
@@ -26,6 +27,7 @@ export const TIMELINE_CURSOR_MAX_LENGTH = 200;
 
 export const TIMELINE_ACTIONS = [
   'VOYAGE_CREATED',
+  'VOYAGE_TRADE_STRING_CONFIGURED',
   'NOTICE_ISSUED',
   'NOTICE_ACKNOWLEDGED',
   'DOCUMENTARY_INSTRUCTION_REVISED',
@@ -87,6 +89,8 @@ const documentEvent = {
 export const TimelineEventSchema = z
   .discriminatedUnion('action', [
     z.object({ ...eventBase, action: z.literal('VOYAGE_CREATED') }),
+    // Names no party: who the cargo is sold through is the trade string's to show (ADR 0016).
+    z.object({ ...eventBase, action: z.literal('VOYAGE_TRADE_STRING_CONFIGURED') }),
     z.object({ ...contractEventBase, action: z.literal('NOTICE_ISSUED'), noticeId: z.uuid() }),
     z.object({
       ...contractEventBase,

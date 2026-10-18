@@ -91,3 +91,79 @@ export function writePrecondition(
   }
   throw new PreconditionRequiredException(missing);
 }
+
+/** An `If-Match` or `If-None-Match` header as sent: `*`, or a list of entity tags. */
+export type EntityTagCondition = { kind: 'any' } | { kind: 'tags'; tags: string[] };
+
+/**
+ * Parses an `If-Match` or `If-None-Match` header without interpreting it, or undefined when the
+ * header is absent. Tags are kept as sent (`"a,b"`, `W/"x"`, `""`). A header that is neither `*`
+ * nor a list of entity tags is a malformed request (400).
+ */
+export function entityTagCondition(
+  header: string | undefined,
+  name: 'if-match' | 'if-none-match',
+): EntityTagCondition | undefined {
+  if (header === undefined) {
+    return undefined;
+  }
+  // `*` stands alone: `If-Match = "*" / #entity-tag`. A quoted `"*"` is an ordinary tag.
+  if (trimOws(header) === '*') {
+    return { kind: 'any' };
+  }
+  const tags = entityTagList(header);
+  if (!tags) {
+    throw new RequestValidationException([
+      { path: `header.${name}`, message: 'Expected * or a list of entity tags, e.g. "3"' },
+    ]);
+  }
+  return { kind: 'tags', tags };
+}
+
+const isOws = (character: string) => character === ' ' || character === '\t';
+
+const trimOws = (value: string) => value.replace(/^[ \t]+|[ \t]+$/g, '');
+
+/**
+ * `etagc = %x21 / %x23-7E / obs-text`: any visible character but `"`, and `obs-text` (%x80-FF,
+ * which Node hands over as latin1). Commas are content; spaces and tabs are not allowed.
+ */
+const isEtagc = (character: string) => {
+  const code = character.charCodeAt(0);
+  return code === 0x21 || (code >= 0x23 && code <= 0x7e) || (code >= 0x80 && code <= 0xff);
+};
+
+/**
+ * Reads `#entity-tag` (RFC 9110, sections 5.6.1 and 8.8.3) left to right, so a comma inside an
+ * opaque tag is part of it rather than a separator. Each tag is returned as sent, `W/` included;
+ * an empty opaque tag (`""`) is a tag like any other. Empty list elements (`"a", , "b"`, or a
+ * leading or trailing comma) are ignored, as the list syntax requires, so a header holding no
+ * element is an empty list. Returns null for anything else.
+ */
+function entityTagList(value: string): string[] | null {
+  const tags: string[] = [];
+  let at = 0;
+  const skipOws = () => {
+    while (at < value.length && isOws(value.charAt(at))) at++;
+  };
+  for (;;) {
+    skipOws();
+    if (at >= value.length) return tags;
+    if (value.charAt(at) === ',') {
+      at++;
+      continue;
+    }
+    // weak = %s"W/" (case-sensitive), then opaque-tag = DQUOTE *etagc DQUOTE.
+    const start = at;
+    if (value.startsWith('W/', at)) at += 2;
+    if (value.charAt(at) !== '"') return null;
+    at++;
+    while (at < value.length && isEtagc(value.charAt(at))) at++;
+    if (value.charAt(at) !== '"') return null;
+    at++;
+    tags.push(value.slice(start, at));
+    // After a tag: optional whitespace, then the end or the next comma.
+    skipOws();
+    if (at < value.length && value.charAt(at) !== ',') return null;
+  }
+}

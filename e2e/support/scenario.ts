@@ -4,7 +4,9 @@ import { REFERENCE } from './database.js';
 
 /*
  * The data a test starts from, written straight into the E2E database, as the API integration
- * tests do with their fixtures: there is no API for organizations, users or trade strings.
+ * tests do with their fixtures: there is no API for organizations or users. `createScenario`
+ * also writes a voyage and its contract, so the bilateral tests start from a ready chain; the
+ * setup journey starts from `createUnconnectedParties` and records its chain through the UI.
  * Every test gets its own: fresh organizations, operators and a voyage, so tests never see each
  * other's notices or streams. Everything a test then does (signing in, issuing, acknowledging)
  * goes through the browser and the real API.
@@ -117,4 +119,61 @@ async function one<T>(client: pg.PoolClient, sql: string, values: unknown[]): Pr
   const [row] = rows as T[];
   if (row === undefined) throw new Error(`Expected one row from: ${sql}`);
   return row;
+}
+
+/** An exporter and a final buyer that share nothing yet: the starting point of a setup. */
+export interface UnconnectedParties {
+  /** An operator of the exporter, who creates the voyage and sets up its trade string. */
+  seller: Party;
+  /** An operator of the organization the exporter will name as final buyer. */
+  buyer: Party;
+}
+
+/**
+ * Two organizations with one operator each, and nothing else: no voyage, no participation, no
+ * contract. Organizations and users have no API (they are a curated set, ADR 0016), so they are
+ * written here; everything after that goes through the browser and the real API.
+ */
+export async function createUnconnectedParties(
+  pool: pg.Pool,
+  passwordHash: string,
+): Promise<UnconnectedParties> {
+  const tag = randomBytes(4).toString('hex');
+  const seller: Party = {
+    email: `setup-seller.${tag}@exporter.e2e.example`,
+    fullName: `Sergio Setup ${tag}`,
+    organizationName: `Setup Exporter ${tag} S.A.`,
+  };
+  const buyer: Party = {
+    email: `setup-buyer.${tag}@buyer.e2e.example`,
+    fullName: `Berta Setup ${tag}`,
+    organizationName: `Setup Buyer ${tag} GmbH`,
+  };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const [party, countryCode] of [
+      [seller, 'BR'],
+      [buyer, 'DE'],
+    ] as const) {
+      const organization = await one<{ id: string }>(
+        client,
+        `INSERT INTO organizations (name, country_code, updated_at) VALUES ($1, $2, now())
+         RETURNING id`,
+        [party.organizationName, countryCode],
+      );
+      await client.query(
+        `INSERT INTO users (organization_id, email, full_name, role, password_hash, updated_at)
+         VALUES ($1, $2, $3, 'OPERATOR', $4, now())`,
+        [organization.id, party.email, party.fullName, passwordHash],
+      );
+    }
+    await client.query('COMMIT');
+    return { seller, buyer };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }

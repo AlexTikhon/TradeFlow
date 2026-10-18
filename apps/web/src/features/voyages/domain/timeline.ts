@@ -14,6 +14,8 @@ export function describeTimelineEvent(event: TimelineEvent): string {
   switch (event.action) {
     case 'VOYAGE_CREATED':
       return 'Created the voyage';
+    case 'VOYAGE_TRADE_STRING_CONFIGURED':
+      return 'Set up the trade string';
     case 'NOTICE_ISSUED':
       return 'Issued a notice';
     case 'NOTICE_ACKNOWLEDGED':

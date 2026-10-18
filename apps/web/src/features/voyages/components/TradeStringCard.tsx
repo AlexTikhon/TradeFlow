@@ -1,11 +1,12 @@
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import { Box, Card, CardContent, Skeleton, Stack, Typography } from '@mui/material';
-import type { TradeString, TradeStringParty } from '@tradeflow/contracts';
+import type { TradeString, TradeStringParty, VoyageDetail } from '@tradeflow/contracts';
 import { useIdentity } from '../../../shared/auth/identity';
 import { formatCountry } from '../../../shared/lib/format';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { participantRoleLabel } from '../domain/participant-role';
 import { tradeStringSteps } from '../domain/trade-string';
+import { TradeStringSetup } from './TradeStringSetup';
 
 /** Read by screen readers, not shown. (Pixel strings: in `sx`, a width of 1 means 100%.) */
 const visuallyHidden = {
@@ -131,12 +132,13 @@ function TradeStringChain({ tradeString }: { tradeString: TradeString }) {
 }
 
 interface TradeStringCardProps {
+  voyage: VoyageDetail;
   tradeString: TradeString | undefined;
   error: Error | null;
   onRetry: () => void;
 }
 
-export function TradeStringCard({ tradeString, error, onRetry }: TradeStringCardProps) {
+export function TradeStringCard({ voyage, tradeString, error, onRetry }: TradeStringCardProps) {
   return (
     <Card>
       <CardContent>
@@ -154,7 +156,10 @@ export function TradeStringCard({ tradeString, error, onRetry }: TradeStringCard
             onRetry={onRetry}
           />
         ) : tradeString ? (
-          <TradeStringChain tradeString={tradeString} />
+          <Stack spacing={2}>
+            <TradeStringChain tradeString={tradeString} />
+            <TradeStringSetup voyage={voyage} tradeString={tradeString} />
+          </Stack>
         ) : (
           <Stack spacing={1} aria-busy aria-label="Loading trade string">
             <Skeleton variant="rounded" height={88} />
