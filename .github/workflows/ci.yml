@@ -51,3 +51,56 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+
+  # Chromium smoke suite on its own runner and Postgres server. Global setup (e2e/support)
+  # creates the `_e2e` database, builds and starts the API and web app, and releases all of it
+  # at the end, pass or fail. No retries: playwright.config.ts sets `retries: 0`.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tradeflow
+          POSTGRES_PASSWORD: tradeflow
+          # Only the maintenance database: the run creates and drops tradeflow_e2e itself.
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tradeflow -d postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      E2E_DATABASE_URL: postgresql://tradeflow:tradeflow@localhost:5432/tradeflow_e2e
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Chromium build pinned by e2e's @playwright/test, and the system libraries it needs.
+      - run: pnpm --filter @tradeflow/e2e exec playwright install --with-deps chromium
+
+      - run: pnpm test:e2e
+
+      # Server logs, failure screenshots and the HTML report. Traces, videos and storage state
+      # are off (playwright.config.ts), and nothing in e2e/.output records headers or cookies.
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics
+          path: e2e/.output/
+          retention-days: 7
+          if-no-files-found: ignore

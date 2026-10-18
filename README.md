@@ -37,7 +37,7 @@ Next come further notices, deadlines and workflow.
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices, instructions, documents and timeline kept current from the voyage's event stream (polling while it is down; a chosen file or a decision being made is never re-based, re-sent or re-targeted by a push), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 976 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), a Chromium end-to-end smoke suite run separately (`pnpm test:e2e`), GitHub Actions CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 976 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), a Chromium end-to-end smoke suite run separately (`pnpm test:e2e`), GitHub Actions CI running the checks and the smoke suite as separate jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Voyage creation, ETA notices, documentary instructions, documents and their review write data; trade strings
 come from the seed and are read-only.
@@ -171,16 +171,16 @@ API docs are at <http://localhost:3000/api/docs>.
 
 ### Everyday commands
 
-| Command          | What it does                                             |
-| ---------------- | -------------------------------------------------------- |
-| `pnpm dev`       | Contracts watcher, API (watch mode) and Vite dev server  |
-| `pnpm test`      | All tests. API integration tests need `pnpm db:up`       |
-| `pnpm lint`      | ESLint with type-aware rules across the monorepo         |
-| `pnpm typecheck` | `tsc --noEmit` in every package                          |
-| `pnpm build`     | Production builds of contracts, API and web              |
-| `pnpm check`     | Everything CI runs: format, lint, typecheck, test, build |
-| `pnpm test:e2e`  | Browser smoke tests in Chromium (not part of `check`)    |
-| `pnpm db:reset`  | Drop, re-migrate and re-seed the development database    |
+| Command          | What it does                                                |
+| ---------------- | ----------------------------------------------------------- |
+| `pnpm dev`       | Contracts watcher, API (watch mode) and Vite dev server     |
+| `pnpm test`      | All tests. API integration tests need `pnpm db:up`          |
+| `pnpm lint`      | ESLint with type-aware rules across the monorepo            |
+| `pnpm typecheck` | `tsc --noEmit` in every package                             |
+| `pnpm build`     | Production builds of contracts, API and web                 |
+| `pnpm check`     | CI's verify job: format, lint, typecheck, test, build       |
+| `pnpm test:e2e`  | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
+| `pnpm db:reset`  | Drop, re-migrate and re-seed the development database       |
 
 Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database needed),
 `pnpm --filter @tradeflow/api test:integration`.
@@ -200,6 +200,14 @@ it uses and releases it at the end, whether the tests pass or fail:
 
 Server logs, failure screenshots and the HTML report go to `e2e/.output/` (ignored by Git).
 Traces, videos and saved browser state are off: they would record the session cookie.
+
+In CI the suite is a job of its own (`e2e` in `.github/workflows/ci.yml`), beside `verify`: a
+fresh runner with its own PostgreSQL 18 service, `E2E_DATABASE_URL` pointing at
+`tradeflow_e2e` on it, and Chromium installed with its system libraries
+(`playwright install --with-deps chromium`). A failing test fails the job; there are no
+retries. On failure the job uploads `e2e/.output/` (server logs, failure screenshots, the HTML
+report; nothing there records headers or cookies) as the `e2e-diagnostics` artifact, kept for
+seven days.
 
 ### How tests work
 
