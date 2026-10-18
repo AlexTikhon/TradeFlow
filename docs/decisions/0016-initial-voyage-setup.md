@@ -7,7 +7,8 @@
 - **Implementation:** organization search, the setup command, its migrations and timeline entry,
   with PostgreSQL/HTTP tests; the setup form on the trade-string card, with route tests; one
   Chromium journey from voyage creation through setup to the buyer's instructions. Verified
-  locally (`pnpm check`, `pnpm test:e2e`), not yet in CI.
+  locally (`pnpm check`, `pnpm test:e2e`) and in Linux CI for commit `5baf039`
+  ([run 39139518806](https://github.com/AlexTikhon/TradeFlow/actions/runs/39139518806)).
 
 ## Context
 

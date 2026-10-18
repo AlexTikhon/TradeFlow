@@ -3,7 +3,10 @@
 A walkthrough of about ten minutes on seeded voyage **TF-2026-0001**, with the seller and the
 buyer under its first sale contract in two isolated browser profiles. It shows each MVP flow
 once, explains what it means for the business, and what the system guarantees while it happens.
-What is implemented and how it is verified: [MVP status](mvp-status.md).
+A second walkthrough, [on a fresh voyage](#walkthrough-2-a-fresh-voyage), starts from nothing:
+the exporter creates a voyage and sets up its trade string in the app, then the same flows run
+under the contract that setup recorded. What is implemented and how it is verified:
+[MVP status](mvp-status.md).
 
 > **Verification status.** On 2026-10-18 all six steps were driven through the real web UI in
 > Chromium by a script (Playwright, two isolated browser contexts) against a throwaway database,
@@ -11,6 +14,11 @@ What is implemented and how it is verified: [MVP status](mvp-status.md).
 > [Walkthrough record](#walkthrough-record). **No person has run this demo yet.** The scripted run
 > proves the flows, the wording and the live updates, but not the pacing, the native file and
 > download dialogs, or how it reads to an audience.
+>
+> **The fresh-voyage walkthrough (steps F1 to F8) has not been performed**, by a script or a
+> person. Its expectations come from the code at `5baf039`, ADR 0016 and the tests that cover it,
+> not from an observed run. Its [record](#record-of-walkthrough-2) is empty until someone runs
+> it.
 
 ## Cast
 
@@ -32,9 +40,10 @@ Everything in this demo happens in the block headed
 
 1. **Database.** `pnpm db:up`, then apply any pending migrations without touching data:
    `pnpm --filter @tradeflow/api db:deploy` (`prisma migrate deploy`, which only applies
-   migrations). The demo needs all twelve migrations: documents and reviews arrive in the last
-   four. On 2026-10-18 the local development database had only the first eight, so it could not
-   yet run steps 5 and 6. `pnpm db:migrate` (`prisma migrate dev`) also applies them, but it can
+   migrations). This walkthrough needs the first twelve migrations: documents and reviews arrive
+   in the ninth to the twelfth. The [fresh-voyage walkthrough](#walkthrough-2-a-fresh-voyage)
+   needs all fourteen: the last two are ADR 0016's. On 2026-10-18 the local development database
+   had only the first eight, so it could not yet run steps 5 and 6. `pnpm db:migrate` (`prisma migrate dev`) also applies them, but it can
    offer to reset a database it finds drifted. To keep your development data out of it entirely,
    use a database of your own instead: see [An isolated run](#an-isolated-run).
 2. **Data.** The demo does not need a fresh seed. It needs the seeded users and voyages, and no
@@ -449,3 +458,310 @@ one jsdom assertion in `VoyageDocuments.test.tsx`. Not implemented here.
 dialogs; the ten-minute timing; `pnpm dev` as one command (the two servers were started with the
 same commands it runs, except for the contracts watcher); the 412 path of step 4; the second-run
 variants above; browsers other than Chromium.
+
+## Walkthrough 2: a fresh voyage
+
+> **Not yet performed.** Nobody has run these steps, by a script or by hand. The expectations
+> below come from the code at `5baf039`, [ADR 0016](decisions/0016-initial-voyage-setup.md) and
+> its tests, not from an observed run. Fill in the [record](#record-of-walkthrough-2) when you
+> run it.
+
+A walkthrough by hand of about fifteen minutes, in two browser profiles, from an empty voyage
+to a reviewed document. The exporter creates a voyage, records whom the cargo is sold through,
+and the buyer it named gains access. Then the bilateral flows of steps 3 and 5 run under the
+contract that setup recorded. Nothing is inserted into the database by hand: the organizations
+and users are the seeded, curated set, and the voyage, its participants and its contracts are
+created through the UI.
+
+It does not repeat what the first walkthrough already shows (ETA notices, a stale draft,
+revisions): steps 2 to 4 above work the same on this voyage.
+
+### Cast of walkthrough 2
+
+Every seeded user's password is `tradeflow-demo`.
+
+| Profile        | User           | Email                                 | Organization                    | On the new voyage, after setup                             | User role |
+| -------------- | -------------- | ------------------------------------- | ------------------------------- | ---------------------------------------------------------- | --------- |
+| **S** (seller) | Ana Souza      | `ana.souza@cerrado-graos.example`     | Cerrado Grãos Exportadora S.A.  | Exporter; seller under contract 1                          | Operator  |
+| **B** (buyer)  | Tan Wei Ling   | `wei.ling.tan@meridianagri.example`   | Meridian Agri Trading Pte. Ltd. | Trader; buyer under contract 1 and seller under contract 2 | Operator  |
+| B, step F8     | Emre Kaya      | `emre.kaya@anatoliamills.example`     | Anatolia Flour Mills A.Ş.       | Final buyer; buyer under contract 2                        | Operator  |
+| B, optional    | Lucía Ferreyra | `lucia.ferreyra@pampalitoral.example` | Pampa Litoral Agroexport S.A.   | Not a participant                                          | Operator  |
+
+Meridian and Anatolia are named in setup because they take no part in it beforehand: Wei Ling
+and Emre cannot see the voyage until Ana names them. Everything in steps F4 to F7 happens in the
+block headed **Contract 1 · Cerrado Grãos Exportadora S.A. → Meridian Agri Trading Pte. Ltd.**
+
+### Before you start
+
+The same as [for the first walkthrough](#before-you-start-not-part-of-the-ten-minutes), with
+these differences:
+
+- **Migrations.** All fourteen must be applied; the last two are ADR 0016's.
+- **Data.** No fresh seed and no particular state are needed. Each run creates a voyage of its
+  own, so the walkthrough can be repeated without re-seeding. A created voyage cannot be removed
+  or cancelled through the app, and `pnpm db:seed` does not remove it either: every run leaves
+  one more voyage in the lists of Cerrado, Meridian and Anatolia. Use
+  [an isolated run](#an-isolated-run) if that matters.
+- **Start.** Sign in at <http://localhost:5173/voyages>: Ana in profile S, Wei Ling in profile
+  B. Wei Ling's list shows TF-2026-0002, 0005 and 0007, and any voyage that earlier runs created
+  with Meridian in it.
+- **PDFs.** `bl-v1.pdf` and `bl-v2.pdf` as before. The signature check is not repeated.
+
+### F1. Create the voyage (Ana)
+
+**Do.** Click **New voyage**. The form says "Cerrado Grãos Exportadora S.A. will be the exporter
+on this voyage. It starts as planned, and its reference is assigned when it is created." Fill in:
+
+| Field          | Value                        |
+| -------------- | ---------------------------- |
+| Vessel         | MV Cape Aurora (IMO 9812640) |
+| Commodity      | Soybeans                     |
+| Quantity (MT)  | `30000`                      |
+| Load port      | Paranaguá (BRPNG)            |
+| Discharge port | Mersin (TRMER)               |
+| Laycan start   | 2026-12-01                   |
+| Laycan end     | 2026-12-10                   |
+
+The laycan fields are the browser's own date inputs: enter the dates in the format it shows.
+Click **Create voyage**.
+
+**Expect.**
+
+- Ana lands on the new voyage's page. Its heading is the new reference: **TF-2026-0008** on a
+  freshly seeded database, otherwise the next free number (numbers are never reused). Status
+  **Planned**. Note the reference and the page's URL.
+- **Trade string**: "Trade string not configured", and a **Set up trade string** button.
+- **Participating organizations**: Cerrado Grãos only, as exporter.
+- **ETA notices**: "Your organization is not a party to a sale contract on this voyage, so it
+  neither sends nor receives notices here." **Documentary instructions**: "Documentary
+  instructions pass only between the buyer and the seller under a sale contract, and your
+  organization is party to none on this voyage."
+- **Timeline**: one entry, "Created the voyage" by Ana Souza, with no contract label.
+
+**Do (Wei Ling).** Reload her voyage list, then paste the new voyage's URL.
+
+**Expect.** The voyage is not in her list. The URL shows **Voyage not found**: "This voyage does
+not exist, or you do not have access to it."
+
+**Evidence.** PostgreSQL/HTTP: `voyage-creation.int-spec.ts`. jsdom: `NewVoyagePage.test.tsx`.
+Chromium suite: `trade-string-setup.spec.ts`, through the same form.
+
+### F2. Set up the trade string (Ana)
+
+**Do.** Click **Set up trade string**. The form lists "1. Exporter, Cerrado Grãos Exportadora
+S.A., Brazil · Your organization, always first". In **Find an organization**:
+
+1. Type `Cerr`. **Expect** "No organization matches “Cerr”." The search matches any part of a
+   name, ignoring case, but never offers your own organization.
+2. Type `Meridian`, then click **Add** next to Meridian Agri Trading Pte. Ltd. **Expect** it as
+   row 2, **Final buyer**.
+3. Type `Anatolia`, then click **Add** next to Anatolia Flour Mills A.Ş. **Expect** row 3,
+   **Final buyer**, and row 2 now **Trader**.
+4. Optional: click **Move Anatolia Flour Mills A.Ş. up**. The two swap places and roles. Move it
+   back down, so that Meridian is the trader again.
+
+Click **Review the trade string**.
+
+**Expect.** "The trade string, as it will be recorded": Cerrado Grãos (Brazil), Exporter;
+Meridian Agri Trading (Singapore), Trader; Anatolia Flour Mills (Türkiye), Final buyer. Then
+"Contract 1: Cerrado Grãos Exportadora S.A. sells to Meridian Agri Trading Pte. Ltd." and
+"Contract 2: Meridian Agri Trading Pte. Ltd. sells to Anatolia Flour Mills A.Ş.". Under
+**What setting it up does**: both organizations "take part in this voyage at once", the setup
+"does not record that any of them agreed to it", and "Once set up, the trade string cannot be
+changed or undone here."
+
+**Check the review before going on.** A wrong chain cannot be corrected in the app: you would
+need a new voyage, and the wrongly named organizations would keep their access to this one.
+
+**Do.** Click **Set up trade string**.
+
+**Expect.**
+
+- **Trade string set up**: "Meridian Agri Trading Pte. Ltd. and Anatolia Flour Mills A.Ş. now
+  take part in this voyage." No **Set up trade string** button is left.
+- The trade string shows Cerrado Grãos (Exporter, "Your organization") → Contract 1 → Meridian
+  (Trader) → Contract 2 → Anatolia (Final buyer). **Participating organizations** lists all
+  three.
+- **ETA notices** now offers **Issue ETA notice** for contract 1. **Documentary instructions**
+  shows the contract 1 block, "You sell: you receive them", with "The buyer has not given
+  documentary instructions under this contract yet."
+- **Timeline**: "Set up the trade string" by Ana Souza, above "Created the voyage". The entry
+  does not list the parties; the trade string does.
+
+**Business meaning.** The exporter states once whom the cargo is sold through. Each named
+organization gains access to the voyage and its own contracts, but nothing records that it
+agreed.
+
+**Engineering guarantee.** One `POST` records the whole chain, its participants and one audit
+event in one transaction, or nothing. The server derives every role and position from the order,
+and validates the chain as a whole. Only an operator of the exporter may do it, once: a second
+attempt, from this page or any other, gets 409 and changes nothing
+([ADR 0016](decisions/0016-initial-voyage-setup.md)).
+
+**Evidence.** PostgreSQL/HTTP: `trade-string-setup.int-spec.ts` (60: refusals, two races,
+revalidation after the lock, audit rollback), `organizations.int-spec.ts` (12). jsdom:
+`VoyageTradeStringSetup.test.tsx` (26). Chromium suite: `trade-string-setup.spec.ts`, with a
+two-party chain and generated organizations. Not in any test: this three-party chain on seeded
+organizations through the UI.
+
+### F3. The buyer gains access (Wei Ling)
+
+**Do.** Reload her voyage list. Nothing is pushed to a newly named organization, so this reload
+is needed.
+
+**Expect.** The new voyage is in her list, **Planned**. Open it:
+
+- The same trade string, with Meridian marked "Your organization".
+- **Documentary instructions**: two blocks. Contract 1 (Cerrado → Meridian), "You buy: you give
+  them", "Your organization has not given documentary instructions under this contract yet.",
+  with **Give documentary instructions**. Contract 2 (Meridian → Anatolia), "You sell: you
+  receive them".
+- **ETA notices**: an **Issue ETA notice** button of her own, for contract 2.
+- **Timeline**: "Set up the trade string" and "Created the voyage", both by Ana Souza.
+
+From here on, **do not reload either page**: the remaining changes arrive by themselves.
+
+**Evidence.** PostgreSQL/HTTP: "gives the named organizations the voyage and the existing
+bilateral workflows" in `trade-string-setup.int-spec.ts`. Chromium suite:
+`trade-string-setup.spec.ts` (the buyer's list, string and timeline entry).
+
+### F4. Documentary instructions under the new contract
+
+**Do (Wei Ling).** In the contract 1 block, click **Give documentary instructions**. Consignee
+`To order of Banco Demo`; **Required document 1**: Bill of lading, **Originals** 3, **Copies** 2.
+Click **Send instructions**.
+
+**Expect.** "Revision 1 has been sent to Cerrado Grãos Exportadora S.A. for acknowledgement."
+Without a reload, Ana's page shows revision 1, **Not acknowledged**, with **Acknowledge receipt of
+revision 1**, and a **Documents** section with an upload form for the bill of lading. Both
+timelines gain "Gave documentary instructions", labelled Contract 1.
+
+**Do (Ana).** Click **Acknowledge receipt of revision 1**.
+
+**Expect.** Both pages show **Acknowledged by the seller**. Both timelines gain "Acknowledged
+revision 1 of the documentary instructions".
+
+**Engineering guarantee.** Ana's page opened its event stream before Cerrado had any contract on
+this voyage. The stream re-reads her organization's contracts before every delivery, so the
+signal for the new contract reaches it without a reload
+([ADR 0015](decisions/0015-voyage-event-streams.md)).
+
+**Evidence.** Chromium suite: `trade-string-setup.spec.ts`, whose buyer's instructions reach the
+exporter's page that set up the voyage. The acknowledgement on a set-up voyage: over HTTP in
+`trade-string-setup.int-spec.ts`; in Chromium on other voyages only (`live-instructions.spec.ts`).
+
+### F5. PDF upload and download
+
+**Do (Ana).** At **Bill of lading**, click **Choose a PDF**, pick `bl-v1.pdf`, then **Upload**.
+
+**Expect.** "Version 1 of the bill of lading has been uploaded." Wei Ling's page shows
+"Version 1: bl-v1.pdf (size)", who uploaded it and when, the first 12 characters of its SHA-256,
+**Pending review**, and "Pending review by Meridian Agri Trading Pte. Ltd.". Both timelines gain
+"Uploaded version 1 of the bill of lading (instructions revision 1)".
+
+**Do (Wei Ling).** Click **Download** next to version 1. Compare the saved file with
+`Get-FileHash bl-v1.pdf` (PowerShell) or `sha256sum bl-v1.pdf`.
+
+**Expect.** The browser saves `bl-v1.pdf`, and its checksum starts with the 12 characters the
+page shows.
+
+### F6. Approval
+
+**Do (Wei Ling).** Under "Your decision on version 1", select **Approve**, then click
+**Approve version 1**.
+
+**Expect.** "Version 1 of the bill of lading has been approved." Ana's page shows "Approved by
+Tan Wei Ling (Meridian Agri Trading Pte. Ltd.) on …". Both timelines gain "Approved version 1 of
+the bill of lading (instructions revision 1)".
+
+### F7. Replacement and rejection
+
+**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it.
+
+**Expect.** Wei Ling's page shows version 2, **Pending review**, and under
+**Earlier versions (1)** version 1 still approved. Ana's emptied form keeps its disabled button
+labelled **Upload as version 2**: the cosmetic defect in the
+[first record](#walkthrough-record), not a new finding.
+
+**Do (Wei Ling).** Select **Reject**, type the **Reason for rejecting**
+`Consignee does not match revision 1.`, and click **Reject version 2**.
+
+**Expect.** Ana's page shows "Rejected by Tan Wei Ling …" with the reason, and version 1 still
+approved under **Earlier versions (1)**.
+
+**Evidence for F5 to F7.** On a voyage set up through the command: one upload and its approval,
+over HTTP only (`trade-string-setup.int-spec.ts`). The full sequence, replacement and rejection
+included, on other voyages: Chromium `live-documents.spec.ts` (download compared by SHA-256),
+PostgreSQL/HTTP `documents.int-spec.ts` and `document-reviews.int-spec.ts`. Nothing about
+documents depends on how the contract was recorded.
+
+### F8. Timeline and visibility
+
+**Do (Wei Ling).** Scroll to **Timeline**.
+
+**Expect.** Eight entries, newest first:
+
+| #   | Entry                                                              | Contract label |
+| --- | ------------------------------------------------------------------ | -------------- |
+| 1   | Rejected version 2 of the bill of lading (instructions revision 1) | Contract 1     |
+| 2   | Uploaded version 2 of the bill of lading (instructions revision 1) | Contract 1     |
+| 3   | Approved version 1 of the bill of lading (instructions revision 1) | Contract 1     |
+| 4   | Uploaded version 1 of the bill of lading (instructions revision 1) | Contract 1     |
+| 5   | Acknowledged revision 1 of the documentary instructions            | Contract 1     |
+| 6   | Gave documentary instructions                                      | Contract 1     |
+| 7   | Set up the trade string                                            | None           |
+| 8   | Created the voyage                                                 | None           |
+
+Each shows who, for which organization, and when. No consignee, file name or rejection reason
+appears. Ana's timeline shows the same eight.
+
+**Do (profile B).** Click **Sign out**, and sign in as **Emre Kaya**. Open the new voyage from
+his list.
+
+**Expect.**
+
+- His list shows the new voyage and TF-2026-0003, and any voyage that earlier runs created.
+- The same trade string, with Anatolia marked "Your organization".
+- **Documentary instructions**: only the contract 2 block (Meridian → Anatolia), "You buy: you
+  give them", nothing given yet. Nothing of contract 1: no instructions, documents or decisions.
+- **Timeline**: two entries only, "Set up the trade string" and "Created the voyage".
+
+**Optional (+30 s).** Sign out and sign in as **Lucía Ferreyra**. Pasting the voyage's URL shows
+**Voyage not found**, as for a voyage that does not exist.
+
+**Evidence.** PostgreSQL/HTTP: "shows every participant the setup, without its parties, and
+keeps contract events to their counterparties" in `trade-string-setup.int-spec.ts`;
+`voyage-timeline.int-spec.ts`. Not in the Chromium suite: the final buyer's view and the
+outsider on a set-up voyage.
+
+### Record of walkthrough 2
+
+**Status: not yet performed.** Fill in this section when it is run, and keep it as observed.
+
+| Item     | Value                                               |
+| -------- | --------------------------------------------------- |
+| Date     | _not yet run_                                       |
+| Run by   |                                                     |
+| Code     | Commit:                                             |
+| Machine  | OS, Node.js version, browser and version, time zone |
+| Database | Development or isolated; seeded when; migrations    |
+| Voyage   | Reference and id created in F1                      |
+
+| Step | Result (as expected / differed: how) | Time taken |
+| ---- | ------------------------------------ | ---------- |
+| F1   |                                      |            |
+| F2   |                                      |            |
+| F3   |                                      |            |
+| F4   |                                      |            |
+| F5   |                                      |            |
+| F6   |                                      |            |
+| F7   |                                      |            |
+| F8   |                                      |            |
+
+**Usability issues.** One row per issue: what was confusing, slow or surprising, even when the
+step worked as expected. Severity: _blocking_ (could not continue), _confusing_ (continued, but
+unsure), _cosmetic_.
+
+| #   | Step | What happened | Severity | Suggested change |
+| --- | ---- | ------------- | -------- | ---------------- |
+| 1   |      |               |          |                  |
