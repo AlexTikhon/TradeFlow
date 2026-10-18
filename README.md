@@ -20,7 +20,11 @@ Next come further notices, deadlines and workflow.
 > problems, but it is not a clone of any commercial product, and all organizations and people in the
 > demo data are fictional.
 
-## Status: Milestone 8 (document review)
+## Status: original MVP complete
+
+The eight original MVP areas, and live updates, are implemented and verified in Linux CI:
+[acceptance summary](docs/mvp-status.md) (verified commit, CI run, coverage by test layer,
+limitations) · [ten-minute demo](docs/demo.md).
 
 | Area         | Delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -37,7 +41,7 @@ Next come further notices, deadlines and workflow.
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `.../trade-string`, `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order and an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices, instructions, documents and timeline kept current from the voyage's event stream (polling while it is down; a chosen file or a decision being made is never re-based, re-sent or re-targeted by a push), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 976 automated tests (authorization, transactions, races and constraints tested against real PostgreSQL), a Chromium end-to-end smoke suite run separately (`pnpm test:e2e`), GitHub Actions CI running the checks and the smoke suite as separate jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 980 Vitest tests (authorization, transactions, races and constraints tested against real PostgreSQL), 9 Chromium end-to-end smoke tests run separately (`pnpm test:e2e`), GitHub Actions CI running the checks and the smoke suite as separate jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Voyage creation, ETA notices, documentary instructions, documents and their review write data; trade strings
 come from the seed and are read-only.
@@ -99,7 +103,7 @@ apps/
 packages/
   contracts/           Zod schemas + inferred types shared by api and web
 e2e/                   Playwright smoke tests in Chromium (support/: run setup, fixtures, proxy)
-docs/                  architecture, domain model, ADRs
+docs/                  architecture, domain model, ADRs, demo, MVP status
 docker/                Postgres init scripts
 ```
 
@@ -118,6 +122,8 @@ pnpm db:seed        # load demo data (safe to re-run)
 
 pnpm dev            # API on :3000, web on :5173
 ```
+
+For a guided walkthrough with a seller and a buyer side by side, see [docs/demo.md](docs/demo.md).
 
 Open <http://localhost:5173> and sign in. Every seeded user's password is `tradeflow-demo`; these
 accounts show how visibility follows participation, and what each user role may do:
@@ -205,9 +211,9 @@ In CI the suite is a job of its own (`e2e` in `.github/workflows/ci.yml`), besid
 fresh runner with its own PostgreSQL 18 service, `E2E_DATABASE_URL` pointing at
 `tradeflow_e2e` on it, and Chromium installed with its system libraries
 (`playwright install --with-deps chromium`). A failing test fails the job; there are no
-retries. On failure the job uploads `e2e/.output/` (server logs, failure screenshots, the HTML
-report; nothing there records headers or cookies) as the `e2e-diagnostics` artifact, kept for
-seven days.
+retries. On failure the job is set up to upload `e2e/.output/` (server logs, failure
+screenshots, the HTML report; nothing there records headers or cookies) as the
+`e2e-diagnostics` artifact, kept for seven days. No failing run has exercised that upload yet.
 
 ### How tests work
 
