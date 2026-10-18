@@ -25,8 +25,9 @@ import { voyageQueries } from '../api/voyage.queries';
  * Document commands for the identity the card renders under, with the same protections as the
  * other writes (`useSubmitInstruction`, `useIssueNotice`):
  *
- * - A 401 for the session the request was sent under signs out locally; a 401 that speaks for a
- *   session already replaced changes nothing (`sendForCurrentSession`).
+ * - Nothing is sent once the session the command was issued in has ended, even if the command
+ *   was waiting for the network meanwhile. A 401 for that session signs out locally; a 401 that
+ *   speaks for a session already replaced changes nothing (`sendForCurrentSession`).
  * - Each command is tied to the session it was issued in (its epoch, captured when issued and
  *   carried in its own variables, so overlapping commands never share one). A response that
  *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
@@ -101,8 +102,8 @@ export function useUploadDocument(voyageId: string) {
   const cache = useDocumentCache(voyageId);
 
   const mutation = useMutation({
-    mutationFn: ({ target, file, basedOnVersion }: InSession<UploadDocument>) =>
-      sendForCurrentSession(cache.queryClient, () =>
+    mutationFn: ({ target, file, basedOnVersion, epoch }: InSession<UploadDocument>) =>
+      sendForCurrentSession(cache.queryClient, epoch, () =>
         uploadDocumentVersion(target, file, basedOnVersion),
       ),
     // Runs even if the form has unmounted meanwhile: the list must show the new version.
@@ -158,8 +159,14 @@ export function useReviewDocument(voyageId: string) {
   const cache = useDocumentCache(voyageId);
 
   const mutation = useMutation({
-    mutationFn: ({ target, versionNumber, decision, basedOnVersion }: InSession<ReviewDocument>) =>
-      sendForCurrentSession(cache.queryClient, () =>
+    mutationFn: ({
+      target,
+      versionNumber,
+      decision,
+      basedOnVersion,
+      epoch,
+    }: InSession<ReviewDocument>) =>
+      sendForCurrentSession(cache.queryClient, epoch, () =>
         reviewDocumentVersion(target, versionNumber, decision, basedOnVersion),
       ),
     // Runs even if the form has unmounted meanwhile: the list must show the decision.
@@ -210,8 +217,8 @@ export function useDownloadDocument(voyageId: string) {
   const cache = useDocumentCache(voyageId);
 
   const mutation = useMutation({
-    mutationFn: ({ target, versionNumber }: InSession<DownloadDocument>) =>
-      sendForCurrentSession(cache.queryClient, () =>
+    mutationFn: ({ target, versionNumber, epoch }: InSession<DownloadDocument>) =>
+      sendForCurrentSession(cache.queryClient, epoch, () =>
         downloadDocumentVersion(target, versionNumber),
       ),
     onSuccess: (blob, { fileName, epoch }) => {

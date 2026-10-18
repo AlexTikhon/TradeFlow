@@ -1,4 +1,5 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { onlineManager } from '@tanstack/react-query';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import type {
   CreateVoyageRequest,
   ProblemDetails,
@@ -18,6 +19,12 @@ import {
 import { aVoyageDetail, anEmptyTradeString } from '../../../test/fixtures/voyages';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
+import {
+  endSession,
+  sessionChangedElsewhere,
+  sessionQuery,
+  startSession,
+} from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 
 const ana = aCurrentUser();
@@ -610,6 +617,297 @@ describe('NewVoyagePage', () => {
 
       expect(router.state.location.pathname).toBe('/sign-in');
       expect(voyageKeys(queryClient)).toEqual([]);
+    });
+  });
+
+  describe('when the session is replaced while the request is in flight, even by the same user', () => {
+    const anaScope = `${ana.user.id}:${ana.organization.id}`;
+    const pendingMutations = (queryClient: Client) =>
+      queryClient
+        .getMutationCache()
+        .getAll()
+        .filter((mutation) => mutation.state.status === 'pending');
+    const allAnswered = async (queryClient: Client) => {
+      await waitFor(() => {
+        expect(pendingMutations(queryClient)).toEqual([]);
+      });
+    };
+    const voyageKeys = (queryClient: Client) =>
+      queryClient
+        .getQueryCache()
+        .getAll()
+        .filter((query) => query.queryKey.includes(created.id));
+    /** A voyage list in Ana's cache, as if the list page had been visited. */
+    const aCachedList = (queryClient: Client) => {
+      const queryKey = ['protected', anaScope, 'voyages', 'list', {}];
+      queryClient.setQueryData(queryKey, { items: [] });
+      return () => queryClient.getQueryCache().find({ queryKey, exact: true });
+    };
+    /** The cookie now belongs to `identity`, and only a session check finds out. */
+    const aSessionCheckFinds = async (
+      { session, queryClient }: Pick<ReturnType<typeof renderRoute>, 'session' | 'queryClient'>,
+      identity: typeof ana,
+    ) => {
+      session.current = identity;
+      await act(() => queryClient.refetchQueries({ queryKey: ['session'] }));
+      expect(queryClient.getQueryData(['session'])).toEqual(identity);
+    };
+
+    it('lets a voyage created before Ana signed out and back in touch nothing of her new session', async () => {
+      serveReferenceData();
+      const listRequests = serveVoyageList([]);
+      const creation = serveCreation({ hold: true });
+      const { router, user, queryClient } = renderRoute('/voyages/new');
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      // Having signed out herself, Ana starts on the voyage list when she signs in again.
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      await signInAs(user, ana.user.email);
+      expect(await screen.findByRole('link', { name: 'New voyage' })).toBeInTheDocument();
+      await waitFor(() => {
+        expect(listRequests).toHaveLength(1);
+      });
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      creation.release();
+      await allAnswered(queryClient);
+
+      expect(router.state.location.pathname).toBe('/voyages');
+      expect(listRequests).toHaveLength(1);
+      expect(voyageKeys(queryClient)).toEqual([]);
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.queryKey[1]).toBe(anaScope);
+        expect(query.state.isInvalidated).toBe(false);
+      }
+    });
+
+    it('lets a voyage created before session checks went to Claire and back touch nothing', async () => {
+      serveReferenceData();
+      const creation = serveCreation({ hold: true });
+      const rendered = renderRoute('/voyages/new', { accounts: [ana, claire] });
+      const { router, user, queryClient } = rendered;
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+
+      await aSessionCheckFinds(rendered, claire);
+      expect(
+        await screen.findByText(/Lacustra Commodities SA will be the exporter/),
+      ).toBeInTheDocument();
+      await aSessionCheckFinds(rendered, ana);
+      expect(
+        await screen.findByText(/Cerrado Grãos Exportadora S\.A\. will be the exporter/),
+      ).toBeInTheDocument();
+      await screen.findAllByRole('option', { name: 'Santos (BRSSZ)' });
+      const list = aCachedList(queryClient);
+      creation.release();
+      await allAnswered(queryClient);
+
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.getByLabelText(/Quantity/)).toHaveValue('');
+      expect(voyageKeys(queryClient)).toEqual([]);
+      expect(list()?.state.isInvalidated).toBe(false);
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.queryKey[1]).toBe(anaScope);
+        expect(query.state.isInvalidated).toBe(false);
+      }
+    });
+
+    it('opens the voyage when a session check only confirmed that Ana is still signed in', async () => {
+      serveReferenceData();
+      serveVoyageList();
+      const creation = serveCreation({ hold: true });
+      const rendered = renderRoute('/voyages/new');
+      const { router, user, session, queryClient } = rendered;
+      await fillForm(user);
+      await submit(user);
+      await creation.received;
+      const list = aCachedList(queryClient);
+
+      const checks = session.meRequests;
+      await aSessionCheckFinds(rendered, ana);
+      expect(session.meRequests).toBe(checks + 1);
+      creation.release();
+
+      expect(await screen.findByRole('heading', { name: 'TF-2026-0042' })).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe(`/voyages/${created.id}`);
+      expect(voyageKeys(queryClient)).not.toEqual([]);
+      expect(list()?.state.isInvalidated).toBe(true);
+    });
+  });
+
+  describe('when the session is replaced while the request waits for the network', () => {
+    afterEach(() => {
+      onlineManager.setOnline(true);
+    });
+
+    const voyageKeys = (queryClient: Client) =>
+      queryClient
+        .getQueryCache()
+        .getAll()
+        .filter((query) => query.queryKey.includes(created.id));
+    const pausedMutations = (queryClient: Client) =>
+      queryClient
+        .getMutationCache()
+        .getAll()
+        .filter((mutation) => mutation.state.isPaused);
+    const settled = async (queryClient: Client) => {
+      await waitFor(() => {
+        expect(
+          queryClient
+            .getMutationCache()
+            .getAll()
+            .filter((mutation) => mutation.state.status === 'pending'),
+        ).toEqual([]);
+      });
+    };
+    /**
+     * A session check that reaches the server although the query client believes it is offline
+     * (as when a tab regains focus on a flaky connection). Publishes its answer, as one does.
+     */
+    const aSessionCheckWhileOffline = (queryClient: Client) =>
+      act(() => queryClient.query({ ...sessionQuery, staleTime: 0, networkMode: 'always' }));
+
+    /** Ana submits the form while offline: the request waits, unsent. */
+    async function submitOffline({ user, queryClient }: ReturnType<typeof renderRoute>) {
+      await fillForm(user);
+      act(() => {
+        onlineManager.setOnline(false);
+      });
+      await submit(user);
+      await waitFor(() => {
+        expect(pausedMutations(queryClient)).toHaveLength(1);
+      });
+    }
+
+    function backOnline() {
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+    }
+
+    it('sends nothing for Ana once another tab has signed in as Claire', async () => {
+      serveReferenceData();
+      const creation = serveCreation();
+      const rendered = renderRoute('/voyages/new', { accounts: [ana, claire] });
+      const { router, session, queryClient } = rendered;
+      await submitOffline(rendered);
+
+      session.current = claire;
+      await act(() => sessionChangedElsewhere(queryClient));
+      backOnline();
+      expect(
+        await screen.findByText(/Lacustra Commodities SA will be the exporter/),
+      ).toBeInTheDocument();
+      await settled(queryClient);
+
+      expect(creation.bodies).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(voyageKeys(queryClient)).toEqual([]);
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('sends nothing once Ana has signed out and back in', async () => {
+      serveReferenceData();
+      serveVoyageList([]);
+      const creation = serveCreation();
+      const rendered = renderRoute('/voyages/new');
+      const { session, queryClient } = rendered;
+      await submitOffline(rendered);
+
+      await act(() => endSession(queryClient).settled);
+      await act(() =>
+        startSession(queryClient, { email: ana.user.email, password: TEST_PASSWORD }),
+      );
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      backOnline();
+      await settled(queryClient);
+
+      expect(creation.bodies).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      expect(voyageKeys(queryClient)).toEqual([]);
+      expect(session.signOutRequests).toBe(1);
+    });
+
+    it('sends nothing once session checks went to Claire and back to Ana', async () => {
+      serveReferenceData();
+      const creation = serveCreation();
+      const rendered = renderRoute('/voyages/new', { accounts: [ana, claire] });
+      const { router, session, queryClient } = rendered;
+      await submitOffline(rendered);
+
+      session.current = claire;
+      await aSessionCheckWhileOffline(queryClient);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      session.current = ana;
+      await aSessionCheckWhileOffline(queryClient);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      backOnline();
+      expect(
+        await screen.findByText(/Cerrado Grãos Exportadora S\.A\. will be the exporter/),
+      ).toBeInTheDocument();
+      await settled(queryClient);
+
+      expect(creation.bodies).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      expect(router.state.location.pathname).toBe('/voyages/new');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(voyageKeys(queryClient)).toEqual([]);
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('sends the voyage and opens it once back online, when nothing changed', async () => {
+      serveReferenceData();
+      serveVoyageList();
+      const creation = serveCreation();
+      const rendered = renderRoute('/voyages/new');
+      await submitOffline(rendered);
+      expect(creation.bodies).toEqual([]);
+
+      backOnline();
+
+      expect(await screen.findByRole('heading', { name: 'TF-2026-0042' })).toBeInTheDocument();
+      expect(rendered.router.state.location.pathname).toBe(`/voyages/${created.id}`);
+      expect(creation.bodies).toEqual([expectedRequest]);
+    });
+
+    it('sends the voyage once back online, when a session check only confirmed Ana', async () => {
+      serveReferenceData();
+      serveVoyageList();
+      const creation = serveCreation();
+      const rendered = renderRoute('/voyages/new');
+      await submitOffline(rendered);
+
+      const checks = rendered.session.meRequests;
+      await aSessionCheckWhileOffline(rendered.queryClient);
+      expect(rendered.session.meRequests).toBe(checks + 1);
+      expect(rendered.queryClient.getQueryData(['session'])).toEqual(ana);
+      backOnline();
+
+      expect(await screen.findByRole('heading', { name: 'TF-2026-0042' })).toBeInTheDocument();
+      expect(creation.bodies).toEqual([expectedRequest]);
+    });
+
+    it('ends the session it was issued in when, sent once back online, it is answered 401', async () => {
+      serveReferenceData();
+      const creation = serveCreation({
+        respond: () => problemResponse(401, 'Authentication is required.'),
+      });
+      const rendered = renderRoute('/voyages/new');
+      await submitOffline(rendered);
+      rendered.session.current = null;
+
+      backOnline();
+
+      expect(
+        await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+      ).toBeInTheDocument();
+      expect(rendered.queryClient.getQueryData(['session'])).toBeNull();
+      expect(creation.bodies).toHaveLength(1);
+      expect(rendered.session.signOutRequests).toBe(0);
     });
   });
 });

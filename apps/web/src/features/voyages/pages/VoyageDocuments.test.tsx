@@ -1,3 +1,4 @@
+import { onlineManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
@@ -23,7 +24,7 @@ import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
-import { checkSession, StaleSessionCheckError } from '../../auth/session';
+import { checkSession, sessionChangedElsewhere, StaleSessionCheckError } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 
 const voyage = aVoyageDetail();
@@ -1123,6 +1124,68 @@ describe('Documents on the voyage page', () => {
 
       expect(saved.map(({ download }) => download)).toEqual(['bill-of-lading.pdf']);
       expect(new Uint8Array(await (saved[0]?.blob as Blob).arrayBuffer())).toEqual(bytes);
+    });
+  });
+
+  describe('when the session is replaced while an upload waits for the network', () => {
+    afterEach(() => {
+      onlineManager.setOnline(true);
+    });
+
+    /** Ana uploads a file while offline: the request waits, unsent. */
+    async function uploadOffline({ user, queryClient }: Rendered) {
+      const item = await billOfLading();
+      await chooseFile(user, item, aPdf());
+      act(() => {
+        onlineManager.setOnline(false);
+      });
+      await user.click(item.getByRole('button', { name: 'Upload' }));
+      await waitFor(() => {
+        expect(queryClient.getMutationCache().getAll()[0]?.state.isPaused).toBe(true);
+      });
+    }
+
+    it('uploads nothing for Ana once another tab has signed in as Claire', async () => {
+      servePage();
+      const upload = serveUpload(() => HttpResponse.json(aDocument(), { status: 201 }));
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { session, queryClient } = rendered;
+      await uploadOffline(rendered);
+
+      session.current = claire;
+      await act(() => sessionChangedElsewhere(queryClient));
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      await allAnswered(queryClient);
+
+      expect(upload.sent).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(screen.queryByText(/has been uploaded/)).not.toBeInTheDocument();
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('uploads the file once back online, when nothing changed', async () => {
+      const state = servePage();
+      const uploaded = aDocument();
+      const upload = serveUpload(() => {
+        state.documents = [uploaded];
+        return HttpResponse.json(uploaded, { status: 201 });
+      });
+      const rendered = renderRoute(page);
+      await uploadOffline(rendered);
+      expect(upload.sent).toEqual([]);
+
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+
+      const item = await billOfLading();
+      expect(
+        await item.findByText('Version 1 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+      expect(upload.sent).toHaveLength(1);
     });
   });
 });

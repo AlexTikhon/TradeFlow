@@ -20,8 +20,9 @@ import { configureTradeString } from '../api/voyages.api';
  *   carried in its own variables). A response that arrives once that session has ended writes
  *   nothing to the cache, refreshes nothing and calls no completion callback: even if the same
  *   user has signed back in meanwhile, and even if the form has unmounted.
- * - A 401 for the session the request was sent under signs out locally; one that speaks for a
- *   session already replaced changes nothing (`sendForCurrentSession`).
+ * - Nothing is sent once the session the command was issued in has ended, even if the command
+ *   was waiting for the network meanwhile. A 401 for that session signs out locally; one that
+ *   speaks for a session already replaced changes nothing (`sendForCurrentSession`).
  * - On 200 and on 409 the identity's view of the voyage is refreshed: its detail prefix (the
  *   participants, the string, its own contracts and every panel under it) and the voyage lists.
  *   After a 409 that refetch is what says why: the string someone else recorded, or the state
@@ -48,8 +49,8 @@ export function useConfigureTradeString(voyageId: string) {
   };
 
   const mutation = useMutation({
-    mutationFn: ({ request }: InSession<{ request: ConfigureTradeStringRequest }>) =>
-      sendForCurrentSession(queryClient, () => configureTradeString(voyageId, request)),
+    mutationFn: ({ request, epoch }: InSession<{ request: ConfigureTradeStringRequest }>) =>
+      sendForCurrentSession(queryClient, epoch, () => configureTradeString(voyageId, request)),
     // Runs even if the form has unmounted meanwhile: the page must show the recorded string.
     onSuccess: (tradeString, { epoch }) => {
       if (!stillCurrent(epoch)) return;

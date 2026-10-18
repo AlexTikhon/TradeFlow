@@ -1,13 +1,15 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { onlineManager } from '@tanstack/react-query';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type {
   CounterpartyContractListResponse,
+  CurrentUser,
   IssueNoticeRequest,
   Notice,
   ProblemDetails,
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
+import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import {
   aCounterpartyContract,
   acknowledged,
@@ -19,6 +21,7 @@ import { aTradeString, aVoyageDetail, tradeParties } from '../../../test/fixture
 import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
+import { sessionChangedElsewhere } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 
 const voyage = aVoyageDetail();
@@ -185,6 +188,62 @@ afterEach(() => {
     stop();
   });
 });
+
+const pendingMutations = (queryClient: Rendered['queryClient']) =>
+  queryClient
+    .getMutationCache()
+    .getAll()
+    .filter((mutation) => mutation.state.status === 'pending');
+
+/** Waits until every command still on its way has been answered and handled. */
+async function allAnswered(queryClient: Rendered['queryClient']) {
+  await waitFor(() => {
+    expect(pendingMutations(queryClient)).toEqual([]);
+  });
+}
+
+/** `identity`'s cached notice list for the voyage. */
+const noticesOf = (queryClient: Rendered['queryClient'], identity: CurrentUser) =>
+  queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ['protected', `${identity.user.id}:${identity.organization.id}`] })
+    .find((query) => query.queryKey.includes('notices'));
+
+async function signOut(user: User) {
+  await user.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(await screen.findByRole('heading', { name: 'Sign in to TradeFlow' })).toBeVisible();
+}
+
+/** Signs in on the sign-in page, then opens the voyage page again. */
+async function signIn({ user, router }: Pick<Rendered, 'user' | 'router'>, identity: CurrentUser) {
+  await user.type(await screen.findByLabelText(/Email/), identity.user.email);
+  await user.type(screen.getByLabelText(/Password/), TEST_PASSWORD);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(await screen.findByText(identity.user.fullName)).toBeInTheDocument();
+  await act(() => router.navigate(page));
+}
+
+/** The cookie now belongs to `identity`, and nothing announced it: a session check finds out. */
+async function aSessionCheckFinds(
+  { session, queryClient }: Pick<Rendered, 'session' | 'queryClient'>,
+  identity: CurrentUser,
+) {
+  session.current = identity;
+  await act(() => queryClient.refetchQueries({ queryKey: ['session'] }));
+  expect(queryClient.getQueryData(['session'])).toEqual(identity);
+}
+
+/** Session checks alone go to `other` and back to `back`; waits until `back`'s page is shown. */
+async function sessionChecksGoTo(
+  rendered: Pick<Rendered, 'session' | 'queryClient'>,
+  other: CurrentUser,
+  back: CurrentUser,
+) {
+  await aSessionCheckFinds(rendered, other);
+  expect(await screen.findByText(other.user.fullName)).toBeInTheDocument();
+  await aSessionCheckFinds(rendered, back);
+  expect(await screen.findByText(back.user.fullName)).toBeInTheDocument();
+}
 
 describe('ETA notices on the voyage page', () => {
   describe('the list', () => {
@@ -905,6 +964,238 @@ describe('ETA notices on the voyage page', () => {
 
       expect(router.state.location.pathname).toBe('/sign-in');
       expect(protectedQueries(queryClient)).toEqual([]);
+    });
+  });
+
+  describe('when the session is replaced while a command is in flight, even by the same user', () => {
+    const acknowledgedByClaire = () =>
+      HttpResponse.json(acknowledged(awaitingForBuyer, claireActor, '2030-10-16T13:30:00.000Z'));
+    const alreadyAcknowledged = () =>
+      problemResponse(409, 'This notice has already been acknowledged.');
+
+    it('lets an issue sent before Ana signed out and back in touch nothing of her new session', async () => {
+      const state = servePage();
+      const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }), {
+        hold: true,
+      });
+      const rendered = renderRoute(page);
+      const { user, queryClient } = rendered;
+      const form = await openIssueForm(user);
+      await fillIssueForm(user, form);
+      await user.click(form.getByRole('button', { name: 'Issue notice' }));
+      await issue.received;
+
+      await signOut(user);
+      await signIn(rendered, ana);
+      expect(await screen.findByText('No notices under your contracts yet.')).toBeVisible();
+      const listRequests = state.listRequests;
+      issue.release();
+      await allAnswered(queryClient);
+
+      expect(screen.queryByText(/Your ETA notice to/)).not.toBeInTheDocument();
+      expect(state.listRequests).toBe(listRequests);
+      const notices = noticesOf(queryClient, ana);
+      expect(notices?.state.data).toEqual({ items: [] });
+      expect(notices?.state.isInvalidated).toBe(false);
+    });
+
+    it.each<[string, () => Response]>([
+      ['succeeds', acknowledgedByClaire],
+      ['answers 409', alreadyAcknowledged],
+    ])(
+      'lets an acknowledgement sent before Claire signed out and back in, which %s, touch nothing',
+      async (_case, respond) => {
+        const state = servePage({ contracts: contractList(asBuyer), notices: [awaitingForBuyer] });
+        const acknowledgement = serveAcknowledgement(respond, { hold: true });
+        const rendered = renderRoute(page, { signedInAs: claire });
+        const { user, queryClient } = rendered;
+        await noticeItems();
+        await user.click(screen.getByRole('button', { name: 'Acknowledge receipt' }));
+        await acknowledgement.received;
+
+        await signOut(user);
+        await signIn(rendered, claire);
+        const [item] = await noticeItems();
+        const listRequests = state.listRequests;
+        acknowledgement.release();
+        await allAnswered(queryClient);
+
+        expect(item).toHaveTextContent('AcknowledgedNot yet');
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(state.listRequests).toBe(listRequests);
+        const notices = noticesOf(queryClient, claire);
+        expect(notices?.state.data).toEqual({ items: [awaitingForBuyer] });
+        expect(notices?.state.isInvalidated).toBe(false);
+      },
+    );
+
+    it('lets an issue sent before session checks went to Claire and back touch nothing', async () => {
+      const state = servePage();
+      const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }), {
+        hold: true,
+      });
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { user, queryClient } = rendered;
+      const form = await openIssueForm(user);
+      await fillIssueForm(user, form);
+      await user.click(form.getByRole('button', { name: 'Issue notice' }));
+      await issue.received;
+
+      await sessionChecksGoTo(rendered, claire, ana);
+      expect(await screen.findByText('No notices under your contracts yet.')).toBeVisible();
+      const listRequests = state.listRequests;
+      issue.release();
+      await allAnswered(queryClient);
+
+      expect(screen.queryByText(/Your ETA notice to/)).not.toBeInTheDocument();
+      expect(state.listRequests).toBe(listRequests);
+      expect(noticesOf(queryClient, ana)?.state.data).toEqual({ items: [] });
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.state.isInvalidated).toBe(false);
+      }
+    });
+
+    it.each<[string, () => Response]>([
+      ['succeeds', acknowledgedByClaire],
+      ['answers 409', alreadyAcknowledged],
+    ])(
+      'lets an acknowledgement sent before session checks went to Ana and back, which %s, touch nothing',
+      async (_case, respond) => {
+        const state = servePage({ contracts: contractList(asBuyer), notices: [awaitingForBuyer] });
+        const acknowledgement = serveAcknowledgement(respond, { hold: true });
+        const rendered = renderRoute(page, { signedInAs: claire, accounts: [claire, ana] });
+        const { user, queryClient } = rendered;
+        await noticeItems();
+        await user.click(screen.getByRole('button', { name: 'Acknowledge receipt' }));
+        await acknowledgement.received;
+
+        await sessionChecksGoTo(rendered, ana, claire);
+        const [item] = await noticeItems();
+        const listRequests = state.listRequests;
+        acknowledgement.release();
+        await allAnswered(queryClient);
+
+        expect(item).toHaveTextContent('AcknowledgedNot yet');
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(state.listRequests).toBe(listRequests);
+        expect(noticesOf(queryClient, claire)?.state.data).toEqual({ items: [awaitingForBuyer] });
+        for (const query of protectedQueries(queryClient)) {
+          expect(query.state.isInvalidated).toBe(false);
+        }
+      },
+    );
+
+    it('records an acknowledgement when a session check only confirmed that Claire is still signed in', async () => {
+      const state = servePage({ contracts: contractList(asBuyer), notices: [awaitingForBuyer] });
+      const done = acknowledged(awaitingForBuyer, claireActor, '2030-10-16T13:30:00.000Z');
+      const acknowledgement = serveAcknowledgement(
+        () => {
+          state.notices = [done];
+          return HttpResponse.json(done);
+        },
+        { hold: true },
+      );
+      const rendered = renderRoute(page, { signedInAs: claire });
+      const [item] = await noticeItems();
+      await rendered.user.click(screen.getByRole('button', { name: 'Acknowledge receipt' }));
+      await acknowledgement.received;
+
+      const checks = rendered.session.meRequests;
+      await aSessionCheckFinds(rendered, claire);
+      expect(rendered.session.meRequests).toBe(checks + 1);
+      acknowledgement.release();
+
+      await waitFor(() => {
+        expect(item).toHaveTextContent(
+          'Acknowledged16 Oct 2030, 10:30 GMT-3 by Claire Morel (Lacustra Commodities SA)',
+        );
+      });
+    });
+
+    it('issues a notice when a session check only confirmed that Ana is still signed in', async () => {
+      const state = servePage();
+      const issue = serveIssue(
+        () => {
+          state.notices.unshift(issuedNotice);
+          return HttpResponse.json(issuedNotice, { status: 201 });
+        },
+        { hold: true },
+      );
+      const rendered = renderRoute(page);
+      const form = await openIssueForm(rendered.user);
+      await fillIssueForm(rendered.user, form);
+      await rendered.user.click(form.getByRole('button', { name: 'Issue notice' }));
+      await issue.received;
+
+      await aSessionCheckFinds(rendered, ana);
+      issue.release();
+
+      expect(
+        await screen.findByText('Your ETA notice to Lacustra Commodities SA has been issued.'),
+      ).toBeVisible();
+      const [item] = await noticeItems();
+      expect(item).toHaveTextContent('Estimated arrival25 Oct 2030, 14:00 GMT-3');
+    });
+  });
+
+  describe('when the session is replaced while a command waits for the network', () => {
+    afterEach(() => {
+      onlineManager.setOnline(true);
+    });
+
+    /** Ana issues a notice while offline: the request waits, unsent. */
+    async function issueOffline({ user, queryClient }: Rendered) {
+      const form = await openIssueForm(user);
+      await fillIssueForm(user, form);
+      act(() => {
+        onlineManager.setOnline(false);
+      });
+      await user.click(form.getByRole('button', { name: 'Issue notice' }));
+      await waitFor(() => {
+        expect(queryClient.getMutationCache().getAll()[0]?.state.isPaused).toBe(true);
+      });
+    }
+
+    it('sends no notice for Ana once another tab has signed in as Claire', async () => {
+      servePage();
+      const issue = serveIssue(() => HttpResponse.json(issuedNotice, { status: 201 }));
+      const rendered = renderRoute(page, { accounts: [ana, claire] });
+      const { session, queryClient } = rendered;
+      await issueOffline(rendered);
+
+      session.current = claire;
+      await act(() => sessionChangedElsewhere(queryClient));
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      await allAnswered(queryClient);
+
+      expect(issue.bodies).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(screen.queryByText(/Your ETA notice to/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('issues the notice once back online, when nothing changed', async () => {
+      const state = servePage();
+      const issue = serveIssue(() => {
+        state.notices.unshift(issuedNotice);
+        return HttpResponse.json(issuedNotice, { status: 201 });
+      });
+      const rendered = renderRoute(page);
+      await issueOffline(rendered);
+      expect(issue.bodies).toEqual([]);
+
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+
+      expect(
+        await screen.findByText('Your ETA notice to Lacustra Commodities SA has been issued.'),
+      ).toBeVisible();
+      expect(issue.bodies).toEqual([expectedRequest]);
     });
   });
 });

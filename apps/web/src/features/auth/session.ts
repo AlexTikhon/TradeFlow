@@ -326,17 +326,32 @@ export async function sessionExpired(queryClient: QueryClient, epoch: SessionEpo
   await switchIdentity(queryClient, null);
 }
 
+/** A command's session ended before the command was sent; it was not sent. */
+export class StaleSessionCommandError extends Error {
+  constructor() {
+    super('The session this command was issued in has ended');
+    this.name = 'StaleSessionCommandError';
+  }
+}
+
 /**
- * Sends a write on behalf of the session current now. If the server answers 401, that session
- * has ended: the client signs out locally before the error is reported (so no form shows it as
- * its own), unless the session has changed since the request was sent (see `sessionExpired`).
- * The error is rethrown either way, and the write is never retried.
+ * Sends a write on behalf of `epoch`, the session the command was issued in (not the one current
+ * when it is finally sent: a command can wait, for instance for the network, while the session is
+ * replaced). If that session has ended by the time the request would go out, nothing is sent and
+ * this rejects with `StaleSessionCommandError`, leaving whatever session replaced it alone. The
+ * check runs synchronously right before `send`, which must reach `fetch` without awaiting first.
+ *
+ * If the server answers 401, the session has ended: the client signs out locally before the
+ * error is reported (so no form shows it as its own), unless the session has changed since
+ * `epoch` (see `sessionExpired`). The error is rethrown either way, and the write is never
+ * retried.
  */
 export async function sendForCurrentSession<T>(
   queryClient: QueryClient,
+  epoch: SessionEpoch,
   send: () => Promise<T>,
 ): Promise<T> {
-  const epoch = currentSessionEpoch(queryClient);
+  if (!isCurrentSession(queryClient, epoch)) throw new StaleSessionCommandError();
   try {
     return await send();
   } catch (error) {

@@ -1,19 +1,22 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createQueryClient } from '../../app/query-client';
+import { ApiError } from '../../shared/api/http-client';
 import { identityKey, PROTECTED_QUERY_ROOT } from '../../shared/auth/identity';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../test/fixtures/auth';
-import { serveSession } from '../../test/msw-server';
+import { type FakeSession, serveSession } from '../../test/msw-server';
 import {
   checkSession,
   currentSessionEpoch,
   endSession,
   getSignOutState,
   isCurrentSession,
+  sendForCurrentSession,
   sessionChangedElsewhere,
   sessionExpired,
   sessionQuery,
   StaleSessionCheckError,
+  StaleSessionCommandError,
   subscribeToSessionTransitions,
   startSession,
   switchIdentity,
@@ -438,6 +441,111 @@ describe('a 401 attributed to the session it was sent under', () => {
     queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
     await sessionExpired(queryClient, epoch);
 
+    expect(sessionOf(queryClient)).toEqual(ana);
+    expect(queryClient.getQueryData(voyagesOf(ana))).toEqual(['TF-ANA-ONLY']);
+  });
+});
+
+describe('a write sent for the session it was issued in', () => {
+  const revalidate = (queryClient: QueryClient) =>
+    queryClient.query({ ...sessionQuery, staleTime: 0 });
+  const unauthenticated = () => new ApiError(401, null);
+
+  it('is sent while that session is current, and after a session check confirmed it', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+    await expect(revalidate(queryClient)).resolves.toEqual(ana);
+    const send = vi.fn(() => Promise.resolve('sent'));
+
+    await expect(sendForCurrentSession(queryClient, epoch, send)).resolves.toBe('sent');
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, (queryClient: QueryClient, session: FakeSession) => Promise<unknown>]>([
+    [
+      'the same user signed out and back in',
+      async (queryClient) => {
+        await endSession(queryClient).settled;
+        await startSession(queryClient, credentialsOf(ana));
+      },
+    ],
+    [
+      'another tab signed in as someone else',
+      async (queryClient, session) => {
+        session.current = claire;
+        await sessionChangedElsewhere(queryClient);
+        await revalidate(queryClient);
+      },
+    ],
+    [
+      'session checks went to someone else and back',
+      async (queryClient, session) => {
+        session.current = claire;
+        await revalidate(queryClient);
+        session.current = ana;
+        await revalidate(queryClient);
+      },
+    ],
+  ])(
+    'is not sent once %s, and leaves the session that replaced it alone',
+    async (_case, replace) => {
+      const session = serveSession(ana, [ana, claire]);
+      const queryClient = signedInClient(ana);
+      const epoch = currentSessionEpoch(queryClient);
+      await replace(queryClient, session);
+      const current = sessionOf(queryClient);
+      expect(current).toEqual(session.current);
+      const replacement = currentSessionEpoch(queryClient);
+      queryClient.setQueryData(voyagesOf(session.current ?? ana), ['TF-KEPT']);
+      const signOuts = session.signOutRequests;
+      const send = vi.fn(() => Promise.resolve('sent'));
+
+      await expect(sendForCurrentSession(queryClient, epoch, send)).rejects.toBeInstanceOf(
+        StaleSessionCommandError,
+      );
+
+      expect(send).not.toHaveBeenCalled();
+      expect(sessionOf(queryClient)).toEqual(current);
+      expect(isCurrentSession(queryClient, replacement)).toBe(true);
+      expect(queryClient.getQueryData(voyagesOf(session.current ?? ana))).toEqual(['TF-KEPT']);
+      expect(session.signOutRequests).toBe(signOuts);
+    },
+  );
+
+  it('ends the session it was issued in when the server answers 401', async () => {
+    serveSession(null);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+
+    await expect(
+      sendForCurrentSession(queryClient, epoch, () => Promise.reject(unauthenticated())),
+    ).rejects.toBeInstanceOf(ApiError);
+
+    expect(sessionOf(queryClient)).toBeNull();
+  });
+
+  it('leaves alone the session that replaced it while it was on its way, on a 401', async () => {
+    serveSession(ana);
+    const queryClient = signedInClient(ana);
+    const epoch = currentSessionEpoch(queryClient);
+    let answer: (error: ApiError) => void = () => undefined;
+    const sent = sendForCurrentSession(
+      queryClient,
+      epoch,
+      () =>
+        new Promise<never>((_, reject) => {
+          answer = reject;
+        }),
+    );
+
+    await endSession(queryClient).settled;
+    await startSession(queryClient, credentialsOf(ana));
+    queryClient.setQueryData(voyagesOf(ana), ['TF-ANA-ONLY']);
+    answer(unauthenticated());
+
+    await expect(sent).rejects.toBeInstanceOf(ApiError);
     expect(sessionOf(queryClient)).toEqual(ana);
     expect(queryClient.getQueryData(voyagesOf(ana))).toEqual(['TF-ANA-ONLY']);
   });

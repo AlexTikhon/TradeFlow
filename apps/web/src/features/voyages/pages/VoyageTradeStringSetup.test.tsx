@@ -1,3 +1,4 @@
+import { onlineManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import type {
   ConfigureTradeStringRequest,
@@ -8,7 +9,7 @@ import type {
   VoyageDetail,
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
 import {
@@ -19,6 +20,7 @@ import {
 } from '../../../test/fixtures/voyages';
 import { server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
+import { sessionChangedElsewhere } from '../../auth/session';
 
 /** Ana operates for Cerrado, the exporter: she sets the string up. */
 const ana = aCurrentUser();
@@ -743,6 +745,60 @@ describe('Setting up the trade string on the voyage page', () => {
       setup.release();
 
       expect(await screen.findByText('Trade string set up')).toBeVisible();
+    });
+  });
+
+  describe('when the session is replaced while a setup waits for the network', () => {
+    afterEach(() => {
+      onlineManager.setOnline(true);
+    });
+
+    /** Ana sends the setup while offline: the request waits, unsent. */
+    async function setUpOffline({ user, queryClient }: Rendered) {
+      await reviewLacustraThenRhine(user);
+      act(() => {
+        onlineManager.setOnline(false);
+      });
+      await user.click(screen.getByRole('button', { name: 'Set up trade string' }));
+      await waitFor(() => {
+        expect(queryClient.getMutationCache().getAll()[0]?.state.isPaused).toBe(true);
+      });
+    }
+
+    it('sends no setup for Ana once another tab has signed in as Claire', async () => {
+      const state = servePage();
+      serveSetup(state, () => recordChain(state, [cerrado, lacustra, rhine])());
+      const rendered = renderRoute(page, { signedInAs: ana, accounts: [ana, claire] });
+      const { session, queryClient } = rendered;
+      await setUpOffline(rendered);
+
+      session.current = claire;
+      await act(() => sessionChangedElsewhere(queryClient));
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+      expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
+      await allAnswered(queryClient);
+
+      expect(state.setups).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(claire);
+      expect(screen.queryByText('Trade string set up')).toBeNull();
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('records the setup once back online, when nothing changed', async () => {
+      const state = servePage();
+      serveSetup(state, () => recordChain(state, [cerrado, lacustra, rhine])());
+      const rendered = renderRoute(page, { signedInAs: ana });
+      await setUpOffline(rendered);
+      expect(state.setups).toEqual([]);
+
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+
+      expect(await screen.findByText('Trade string set up')).toBeVisible();
+      expect(state.setups).toHaveLength(1);
     });
   });
 });

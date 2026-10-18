@@ -1,13 +1,15 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { onlineManager } from '@tanstack/react-query';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import type {
   CounterpartyContractListResponse,
+  CurrentUser,
   DocumentaryInstruction,
   DocumentaryInstructionContent,
   ProblemDetails,
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
-import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
+import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import {
   acknowledgedRevision,
   anaAcknowledges,
@@ -19,6 +21,7 @@ import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
+import { sessionChangedElsewhere } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 
 const voyage = aVoyageDetail();
@@ -236,6 +239,62 @@ function anotherTab(queryClient: Rendered['queryClient']) {
     stopSync();
   });
   return channel;
+}
+
+const pendingMutations = (queryClient: Rendered['queryClient']) =>
+  queryClient
+    .getMutationCache()
+    .getAll()
+    .filter((mutation) => mutation.state.status === 'pending');
+
+/** Waits until every write still on its way has been answered and handled. */
+async function allAnswered(queryClient: Rendered['queryClient']) {
+  await waitFor(() => {
+    expect(pendingMutations(queryClient)).toEqual([]);
+  });
+}
+
+/** `identity`'s cached instruction list for the voyage. */
+const instructionsOf = (queryClient: Rendered['queryClient'], identity: CurrentUser) =>
+  queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ['protected', `${identity.user.id}:${identity.organization.id}`] })
+    .find((query) => query.queryKey.includes('documentary-instructions'));
+
+async function signOut(user: User) {
+  await user.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(await screen.findByRole('heading', { name: 'Sign in to TradeFlow' })).toBeVisible();
+}
+
+/** Signs in on the sign-in page, then opens the voyage page again. */
+async function signIn({ user, router }: Pick<Rendered, 'user' | 'router'>, identity: CurrentUser) {
+  await user.type(await screen.findByLabelText(/Email/), identity.user.email);
+  await user.type(screen.getByLabelText(/Password/), TEST_PASSWORD);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(await screen.findByText(identity.user.fullName)).toBeInTheDocument();
+  await act(() => router.navigate(page));
+}
+
+/** The cookie now belongs to `identity`, and nothing announced it: a session check finds out. */
+async function aSessionCheckFinds(
+  { session, queryClient }: Pick<Rendered, 'session' | 'queryClient'>,
+  identity: CurrentUser,
+) {
+  session.current = identity;
+  await act(() => queryClient.refetchQueries({ queryKey: ['session'] }));
+  expect(queryClient.getQueryData(['session'])).toEqual(identity);
+}
+
+/** Session checks alone go to `other` and back to `back`; waits until `back`'s page is shown. */
+async function sessionChecksGoTo(
+  rendered: Pick<Rendered, 'session' | 'queryClient'>,
+  other: CurrentUser,
+  back: CurrentUser,
+) {
+  await aSessionCheckFinds(rendered, other);
+  expect(await screen.findByText(other.user.fullName)).toBeInTheDocument();
+  await aSessionCheckFinds(rendered, back);
+  expect(await screen.findByText(back.user.fullName)).toBeInTheDocument();
 }
 
 /** Revision 2 given by a colleague of Claire's while Claire was editing. */
@@ -840,6 +899,250 @@ describe('Documentary instructions on the voyage page', () => {
 
       expect(router.state.location.pathname).toBe('/sign-in');
       expect(protectedQueries(queryClient)).toEqual([]);
+    });
+  });
+
+  describe('when the session is replaced while a write is in flight, even by the same user', () => {
+    const current = anInstruction();
+    const acknowledgedNow = () =>
+      HttpResponse.json({
+        ...current,
+        version: 2,
+        currentRevision: acknowledgedRevision(current.currentRevision, anaAcknowledges),
+      });
+    const superseded = () => problemResponse(409, 'Revision 1 has been superseded by revision 2.');
+    const acknowledgementCases: [string, () => Response][] = [
+      ['succeeds', acknowledgedNow],
+      ['answers 409', superseded],
+      ['answers 412', preconditionFailed],
+    ];
+
+    /** Claire revises contract 1's instructions; the response waits for `release()`. */
+    async function claireSendsARevision(rendered: Rendered) {
+      const put = servePut(() => HttpResponse.json(revisedByColleague(forBuyer(current))), {
+        hold: true,
+      });
+      const form = await openForm(rendered.user, 'Revise instructions');
+      await rendered.user.type(form.getByLabelText(/Consignee/), ' (amended)');
+      await rendered.user.click(form.getByRole('button', { name: 'Send revision 2' }));
+      await put.received;
+      return put;
+    }
+
+    /** Ana acknowledges revision 1; the response, `respond`, waits for `release()`. */
+    async function anaAcknowledges1(rendered: Rendered, respond: () => Response) {
+      const acknowledgement = serveAcknowledgement(1, respond, { hold: true });
+      const panel = await contractPanel();
+      await rendered.user.click(
+        panel.getByRole('button', { name: 'Acknowledge receipt of revision 1' }),
+      );
+      await acknowledgement.received;
+      return acknowledgement;
+    }
+
+    /** Only revision 1 is shown, as the identity's own data, and it has not been refreshed. */
+    function expectUntouched(
+      queryClient: Rendered['queryClient'],
+      identity: CurrentUser,
+      instructions: DocumentaryInstruction[],
+    ) {
+      expect(screen.queryByText(/has been sent to/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Revision 2' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      const cached = instructionsOf(queryClient, identity);
+      expect(cached?.state.data).toEqual({ items: instructions });
+      expect(cached?.state.isInvalidated).toBe(false);
+    }
+
+    /** Nothing protected has been marked for refresh, whatever lists it. */
+    function expectNothingInvalidated(queryClient: Rendered['queryClient']) {
+      for (const query of protectedQueries(queryClient)) {
+        expect(query.state.isInvalidated).toBe(false);
+      }
+    }
+
+    it('lets a revision sent before Claire signed out and back in touch nothing of her new session', async () => {
+      const state = servePage({ contracts: contractList(asBuyer), instructions: [forBuyer()] });
+      const rendered = renderRoute(page, { signedInAs: claire });
+      const put = await claireSendsARevision(rendered);
+
+      await signOut(rendered.user);
+      await signIn(rendered, claire);
+      expect(
+        await (await contractPanel()).findByRole('button', { name: 'Revise instructions' }),
+      ).toBeVisible();
+      const listRequests = state.listRequests;
+      put.release();
+      await allAnswered(rendered.queryClient);
+
+      expect(state.listRequests).toBe(listRequests);
+      expectUntouched(rendered.queryClient, claire, [forBuyer()]);
+    });
+
+    it.each(acknowledgementCases)(
+      'lets an acknowledgement sent before Ana signed out and back in, which %s, touch nothing',
+      async (_case, respond) => {
+        const state = servePage({ instructions: [current] });
+        const rendered = renderRoute(page);
+        const acknowledgement = await anaAcknowledges1(rendered, respond);
+
+        await signOut(rendered.user);
+        await signIn(rendered, ana);
+        const panel = await contractPanel();
+        expect(
+          await panel.findByRole('button', { name: 'Acknowledge receipt of revision 1' }),
+        ).toBeVisible();
+        const listRequests = state.listRequests;
+        acknowledgement.release();
+        await allAnswered(rendered.queryClient);
+
+        expect(state.listRequests).toBe(listRequests);
+        expect(
+          panel.getByRole('button', { name: 'Acknowledge receipt of revision 1' }),
+        ).toBeEnabled();
+        expectUntouched(rendered.queryClient, ana, [current]);
+      },
+    );
+
+    it('lets a revision sent before session checks went to Ana and back touch nothing', async () => {
+      const state = servePage({ contracts: contractList(asBuyer), instructions: [forBuyer()] });
+      const rendered = renderRoute(page, { signedInAs: claire, accounts: [claire, ana] });
+      const put = await claireSendsARevision(rendered);
+
+      await sessionChecksGoTo(rendered, ana, claire);
+      expect(
+        await (await contractPanel()).findByRole('button', { name: 'Revise instructions' }),
+      ).toBeVisible();
+      const listRequests = state.listRequests;
+      put.release();
+      await allAnswered(rendered.queryClient);
+
+      expect(state.listRequests).toBe(listRequests);
+      expectUntouched(rendered.queryClient, claire, [forBuyer()]);
+      expectNothingInvalidated(rendered.queryClient);
+    });
+
+    it.each(acknowledgementCases)(
+      'lets an acknowledgement sent before session checks went to Claire and back, which %s, touch nothing',
+      async (_case, respond) => {
+        const state = servePage({ instructions: [current] });
+        const rendered = renderRoute(page, { accounts: [ana, claire] });
+        const acknowledgement = await anaAcknowledges1(rendered, respond);
+
+        await sessionChecksGoTo(rendered, claire, ana);
+        const panel = await contractPanel();
+        expect(
+          await panel.findByRole('button', { name: 'Acknowledge receipt of revision 1' }),
+        ).toBeVisible();
+        const listRequests = state.listRequests;
+        acknowledgement.release();
+        await allAnswered(rendered.queryClient);
+
+        expect(state.listRequests).toBe(listRequests);
+        expectUntouched(rendered.queryClient, ana, [current]);
+        expectNothingInvalidated(rendered.queryClient);
+      },
+    );
+
+    it('records an acknowledgement when a session check only confirmed that Ana is still signed in', async () => {
+      const state = servePage({ instructions: [current] });
+      const done = {
+        ...current,
+        version: 2,
+        currentRevision: acknowledgedRevision(current.currentRevision, anaAcknowledges),
+      };
+      const rendered = renderRoute(page);
+      const acknowledgement = await anaAcknowledges1(rendered, () => {
+        state.instructions = [done];
+        return HttpResponse.json(done);
+      });
+
+      const checks = rendered.session.meRequests;
+      await aSessionCheckFinds(rendered, ana);
+      expect(rendered.session.meRequests).toBe(checks + 1);
+      acknowledgement.release();
+
+      const panel = await contractPanel();
+      await waitFor(() => {
+        expect(panel.getByRole('region', { name: 'Revision 1' })).toHaveTextContent(
+          'Acknowledged16 Oct 2030, 10:30 GMT-3 by Ana Souza (Cerrado Grãos Exportadora S.A.)',
+        );
+      });
+    });
+
+    it('sends a revision when a session check only confirmed that Claire is still signed in', async () => {
+      const state = servePage({ contracts: contractList(asBuyer), instructions: [forBuyer()] });
+      const rendered = renderRoute(page, { signedInAs: claire });
+      const put = await claireSendsARevision(rendered);
+      state.instructions = [revisedByColleague(forBuyer(current))];
+
+      await aSessionCheckFinds(rendered, claire);
+      put.release();
+
+      const panel = await contractPanel();
+      expect(await panel.findByText(/Revision 2 has been sent to/)).toBeVisible();
+      expect(panel.getByRole('region', { name: 'Revision 2' })).toBeVisible();
+    });
+  });
+
+  describe('when the session is replaced while a write waits for the network', () => {
+    afterEach(() => {
+      onlineManager.setOnline(true);
+    });
+
+    /** Claire sends a revision while offline: the request waits, unsent. */
+    async function reviseOffline({ user, queryClient }: Rendered) {
+      const form = await openForm(user, 'Revise instructions');
+      await user.type(form.getByLabelText(/Consignee/), ' (amended)');
+      act(() => {
+        onlineManager.setOnline(false);
+      });
+      await user.click(form.getByRole('button', { name: 'Send revision 2' }));
+      await waitFor(() => {
+        expect(queryClient.getMutationCache().getAll()[0]?.state.isPaused).toBe(true);
+      });
+    }
+
+    it('sends no revision for Claire once another tab has signed in as Ana', async () => {
+      servePage({ contracts: contractList(asBuyer), instructions: [forBuyer()] });
+      const put = servePut(() => HttpResponse.json(revisedByColleague(forBuyer())));
+      const rendered = renderRoute(page, { signedInAs: claire, accounts: [claire, ana] });
+      const { session, queryClient } = rendered;
+      await reviseOffline(rendered);
+
+      session.current = ana;
+      await act(() => sessionChangedElsewhere(queryClient));
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+      expect(await screen.findByText('Ana Souza')).toBeInTheDocument();
+      await allAnswered(queryClient);
+
+      expect(put.sent).toEqual([]);
+      expect(queryClient.getQueryData(['session'])).toEqual(ana);
+      expect(screen.queryByText(/has been sent to/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(session.signOutRequests).toBe(0);
+    });
+
+    it('sends the revision once back online, when nothing changed', async () => {
+      const state = servePage({ contracts: contractList(asBuyer), instructions: [forBuyer()] });
+      const revised = revisedByColleague(forBuyer());
+      const put = servePut(() => {
+        state.instructions = [revised];
+        return HttpResponse.json(revised);
+      });
+      const rendered = renderRoute(page, { signedInAs: claire });
+      await reviseOffline(rendered);
+      expect(put.sent).toEqual([]);
+
+      act(() => {
+        onlineManager.setOnline(true);
+      });
+
+      const panel = await contractPanel();
+      expect(await panel.findByText(/Revision 2 has been sent to/)).toBeVisible();
+      expect(put.sent).toHaveLength(1);
     });
   });
 });
