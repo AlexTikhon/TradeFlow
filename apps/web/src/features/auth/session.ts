@@ -46,6 +46,8 @@ interface SessionControl {
   generation: number;
   signOut: SignOutState;
   pendingSignOut: SignOut | undefined;
+  /** This tab signed out explicitly, and no identity has been published here since. */
+  signedOutHere: boolean;
   /** Generation of the latest sign-in not yet resolved; it alone may publish an identity. */
   signInIntent: number | undefined;
   /** Tail of the queue of requests that change the session cookie. */
@@ -64,6 +66,7 @@ function controlOf(queryClient: QueryClient): SessionControl {
       generation: 0,
       signOut: IDLE,
       pendingSignOut: undefined,
+      signedOutHere: false,
       signInIntent: undefined,
       cookieQueue: Promise.resolve(),
       listeners: new Set(),
@@ -93,12 +96,22 @@ function nextGeneration(control: SessionControl): number {
   return generation;
 }
 
-function setSignOutState(control: SessionControl, state: SignOutState): void {
-  if (control.signOut === state) return;
-  control.signOut = state;
+function notifySignOutListeners(control: SessionControl): void {
   control.listeners.forEach((listener) => {
     listener();
   });
+}
+
+function setSignOutState(control: SessionControl, state: SignOutState): void {
+  if (control.signOut === state) return;
+  control.signOut = state;
+  notifySignOutListeners(control);
+}
+
+function setSignedOutHere(control: SessionControl, signedOutHere: boolean): void {
+  if (control.signedOutHere === signedOutHere) return;
+  control.signedOutHere = signedOutHere;
+  notifySignOutListeners(control);
 }
 
 /** Runs `request` once every earlier cookie-changing request has been answered. */
@@ -161,6 +174,8 @@ async function askServer(queryClient: QueryClient, signal?: AbortSignal): Promis
     await purgeProtectedData(queryClient);
     assertCurrent();
   }
+  // Someone is signed in again (another tab signed in): this tab's sign-out is over.
+  if (identity) setSignedOutHere(control, false);
   return { identity, generation };
 }
 
@@ -237,7 +252,9 @@ async function publishIdentity(
   if (!sameIdentity(queryClient.getQueryData(SESSION_KEY), next)) {
     await purgeProtectedData(queryClient);
   }
-  if (controlOf(queryClient).generation === generation) {
+  const control = controlOf(queryClient);
+  if (control.generation === generation) {
+    if (next) setSignedOutHere(control, false);
     queryClient.setQueryData(SESSION_KEY, next);
   }
 }
@@ -397,12 +414,14 @@ export async function startSession(
  * Signs out: locally at once (whether or not the server is reachable), then on the server. A
  * failure is kept as the `failed` sign-out state for the UI to report and retry, and the
  * identity stays signed out locally meanwhile. Calling it while a sign-out is unfinished
- * returns that sign-out.
+ * returns that sign-out. From now until someone is signed in again, `signedOutHere` is true.
  */
 export function endSession(queryClient: QueryClient): SignOut {
   const control = controlOf(queryClient);
   if (control.pendingSignOut) return control.pendingSignOut;
 
+  // Before nobody is published: the auth boundary reads it when it sees nobody signed in.
+  setSignedOutHere(control, true);
   setSignOutState(control, { status: 'pending' });
   // Sign-ins still on their way are overtaken: their responses publish nothing.
   control.signInIntent = undefined;
@@ -445,7 +464,18 @@ export function getSignOutState(queryClient: QueryClient): SignOutState {
   return controlOf(queryClient).signOut;
 }
 
-/** Notifies `listener` whenever the sign-out state changes. Returns an unsubscribe function. */
+/**
+ * Whether this tab's own explicit sign-out ended the session, and nobody has been signed in here
+ * since. Not when the session ended otherwise: by a 401, or because another tab signed out.
+ */
+export function signedOutHere(queryClient: QueryClient): boolean {
+  return controlOf(queryClient).signedOutHere;
+}
+
+/**
+ * Notifies `listener` whenever the sign-out state or `signedOutHere` changes. Returns an
+ * unsubscribe function.
+ */
 export function subscribeToSignOutState(queryClient: QueryClient, listener: () => void) {
   const { listeners } = controlOf(queryClient);
   listeners.add(listener);

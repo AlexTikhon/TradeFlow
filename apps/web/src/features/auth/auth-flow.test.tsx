@@ -1,5 +1,5 @@
 import { QueryObserver } from '@tanstack/react-query';
-import { screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import type { CurrentUser, VoyageListResponse } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,7 +7,7 @@ import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../test/fixtures/au
 import { aVoyageSummary } from '../../test/fixtures/voyages';
 import { type FakeSession, problemResponse, server } from '../../test/msw-server';
 import { renderRoute } from '../../test/render-route';
-import { sessionQuery } from './session';
+import { endSession, getSignOutState, sessionQuery } from './session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from './session-sync';
 
 const ana = aCurrentUser();
@@ -416,5 +416,111 @@ describe('authentication', () => {
     ).toBeInTheDocument();
     expect(router.state.location.pathname).toBe('/sign-in');
     expect(protectedQueries(queryClient)).toHaveLength(0);
+  });
+});
+
+/** A page other than the default target, so that returning to it can be told apart. */
+const IN_TRANSIT = '/voyages?status=IN_TRANSIT';
+const pageOf = (router: ReturnType<typeof renderRoute>['router']) =>
+  `${router.state.location.pathname}${router.state.location.search}`;
+
+describe('where the next sign-in leads after the session ends', () => {
+  it('opens the voyage list after signing out here, when the boundary redirects before the server confirms', async () => {
+    const { router, user, session } = renderRoute(IN_TRANSIT);
+    serveScopedVoyages(session);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    const signOut = session.holdNext('sign-out');
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut.received;
+    expect(await screen.findByText('Finishing sign-out…')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    signOut.release();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+    });
+    await signInWith(user, ana.user.email);
+
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    expect(pageOf(router)).toBe('/voyages');
+  });
+
+  it('opens the voyage list after signing out here, when the boundary redirects after the server confirms', async () => {
+    const { router, user, session, queryClient } = renderRoute(IN_TRANSIT);
+    serveScopedVoyages(session);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+
+    // act() holds React's rendering until its callback resolves, so the local sign-out and the
+    // server's confirmation both finish before the boundary sees that nobody is signed in.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+      expect(getSignOutState(queryClient).status).toBe('pending');
+      await endSession(queryClient).settled; // The sign-out the click started.
+      expect(session.log).toContain('sign-out answered');
+      expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+    ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    await signInWith(user, ana.user.email);
+
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    expect(pageOf(router)).toBe('/voyages');
+  });
+
+  it('opens the voyage list after signing out here, even when it next asks for a protected page', async () => {
+    const { router, user, session } = renderRoute(IN_TRANSIT);
+    serveScopedVoyages(session);
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+    ).toBeInTheDocument();
+
+    // The boundary redirects from the page the tab showed after the sign-out's own navigation.
+    await act(() => router.navigate(IN_TRANSIT));
+    expect(await screen.findByLabelText(/Email/)).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/sign-in');
+    await signInWith(user, ana.user.email);
+
+    expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+    expect(pageOf(router)).toBe('/voyages');
+  });
+
+  it('returns to the page it showed when another tab ends the session, even after signing out here before', async () => {
+    const { router, user, session, queryClient } = renderRoute('/voyages');
+    serveScopedVoyages(session);
+    const stopSync = startSessionSync(queryClient);
+    const otherTab = new BroadcastChannel(SESSION_CHANNEL_NAME);
+    try {
+      expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+      // Signed out here and back in: that sign-out decides nothing about the next session.
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+      });
+      await signInWith(user, ana.user.email);
+      expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+      await act(() => router.navigate(IN_TRANSIT));
+
+      // Another tab signs out: this tab leaves its page, and keeps it as the one to return to.
+      session.current = null;
+      otherTab.postMessage(SESSION_CHANGED);
+      expect(
+        await screen.findByRole('heading', { name: 'Sign in to TradeFlow' }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText('TF-ANA-ONLY')).not.toBeInTheDocument();
+
+      // That tab signs back in: this one follows, back to the page it showed.
+      session.current = ana;
+      otherTab.postMessage(SESSION_CHANGED);
+      expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+      expect(pageOf(router)).toBe(IN_TRANSIT);
+    } finally {
+      otherTab.close();
+      stopSync();
+    }
   });
 });

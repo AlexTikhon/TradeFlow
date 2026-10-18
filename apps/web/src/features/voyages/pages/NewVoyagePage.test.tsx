@@ -419,6 +419,7 @@ describe('NewVoyagePage', () => {
 
     it('does not sign out the same user after they signed out and back in', async () => {
       serveReferenceData();
+      serveVoyageList([]);
       const creation = serveCreation({ hold: true, respond: unauthenticated });
       const { router, user, session, queryClient } = renderRoute('/voyages/new');
       await fillForm(user);
@@ -426,9 +427,11 @@ describe('NewVoyagePage', () => {
       await creation.received;
 
       // Ana signs out, which ends the session her request was sent under, and signs in again.
+      // Having signed out herself, she starts on the voyage list, and opens a fresh form from it.
       await user.click(screen.getByRole('button', { name: 'Sign out' }));
       await signInAs(user, ana.user.email);
-      // Back on a fresh form. Same user, same organization: only the session itself is new.
+      await user.click(await screen.findByRole('link', { name: 'New voyage' }));
+      // Same user, same organization: only the session itself is new.
       await screen.findAllByRole('option', { name: 'Santos (BRSSZ)' });
       expect(screen.getByLabelText(/Quantity/)).toHaveValue('');
       expect(queryClient.getQueryData(['session'])).toEqual(ana);

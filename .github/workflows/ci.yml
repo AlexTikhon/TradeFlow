@@ -93,14 +93,28 @@ jobs:
       # The Chromium build pinned by e2e's @playwright/test, and the system libraries it needs.
       - run: pnpm --filter @tradeflow/e2e exec playwright install --with-deps chromium
 
-      - run: pnpm test:e2e
+      - id: e2e
+        run: pnpm test:e2e
 
-      # Server logs, failure screenshots and the HTML report. Traces, videos and storage state
-      # are off (playwright.config.ts), and nothing in e2e/.output records headers or cookies.
-      - if: failure()
+      # Server logs, failure screenshots, the HTML report and results/.last-run.json, whenever the
+      # suite itself failed. Traces, videos and storage state are off (playwright.config.ts), and
+      # nothing in e2e/.output records headers or cookies; the exclusions below keep it so if
+      # that ever changes.
+      #
+      # e2e/.output is itself hidden, and upload-artifact skips hidden paths unless told
+      # otherwise, even one named explicitly: without include-hidden-files nothing was uploaded.
+      # It applies only to this one path. A run that failed without leaving diagnostics fails
+      # this step instead of passing it silently.
+      - if: failure() && steps.e2e.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: e2e-diagnostics
-          path: e2e/.output/
+          path: |
+            e2e/.output/
+            !e2e/.output/**/*.storage-state.json
+            !e2e/.output/**/.auth/**
+            !e2e/.output/**/*.har
+            !e2e/.output/**/trace.zip
+          include-hidden-files: true
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: error

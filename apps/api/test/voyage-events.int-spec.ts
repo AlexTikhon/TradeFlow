@@ -891,7 +891,13 @@ describe('Voyage event streams', () => {
 
     /**
      * Holds a row's lock and starts the contenders one after another, each blocked on the row
-     * before the next starts (so PostgreSQL grants it in that order), then lets them go together.
+     * before the next starts, then lets them go together. Answers come back in contender order.
+     *
+     * Who wins depends on the lock the contenders wait for. Contenders that write the row itself
+     * (a review or a replacement updates the document) queue for it, and PostgreSQL grants it in
+     * that order, so the first contender wins. Contenders that only share-lock it (a first upload
+     * share-locks the instruction) are all let through at once when it is released; the unique
+     * document key then decides between them, in no particular order.
      */
     async function race(
       table: 'documentary_instructions' | 'documents',
@@ -1104,15 +1110,23 @@ describe('Voyage event streams', () => {
       const seller = await listen(s.exporter.viewer.cookie, s.voyage.id);
       const buyer = await listen(s.trader.viewer.cookie, s.voyage.id);
 
-      // Both have their bytes kept and wait for the revision's lock to commit.
+      // Both have their bytes kept and wait for the revision's lock to commit. Both only
+      // share-lock it, so either may win: which one is not part of what is tested.
       const statuses = await race('documentary_instructions', s.instruction.id, [
         () => upload(s.exporter.operator.cookie, s.bl),
         () => upload(colleague, s.bl),
       ]);
-      expect(statuses).toEqual([201, 412]);
-      expect(await documentWrites()).toMatchObject({ versions: 1, auditEvents: 1 });
-      // The loser's bytes were removed; publishing touched neither.
-      expect(await storage.files('objects')).toEqual(await keptObjects());
+      expect([...statuses].sort()).toEqual([201, 412]);
+      expect(await documentWrites()).toEqual({
+        documents: 1,
+        versions: 1,
+        reviews: 0,
+        auditEvents: 1,
+      });
+      // The loser's bytes were removed, whichever it was; publishing touched neither.
+      const kept = await keptObjects();
+      expect(kept).toHaveLength(1);
+      expect(await storage.files('objects')).toEqual(kept);
 
       // The barrier: the buyer decides on the winning file.
       await review(s.trader.operator.cookie, s.bl, 1, APPROVE, 1).expect(200);
