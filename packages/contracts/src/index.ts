@@ -9,4 +9,5 @@ export * from './documentary-instructions.js';
 export * from './documents.js';
 export * from './timeline.js';
 export * from './voyage-events.js';
+export * from './action-items.js';
 export * from './auth.js';

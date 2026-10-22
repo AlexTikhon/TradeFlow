@@ -127,6 +127,9 @@ src/
       documents.service.ts      list, upload (check, receive, keep, commit, compensate), review,
                                 download
       documents.controller.ts   multipart upload, review, preconditions, ETag, attachment download
+    action-center/              (ADR 0017; rules only, no endpoint or Nest module yet)
+      action-items.ts           which records ask what of an organization, keys, page order (pure)
+      action-item-pages.ts      filters, keyset pages, opaque cursors (pure)
   common/http/preconditions.ts  If-Match / If-None-Match parsing, 428 (no comparison: the DB does it)
 ```
 
