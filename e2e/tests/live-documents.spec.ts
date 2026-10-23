@@ -1,8 +1,9 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import {
   billOfLading,
   giveInstructions,
+  pdf,
   reviewBillOfLading,
   timelineEntry,
   uploadBillOfLading,
@@ -28,8 +29,6 @@ const REVISED = 'DOCUMENTARY_INSTRUCTION_REVISED';
 const UPLOADED = 'DOCUMENT_VERSION_UPLOADED';
 const REVIEWED = 'DOCUMENT_VERSION_REVIEWED';
 
-/** Bytes that start like a PDF, different every time. */
-const pdf = () => Buffer.concat([Buffer.from('%PDF-1.7\n'), randomBytes(24 * 1024)]);
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 /**

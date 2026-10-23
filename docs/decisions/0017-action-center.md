@@ -7,8 +7,10 @@
   voyage page (`apps/web/src/features/voyages/navigation/`) are implemented and tested through
   the real route tree ([the web slice](#the-web-slice)). The page keeps its queue current
   ([freshness](#freshness)): polling, visibility, focus, reconnection and the voyage commands'
-  invalidation, all tested on controlled timers. Browser end-to-end coverage is still to come.
-- **Date:** 2026-10-22 (freshness: 2026-10-23)
+  invalidation, all tested on controlled timers. Chromium covers it end to end
+  (`e2e/tests/action-center.spec.ts`, [browser coverage](#browser-coverage)).
+- **Date:** 2026-10-22 (freshness: 2026-10-23; initial-load invalidation and browser coverage:
+  2026-10-23)
 
 ## Context
 
@@ -331,7 +333,13 @@ A queue on screen keeps itself current by reading its **first page** again, neve
 - **Coalescing:** a trigger that arrives while a read is on its way shares it, so focus,
   visibility, reconnection and the interval never cancel or repeat a read. A command's
   invalidation is the exception: the read on its way may predate the command, so it is
-  replaced by one sent now, and the change is never lost.
+  replaced by one sent now, and the change is never lost. That holds while the queue is still
+  loading its first page too: TanStack Query 5 cancels a read on its way for an invalidation
+  only once the query has data (`Query.fetch` otherwise shares it), so `invalidateActionQueue`
+  cancels the queues on screen itself, silently and synchronously, before invalidating. Nothing
+  is awaited between the command's session check and the new read, so a session replaced
+  meanwhile (sign-out, the same user signing back in, or session checks going to someone else
+  and back) is never cancelled or refreshed by the old one's command.
 - **Pagination restarts.** Each successful read of the first page ends the walk that followed
   the previous one: its later pages are no longer shown, and a page still on its way loses its
   observer, is cancelled, and can never be appended to the new queue. **Load more** then follows
@@ -368,4 +376,32 @@ replacement (including the same user signing back in), a walk restarted by a ref
 page never appended, a deadline passing with nothing written, a failed refresh and its
 recovery, an invalidation replacing a read on its way without fetching another filter, and a
 command succeeding after the queue was shown; each command's own tests check its invalidation,
-and that a completion for an ended session invalidates nothing.
+and that a completion for an ended session invalidates nothing. Barrier-held regressions for a
+real command committing while a read predating it is on its way: during the first page's load
+(the read is cancelled, one sent after the command is the only page ever accepted; this failed
+before the explicit cancellation), during a refresh triggered by focus, and around session
+replacement (a command answered after the same user signed back in cancels and reads nothing of
+the new session's queue, still loading under the same key; a reconciling read on its way when
+session checks go to another user and back reaches nobody).
+
+### Browser coverage
+
+`e2e/tests/action-center.spec.ts`, in Chromium against the production build, the built API and
+PostgreSQL, each party in its own browser context, every transition made through the voyage
+page's forms. A change by the other organization reaches a queue on screen by the page's own
+30-second interval (its clock moved past it, the interval unchanged), never by Refresh, and each
+read is confirmed from the browser's network log. Following an item sends no write.
+
+- **The journey:** instructions given, then acknowledged from the seller's queue at the exact
+  revision; version 1 uploaded, followed from the buyer's queue and rejected; the replacement
+  action, with its reason, followed and answered with version 2; version 2 reviewed from a new
+  action and approved; each queue empty when nothing is owed. An ETA notice is acknowledged from
+  the buyer's queue.
+- **History:** a kept link to version 1, opened after version 2 replaced it, shows version 1 as
+  history, focused, in the viewport and below the sticky header, with the review form only for
+  version 2 and nothing chosen; folded, **Show it** opens it again; after a new revision the same
+  link opens both histories around it, again after both are folded. At 390 px wide it lands the
+  same way, with no horizontal scrolling.
+- **Access:** a viewer reads the buyer's queue and opens both records with no command offered;
+  the seller's queue holds only its own side; a surveyor on the voyage and an organization not
+  on it get empty queues (`GET /api/action-items` too), and the link shows them nothing.

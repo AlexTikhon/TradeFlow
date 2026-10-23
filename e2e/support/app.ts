@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { expect, type Page } from '@playwright/test';
 import { E2E_PASSWORD } from './run-config.js';
 import type { Party, Scenario } from './scenario.js';
@@ -105,6 +106,9 @@ export async function expectInstructionsSent(page: Page, scenario: Scenario, rev
 /** The bill of lading the current revision requires, with its versions and its form. */
 export const billOfLading = (page: Page) =>
   instructionPanel(page).getByRole('listitem', { name: 'Bill of lading', exact: true });
+
+/** Bytes that start like a PDF, different every time. */
+export const pdf = () => Buffer.concat([Buffer.from('%PDF-1.7\n'), randomBytes(24 * 1024)]);
 
 /** Uploads `file` as file version `version` of the bill of lading, as the seller. */
 export async function uploadBillOfLading(

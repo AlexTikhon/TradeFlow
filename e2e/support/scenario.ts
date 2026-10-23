@@ -114,6 +114,73 @@ export async function createScenario(pool: pg.Pool, passwordHash: string): Promi
   }
 }
 
+/**
+ * A viewer in the organization of `colleagueOf`: reads what that organization reads, and may
+ * run none of its commands. Users have no API, so they are written here, like the scenario's.
+ */
+export async function addViewer(
+  pool: pg.Pool,
+  passwordHash: string,
+  colleagueOf: Party,
+): Promise<Party> {
+  const tag = randomBytes(4).toString('hex');
+  const viewer: Party = {
+    email: `viewer.${tag}@viewer.e2e.example`,
+    fullName: `Vera Viewer ${tag}`,
+    organizationName: colleagueOf.organizationName,
+  };
+  await pool.query(
+    `INSERT INTO users (organization_id, email, full_name, role, password_hash, updated_at)
+     SELECT organization_id, $2, $3, 'VIEWER', $4, now() FROM users WHERE email = $1`,
+    [colleagueOf.email, viewer.email, viewer.fullName, passwordHash],
+  );
+  return viewer;
+}
+
+/**
+ * A surveyor taking part in the scenario's voyage, with one operator: it sees the voyage and
+ * its string, and is party to no contract on it.
+ */
+export async function addSurveyor(
+  pool: pg.Pool,
+  passwordHash: string,
+  scenario: Scenario,
+): Promise<Party> {
+  const tag = randomBytes(4).toString('hex');
+  const surveyor: Party = {
+    email: `surveyor.${tag}@surveyor.e2e.example`,
+    fullName: `Simon Surveyor ${tag}`,
+    organizationName: `Surveyor ${tag} B.V.`,
+  };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const organization = await one<{ id: string }>(
+      client,
+      `INSERT INTO organizations (name, country_code, updated_at) VALUES ($1, 'NL', now())
+       RETURNING id`,
+      [surveyor.organizationName],
+    );
+    await client.query(
+      `INSERT INTO users (organization_id, email, full_name, role, password_hash, updated_at)
+       VALUES ($1, $2, $3, 'OPERATOR', $4, now())`,
+      [organization.id, surveyor.email, surveyor.fullName, passwordHash],
+    );
+    await client.query(
+      `INSERT INTO voyage_participants (voyage_id, organization_id, role)
+       VALUES ($1, $2, 'SURVEYOR')`,
+      [scenario.voyage.id, organization.id],
+    );
+    await client.query('COMMIT');
+    return surveyor;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function one<T>(client: pg.PoolClient, sql: string, values: unknown[]): Promise<T> {
   const { rows } = await client.query(sql, values);
   const [row] = rows as T[];

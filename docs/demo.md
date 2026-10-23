@@ -5,8 +5,10 @@ buyer under its first sale contract in two isolated browser profiles. It shows e
 once, explains what it means for the business, and what the system guarantees while it happens.
 A second walkthrough, [on a fresh voyage](#walkthrough-2-a-fresh-voyage), starts from nothing:
 the exporter creates a voyage and sets up its trade string in the app, then the same flows run
-under the contract that setup recorded. What is implemented and how it is verified:
-[MVP status](mvp-status.md).
+under the contract that setup recorded. A third, [the Action Center in three
+minutes](#walkthrough-3-the-action-center-in-three-minutes), is the short one for an interview:
+each side's queue leads to the exact record, the decision there changes the counterparty's
+queue. What is implemented and how it is verified: [MVP status](mvp-status.md).
 
 > **Verification status.** On 2026-10-18 all six steps were driven through the real web UI in
 > Chromium by a script (Playwright, two isolated browser contexts) against a throwaway database,
@@ -19,6 +21,10 @@ under the contract that setup recorded. What is implemented and how it is verifi
 > person. Its expectations come from the code at `5baf039`, ADR 0016 and the tests that cover it,
 > not from an observed run. Its [record](#record-of-walkthrough-2) is empty until someone runs
 > it.
+>
+> **The Action Center walkthrough (steps A1 to A5)** was driven once by a script on 2026-10-23,
+> setup included, and its expectations are what that run observed
+> ([record](#record-of-walkthrough-3)). No person has run it yet.
 
 ## Cast
 
@@ -765,3 +771,192 @@ unsure), _cosmetic_.
 | #   | Step | What happened | Severity | Suggested change |
 | --- | ---- | ------------- | -------- | ---------------- |
 | 1   |      |               |          |                  |
+
+## Walkthrough 3: the Action Center in three minutes
+
+> **Performed once, by a script.** On 2026-10-23 a Playwright script drove two isolated
+> Chromium contexts through the setup and steps A1 to A5 below, by the UI's visible labels, on
+> a freshly seeded throwaway database. What follows is what it observed
+> ([record](#record-of-walkthrough-3)). **No person has run it yet**: the spoken pacing, real
+> window focus and the native file dialog are unobserved.
+
+One fresh voyage between two seeded organizations. The buyer's instructions become the seller's
+action; each action opens one exact record; the decision taken there becomes the counterparty's
+next action, and the answered one disappears. Nothing in the Action Center sends a command.
+
+### Cast of walkthrough 3
+
+Every seeded user's password is `tradeflow-demo`. All names are fictional.
+
+| Profile        | User         | Email                               | Organization                    | On the new voyage                   |
+| -------------- | ------------ | ----------------------------------- | ------------------------------- | ----------------------------------- |
+| **S** (seller) | Ana Souza    | `ana.souza@cerrado-graos.example`   | Cerrado Grãos Exportadora S.A.  | Exporter; seller under contract 1   |
+| **B** (buyer)  | Tan Wei Ling | `wei.ling.tan@meridianagri.example` | Meridian Agri Trading Pte. Ltd. | Final buyer; buyer under contract 1 |
+
+### Before you start (not part of the three minutes)
+
+1. **Database.** All fourteen migrations, and the seeded organizations and users. The seed is
+   not re-run for this walkthrough, and the development database is never reset: the walkthrough
+   creates a voyage of its own, so it can be repeated (each run leaves one more voyage). To keep
+   it away from your development data entirely, use [an isolated run](#an-isolated-run), seeded
+   once, and drop the database afterwards. A database seeded before 2026-10-23 may have no voyage
+   reference counter (the seed's counter query matched nothing), and then **Create voyage** fails
+   with a server error; seeding with the current seed, or an isolated run, sets it.
+2. **Servers and two profiles**, as for the first walkthrough: `pnpm dev`, then two isolated
+   browser profiles side by side, Ana in **S** and Wei Ling in **B**.
+3. **Two PDFs**, `bl-v1.pdf` and `bl-v2.pdf`.
+4. **A fresh voyage (Ana, about a minute).** **Voyages** → **New voyage**: MV Cape Aurora,
+   Soybeans, `30000`, Paranaguá (BRPNG) → Mersin (TRMER), laycan 2026-12-01 to 2026-12-10,
+   **Create voyage**. Note its reference (**TF-2026-0008** on a freshly seeded database). Then
+   **Set up trade string**, find `Meridian`, **Add**, **Review the trade string**, **Set up trade
+   string**: one contract, Cerrado sells to Meridian.
+5. **Start positions.** Ana on **Action Center**: "Nothing is waiting for your organization".
+   Wei Ling on **Action Center**: one seeded item, **Acknowledge ETA notice** on TF-2026-0002
+   (it stays there throughout; every item names its voyage), then she opens the new voyage from
+   **Voyages**.
+
+**Refreshing during the demo.** A queue on screen reads itself again every 30 seconds, and at
+once when its window regains focus. When you switch to the other window, **click into it**: the
+queue reads at once. Without focus, expect up to 30 seconds (the scripted run waited 29 to 30 s
+for each of the three handovers, since a headless browser never changes focus). **Refresh** also
+reads at once; say so if you use it, as it is a manual read, not the automatic one.
+
+### A1. Instructions become the seller's action (0:00 to 0:30)
+
+**Do (Wei Ling).** In **Contract 1 · Cerrado Grãos … → Meridian …**, **Give documentary
+instructions**: consignee `To order of Banco Demo`, a bill of lading, 3 originals, 2 copies,
+**Send instructions**.
+
+**Expect (Ana, after clicking into her window).** **Acknowledge instructions** on the new voyage:
+"Acknowledge receipt of revision 1 of the documentary instructions Meridian Agri Trading Pte.
+Ltd. gave", record **Revision 1**, counterparty Meridian · Contract 1, when it was given.
+
+**Say.** _Derived state_: there is no task table. The item is computed on each read from the
+records: the current revision has no acknowledgement, so the seller owes one.
+
+### A2. Record, decision, upload (0:30 to 1:10)
+
+**Do (Ana).** **Open revision 1**.
+
+**Expect.** The voyage page, scrolled to revision 1, which has focus and an outline, clear of the
+header. Above the sections: "Revision 1 is waiting for your organization to acknowledge receipt.
+It is the revision in force." Nothing was sent by opening it.
+
+**Do (Ana).** **Acknowledge receipt of revision 1**. Then at **Bill of lading**, **Choose a PDF**
+(`bl-v1.pdf`), **Upload**. Back to **Action Center**.
+
+**Expect.** Revision 1 shows **Acknowledged by the seller**; "Version 1 of the bill of lading has
+been uploaded."; Ana's queue: "Nothing is waiting for your organization".
+
+**Say.** The action disappeared because the record changed, not because anyone ticked it off.
+_Counterparty isolation_: the queue is scoped to contracts where the organization is buyer or
+seller and still participates; a surveyor on this voyage, or the next trader in a string, sees
+none of it.
+
+### A3. The buyer rejects the exact version (1:10 to 1:50)
+
+**Do (Wei Ling).** **Action Center** (click into her window).
+
+**Expect.** **Review document**: "Approve or reject version 1 of the bill of lading Cerrado Grãos
+Exportadora S.A. presented", record "Bill of lading, version 1 (instructions revision 1)", beside
+the seeded notice.
+
+**Do.** **Open version 1**. **Expect** "Version 1 of the bill of lading is waiting for your
+organization's decision", version 1 focused, the review form with nothing chosen. **Reject**,
+reason `Consignee does not match revision 1.`, **Reject version 1**. Back to **Action Center**:
+the review item is gone.
+
+**Say.** _Optimistic concurrency_: the decision names version 1 and is sent with that version's
+precondition, so if the seller had replaced the file meanwhile it would be refused (412), never
+applied to the newer file. Opening a link never chooses a decision or retargets one.
+
+### A4. The rejection becomes the seller's action (1:50 to 2:25)
+
+**Expect (Ana, after clicking into her window).** **Replace rejected document**, with the reason
+"Consignee does not match revision 1." on the item.
+
+**Do.** **Open version 1**. **Wait for** "Version 1 of the bill of lading was rejected and is
+waiting for your organization to replace it" before choosing a file (see the note below). Choose
+`bl-v2.pdf`, **Upload as version 2**. Back to **Action Center**: nothing waiting.
+
+### A5. Approval closes the loop (2:25 to 3:00)
+
+**Expect (Wei Ling, after clicking into her window).** **Review document** for **version 2**: a
+new action, not the old one updated.
+
+**Do.** **Open version 2**, **Approve**, **Approve version 2**. **Action Center**: only the seeded
+notice is left.
+
+**Optional (+20 s).** Browser **Back** to the version 1 link (or paste it): "Version 1 of the bill
+of lading has been replaced … A decision or a replacement applies only to version 2." Version 1 is
+focused inside **Earlier versions**; fold it and press **Show it** to open it again. Nothing is
+sent.
+
+**Say.** _Refresh reconciliation_: the queue has no push. It re-reads its first page every 30 s
+while visible, on focus, visibility and reconnection, and right after the same session's
+commands; a read already on its way when a command commits is cancelled and replaced, even
+while the queue is still loading its first page, so an answer older than the command is never
+shown. Each refresh restarts from the first page rather than mixing pages read at different
+times.
+
+**If a file was chosen too early.** Coming back to the voyage page shows its cached sections for a
+moment while they are read again. If a file is chosen in that moment and the read then shows the
+rejection, the form keeps the file and asks **Replace version 1 with my file**: the same
+precondition at work. Confirm, or wait for the status first.
+
+### Known limits to state
+
+- **Candidate loading in memory.** Each page read loads all of the organization's open
+  candidates and cuts the page in memory; cost grows with current open work (not history). The
+  SQL ordering is designed, not built ([ADR 0017](decisions/0017-action-center.md)).
+- **Polling for the aggregate queue.** No organization-wide stream: another organization's
+  command reaches a queue on screen within 30 s, or on focus.
+- **Single-instance voyage SSE.** Voyage pages' live updates fan out in one API process
+  ([ADR 0015](decisions/0015-voyage-event-streams.md)); several instances would need a broker.
+- **Local file storage.** PDFs are kept in a local directory (`DOCUMENT_STORAGE_DIR`), not object
+  storage.
+
+**Evidence.** Chromium suite: `action-center.spec.ts` (this journey with polling on the page's
+clock, an ETA notice acknowledged from the queue, old-link history and **Show it**, viewers and
+other organizations). jsdom: `ActionCenterPage.test.tsx`, `VoyageRecordLinks.test.tsx`.
+PostgreSQL/HTTP: `action-items.int-spec.ts`.
+
+### Record of walkthrough 3
+
+**What ran.** On 2026-10-23 a Playwright script (not a person) drove headless Chromium in two
+browser contexts, each with its own cookie jar: the setup (voyage created and trade string set up
+through the forms) and A1 to A5 with the optional old link. It waited for each cross-organization
+change by the page's own polling, with no reload, no Refresh and no clock control, and recorded
+every non-`GET` request. The script was deleted afterwards.
+
+| Item     | Value                                                                                                             |
+| -------- | ----------------------------------------------------------------------------------------------------------------- |
+| Code     | Working tree on `0c9fb64`, with this milestone's changes (seed counter fix included), uncommitted                 |
+| Machine  | Windows 11, Node.js 24.11.1, Playwright 1.63.0 with its Chromium, headless, contexts in UTC                       |
+| Database | Throwaway `tradeflow_demo` on a disposable PostgreSQL 18.6 container: 14 migrations, then the seed                |
+| Servers  | API with `nest start` on 3471; Vite dev server on 5471 proxying `/api`, as in [an isolated run](#an-isolated-run) |
+| Voyage   | TF-2026-0008, Cerrado Grãos → Meridian                                                                            |
+
+| Step | Observed                                                                                                           | At (s) |
+| ---- | ------------------------------------------------------------------------------------------------------------------ | ------ |
+| A1   | Ana's **Acknowledge instructions** (TF-2026-0008, revision 1) appeared 29.1 s after Wei Ling sent revision 1       | 29.5   |
+| A2   | Status as above; revision 1 focused; acknowledged and v1 uploaded; Ana's queue empty                               | 30.3   |
+| A3   | Wei Ling's queue: the seeded notice (TF-2026-0002) and **Review document**; v1 focused; rejected; review item gone | 30.9   |
+| A4   | **Replace rejected document** with the reason appeared 29.6 s after the rejection; v2 uploaded                     | 61.1   |
+| A5   | **Review document** for version 2 appeared 30.2 s after the upload; approved; only the seeded notice left          | 92.4   |
+| Old  | Version 1 shown as replaced history, focused inside **Earlier versions**; 0 writes sent by opening it              | 93.2   |
+
+The writes were exactly the commands of the steps: the instructions, the acknowledgement, two
+uploads and two reviews (plus sign-ins and setup). Of the 92 s, about 89 s was waiting for
+polling; with a person clicking into the other window, each handover should read at once (tested
+in jsdom, not observed in a browser).
+
+**Deviations.** A first attempt failed at setup: on the freshly seeded database **Create voyage**
+answered 500 (`voyages_reference_key`), because the seed never set the voyage reference counter
+(its regular expressions lost their `\d` in a tagged template). The seed was fixed, the throwaway
+database recreated, and the run repeated. A second attempt stopped at A4 because the script chose
+the file before the voyage page had re-read its documents (see "If a file was chosen too early");
+the script then waited for the status text as a person would, and the third run passed.
+
+**Not exercised.** A person and spoken timing; real window focus; the native file dialog;
+`pnpm dev` as one command; other browsers.

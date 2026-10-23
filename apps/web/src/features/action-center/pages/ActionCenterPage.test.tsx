@@ -1,4 +1,4 @@
-import { onlineManager } from '@tanstack/react-query';
+import { onlineManager, type QueryKey } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import type { ActionItemPage, CurrentUser, Notice } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
@@ -1210,6 +1210,189 @@ describe('The Action Center', () => {
       );
       return gate;
     }
+
+    /** The queue as the real server answers it: decided when the request arrives. */
+    const queueNow = (state: { notices: Notice[] }) =>
+      state.notices.some(({ status }) => status === 'ISSUED')
+        ? actionPage([aNoticeAction()])
+        : emptyActionPage();
+
+    /**
+     * Serves the queue, holding the `n`th request (from 0) at `gates[n]`, if there is one; a held
+     * request's answer is still decided when it arrives.
+     */
+    function serveHeldQueue(
+      state: { notices: Notice[] },
+      gates: (ReturnType<typeof aGate> | undefined)[],
+    ) {
+      const requests = serveQueue(async () => {
+        const gate = gates[requests.length - 1];
+        const page = queueNow(state);
+        await gate?.pass();
+        return json(page);
+      });
+      return requests;
+    }
+
+    /** Resolves once a command has finished, its success callbacks (and invalidation) included. */
+    function commandSettles(queryClient: Rendered['queryClient']) {
+      return new Promise<void>((resolve) => {
+        const unsubscribe = queryClient.getMutationCache().subscribe((event) => {
+          if (event.type === 'updated' && event.mutation.state.status !== 'pending') {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+    }
+
+    /** Every first page `identity`'s queue accepts from now on, in order. */
+    function acceptedPages(queryClient: Rendered['queryClient'], identity: CurrentUser) {
+      const queue = JSON.stringify(actionQueueKey(['protected', scopeOf(identity)] as const));
+      const pages: ActionItemPage[] = [];
+      const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+        const key = JSON.stringify((event.query.queryKey as QueryKey).slice(0, 4));
+        if (event.type === 'updated' && event.action.type === 'success' && key === queue) {
+          pages.push(event.action.data as ActionItemPage);
+        }
+      });
+      watchers.push(unsubscribe);
+      return pages;
+    }
+
+    it('replaces a first page still loading when a command succeeds, never showing its answer', async () => {
+      const state = serveVoyage();
+      const acknowledgement = serveAcknowledgement(state);
+      const [before, after] = [aGate(), aGate()];
+      const requests = serveHeldQueue(state, [before, after]);
+      const { user, router, queryClient } = renderRoute(`/voyages/${voyage.id}`, {
+        signedInAs: claire,
+      });
+      const accepted = acceptedPages(queryClient, claire);
+      await user.click(await screen.findByRole('button', { name: 'Acknowledge receipt' }));
+      await acknowledgement.received;
+
+      // Nothing cached: the queue's first read arrives, and is answered, before the command commits.
+      await act(() => router.navigate('/actions'));
+      await before.received;
+      const settled = commandSettles(queryClient);
+      acknowledgement.release();
+      await settled;
+
+      // The read on its way is cancelled, and one sent after the command replaces it.
+      expect(requests[0]?.signal.aborted).toBe(true);
+      await after.received;
+      before.release();
+      after.release();
+      expect(await screen.findByText('Nothing is waiting for your organization')).toBeVisible();
+      expect(accepted).toEqual([emptyActionPage()]);
+      expect(requests).toHaveLength(2);
+    });
+
+    it('replaces a refresh on its way when a command succeeds, never showing its answer', async () => {
+      const state = serveVoyage();
+      const acknowledgement = serveAcknowledgement(state);
+      const [refresh, after] = [aGate(), aGate()];
+      const requests = serveHeldQueue(state, [undefined, refresh, after]);
+      const { user, router, queryClient } = renderRoute(`/voyages/${voyage.id}`, {
+        signedInAs: claire,
+      });
+      await user.click(await screen.findByRole('button', { name: 'Acknowledge receipt' }));
+      await acknowledgement.received;
+      await act(() => router.navigate('/actions'));
+      expect(await headings()).toEqual(['Acknowledge ETA notice']);
+      const accepted = acceptedPages(queryClient, claire);
+
+      // The window regains focus: a refresh arrives, and is answered, before the command commits.
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      await refresh.received;
+      const settled = commandSettles(queryClient);
+      acknowledgement.release();
+      await settled;
+
+      expect(requests[1]?.signal.aborted).toBe(true);
+      await after.received;
+      refresh.release();
+      after.release();
+      expect(await screen.findByText('Nothing is waiting for your organization')).toBeVisible();
+      expect(accepted).toEqual([emptyActionPage()]);
+      expect(requests).toHaveLength(3);
+    });
+
+    describe('when the session is replaced around the reconciliation, even by the same user', () => {
+      it('lets a command answered after Claire signed back in cancel and read nothing of her new queue', async () => {
+        const state = serveVoyage();
+        const acknowledgement = serveAcknowledgement(state);
+        const fresh = aGate();
+        const requests = serveHeldQueue(state, [fresh]);
+        const { user, router, queryClient } = renderRoute(`/voyages/${voyage.id}`, {
+          signedInAs: claire,
+        });
+        await user.click(await screen.findByRole('button', { name: 'Acknowledge receipt' }));
+        await acknowledgement.received;
+
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+        await user.type(await screen.findByLabelText(/Email/), claire.user.email);
+        await user.type(screen.getByLabelText(/Password/), 'tradeflow-demo');
+        await user.click(screen.getByRole('button', { name: 'Sign in' }));
+        expect(await screen.findByText(claire.user.fullName)).toBeInTheDocument();
+        // The new session's queue, under the same key as the old one's, is still loading.
+        await act(() => router.navigate('/actions'));
+        await fresh.received;
+        const accepted = acceptedPages(queryClient, claire);
+        const settled = commandSettles(queryClient);
+        acknowledgement.release();
+        await settled;
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.signal.aborted).toBe(false);
+        fresh.release();
+        // Its own read, answered before the command committed; the next refresh brings the change.
+        expect(await headings()).toEqual(['Acknowledge ETA notice']);
+        expect(accepted).toEqual([actionPage([aNoticeAction()])]);
+        expect(requests).toHaveLength(1);
+      });
+
+      it('lets a reconciling read on its way when session checks went to Ana and back reach nobody', async () => {
+        const state = serveVoyage();
+        const acknowledgement = serveAcknowledgement(state);
+        const [before, reconciling] = [aGate(), aGate()];
+        const requests = serveHeldQueue(state, [before, reconciling]);
+        const rendered = renderRoute(`/voyages/${voyage.id}`, {
+          signedInAs: claire,
+          accounts: [claire, ana],
+        });
+        const { user, router, session, queryClient } = rendered;
+        await user.click(await screen.findByRole('button', { name: 'Acknowledge receipt' }));
+        await acknowledgement.received;
+        await act(() => router.navigate('/actions'));
+        await before.received;
+        const settled = commandSettles(queryClient);
+        acknowledgement.release();
+        await settled;
+        expect(requests[0]?.signal.aborted).toBe(true);
+        await reconciling.received;
+        const accepted = acceptedPages(queryClient, claire);
+
+        // The cookie goes to Ana, then back to Claire; session checks find out each time.
+        for (const identity of [ana, claire]) {
+          session.current = identity;
+          await act(() => queryClient.refetchQueries({ queryKey: ['session'] }));
+          expect(await screen.findByText(identity.user.fullName)).toBeInTheDocument();
+        }
+        expect(requests[1]?.signal.aborted).toBe(true);
+        before.release();
+        reconciling.release();
+
+        expect(await screen.findByText('Nothing is waiting for your organization')).toBeVisible();
+        // Ana's queue, then Claire's new one, each read once, and neither cancelled.
+        expect(requests).toHaveLength(4);
+        expect(requests.slice(2).map(({ signal }) => signal.aborted)).toEqual([false, false]);
+        expect(accepted).toEqual([emptyActionPage()]);
+      });
+    });
 
     it('reads the queue on screen again once a command sent before it was shown succeeds', async () => {
       const state = serveVoyage();

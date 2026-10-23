@@ -6,6 +6,8 @@ under [Limitations](#limitations). The [demo](demo.md) walks through every area.
 on a seeded voyage has been driven end to end once in a real browser by a script, but not yet by
 a person. Its second walkthrough, on a voyage created and set up in the app
 ([ADR 0016](decisions/0016-initial-voyage-setup.md)), is written but has not been performed.
+The Action Center, added since, is verified only locally so far
+([local verification](#local-verification-2026-10-23)).
 
 ## Verified build
 
@@ -42,6 +44,39 @@ other listeners" in `voyage-event-bus.spec.ts` makes a listener throw on purpose
 
 Documentation committed after `5baf039` does not change this evidence. Changes to code or tests
 need a new run.
+
+## Local verification, 2026-10-23
+
+**Not CI evidence.** The Action Center ([ADR 0017](decisions/0017-action-center.md)) was added
+after the CI run above, and no CI run has verified it yet. These are the results of one local run,
+on the uncommitted working tree on top of `0c9fb64` (the Action Center, its initial-load
+invalidation fix, its Chromium tests and the seed's reference-counter fix), run in sequence on
+Windows 11 with Node.js 24.11.1, against a disposable PostgreSQL 18.6 container with explicit
+`TEST_DATABASE_URL` (`…/tradeflow_test`) and `E2E_DATABASE_URL` (`…/tradeflow_e2e`).
+
+| Command            | Result                                                             |
+| ------------------ | ------------------------------------------------------------------ |
+| `pnpm check`       | Passed: format, lint, typecheck, every Vitest suite, build         |
+| `pnpm test:e2e`    | Passed: 14 of 14 Chromium tests in 8 files, one worker, no retries |
+| `git diff --check` | No whitespace errors                                               |
+
+| Layer                   | Where                          | Files | Tests |
+| ----------------------- | ------------------------------ | ----- | ----- |
+| Schemas                 | `packages/contracts`           | 10    | 193   |
+| API unit                | `apps/api/src/**/*.spec.ts`    | 19    | 234   |
+| API on PostgreSQL, HTTP | `apps/api/test/*.int-spec.ts`  | 15    | 531   |
+| Web on MSW, jsdom       | `apps/web/src/**/*.test.ts(x)` | 19    | 459   |
+| Chromium end to end     | `e2e/tests/*.spec.ts`          | 8     | 14    |
+| **Total**               |                                | 71    | 1,431 |
+
+The ten earlier Chromium tests all still pass; the four new ones are in `action-center.spec.ts`
+([ADR 0017, browser coverage](decisions/0017-action-center.md#browser-coverage)). The Action
+Center was also inspected in Chromium screenshots at 1280 × 800, 390 × 844 and 360 × 740 (queue
+with a long rejection reason, a historical deep link, loading, load failure and refresh failure):
+no horizontal scrolling at any width, the linked record focused below the sticky header. At 360 px
+the header's **Sign out** label wraps onto two lines inside its button; nothing overflows or is
+hidden. Its [three-minute walkthrough](demo.md#walkthrough-3-the-action-center-in-three-minutes)
+was driven once by a script, not by a person ([record](demo.md#record-of-walkthrough-3)).
 
 ## What each kind of verification proves
 

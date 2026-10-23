@@ -784,7 +784,9 @@ builds record links and names documents with the voyages feature's modules, and 
   becomes visible or the window regains focus, when the connection returns, on **Refresh**, and
   when a voyage command succeeds in the same session (`invalidateActionQueue`, active queries
   only). Triggers share a read already on its way; a command's invalidation replaces it, since its
-  answer may predate the command. Each successful read is a page of its own
+  answer may predate the command, even during the first page's load (the queue's reads on screen
+  are cancelled explicitly, synchronously, before invalidating: TanStack shares an in-flight read
+  of a query without data otherwise). Each successful read is a page of its own
   (`structuralSharing: false`) and ends the walk from the previous one: later pages disappear,
   and a page still on its way loses its observer, is cancelled, and is never appended. A failed
   read keeps the items shown, with an error and "last updated" at the API's time of the last
@@ -875,13 +877,13 @@ signed in and keeps the answer as the `['session']` query ([ADR 0007](decisions/
 
 ## Testing strategy
 
-| Layer            | Tool                       | Fakes                          | Purpose                                           |
-| ---------------- | -------------------------- | ------------------------------ | ------------------------------------------------- |
-| Contract schemas | Vitest                     | none                           | Wire-format rules                                 |
-| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, chain rules, config |
-| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs        |
-| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client       |
-| End-to-end       | Playwright (Chromium)      | injected transport faults only | Smoke: sign-in, live notices, tabs, stream faults |
+| Layer            | Tool                       | Fakes                          | Purpose                                                          |
+| ---------------- | -------------------------- | ------------------------------ | ---------------------------------------------------------------- |
+| Contract schemas | Vitest                     | none                           | Wire-format rules                                                |
+| API unit         | Vitest                     | none (pure functions)          | Mapping, ordering, precision, chain rules, config                |
+| API integration  | Vitest + supertest         | none: real Nest, real Postgres | Endpoints, auth, roles, transactions, docs                       |
+| Web              | Vitest + RTL + MSW (jsdom) | network only                   | Pages through real router, cache and client                      |
+| End-to-end       | Playwright (Chromium)      | injected transport faults only | Smoke: sign-in, live updates, tabs, stream faults, Action Center |
 
 Prisma is not mocked: a mocked ORM tests the mock. API tests are serialized against a dedicated
 `*_test` database that is truncated between tests. Authorization tests sign in through the real
@@ -968,11 +970,20 @@ it holds, and streams it ends cleanly. EventSource, authentication, data and str
 are never faked. A probe on the browser's native `EventSource` records what Chromium actually
 does: a 503 leaves it `CLOSED` (so the page must reconnect itself), and a dropped stream reports
 `CONNECTING` and reconnects by itself after the server's `retry`, sending the cookie again.
+The Action Center (`action-center.spec.ts`, [ADR 0017](decisions/0017-action-center.md#browser-coverage))
+is driven between a seller's and a buyer's contexts through the voyage page's own forms: each
+queue learns of the other organization's command by its 30-second interval (the page's clock
+moved past it, the read confirmed in the network log, never Refresh), each item opens its exact
+record focused below the sticky header without sending a write, a kept link to a replaced file
+version opens it as history (and **Show it** reopens every fold around it), and viewers, a
+surveyor on the voyage and an outside organization get no command or no action.
 
 What that suite does not establish: anything over HTTPS (the run is plain HTTP on `127.0.0.1`,
 so the `Secure` attribute and the `__Host-` cookie name production uses are never exercised),
 other browsers (Firefox and WebKit, whose `EventSource` and cookie handling may differ), layout
-(the responsive trade string included), the browser's own `datetime-local` and file pickers,
+beyond the Action Center's checks (focus in the viewport and clear of the header, no horizontal
+scrolling at 390 px; the responsive trade string is not checked), real window focus and
+visibility changes, the browser's own `datetime-local` and file pickers,
 downloads, or anything beyond notices that the stream does not carry yet.
 
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and

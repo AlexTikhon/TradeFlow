@@ -556,12 +556,13 @@ async function seed(prisma: PrismaClient, storage: DocumentStorage): Promise<voi
 
   // Voyages created through the API continue numbering after the seeded references. Never
   // lowers a counter, so re-seeding after voyages were created cannot hand out a used number.
+  // Digits are written [0-9], not \d: a tagged template's cooked text turns "\d" into "d".
   await prisma.$executeRaw`
     INSERT INTO voyage_reference_counters (year, last_number)
-    SELECT (regexp_match(reference, '^TF-(\d{4})-\d+$'))[1]::int,
-           max((regexp_match(reference, '^TF-\d{4}-(\d+)$'))[1]::int)
+    SELECT (regexp_match(reference, '^TF-([0-9]{4})-[0-9]+$'))[1]::int,
+           max((regexp_match(reference, '^TF-[0-9]{4}-([0-9]+)$'))[1]::int)
     FROM voyages
-    WHERE reference ~ '^TF-\d{4}-\d+$'
+    WHERE reference ~ '^TF-[0-9]{4}-[0-9]+$'
     GROUP BY 1
     ON CONFLICT (year)
       DO UPDATE SET last_number = GREATEST(voyage_reference_counters.last_number, EXCLUDED.last_number)`;
