@@ -1,7 +1,7 @@
 import { Breadcrumbs, Link, Skeleton, Stack, Typography } from '@mui/material';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { VoyageIdParamSchema } from '@tradeflow/contracts';
-import { Link as RouterLink, useParams } from 'react-router';
+import { Link as RouterLink, useParams, useSearchParams } from 'react-router';
 import { ApiError } from '../../../shared/api/http-client';
 import { useProtectedScope } from '../../../shared/auth/identity';
 import { NotFoundState } from '../../../shared/ui/NotFoundState';
@@ -9,13 +9,18 @@ import { PageHeader } from '../../../shared/ui/PageHeader';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import { voyageQueries } from '../api/voyage.queries';
 import { DocumentaryInstructionsCard } from '../components/DocumentaryInstructionsCard';
+import { LinkedRecordStatus } from '../components/LinkedRecordStatus';
 import { NoticesCard } from '../components/NoticesCard';
 import { ParticipantsCard } from '../components/ParticipantsCard';
 import { TimelineCard } from '../components/TimelineCard';
 import { TradeStringCard } from '../components/TradeStringCard';
 import { VoyageFacts } from '../components/VoyageFacts';
 import { VoyageStatusChip } from '../components/VoyageStatusChip';
+import { useFocusLinkedRecord } from '../hooks/use-focus-linked-record';
 import { useVoyageLiveUpdates } from '../hooks/use-voyage-live-updates';
+import { LinkedRecordContext } from '../navigation/linked-record';
+import { parseRecordLink } from '../navigation/record-link';
+import { resolveRecordLink } from '../navigation/record-resolution';
 
 const VoyageNotFound = () => (
   <NotFoundState
@@ -73,6 +78,19 @@ export function VoyageDetailsPage() {
     refetchInterval,
   });
 
+  const [searchParams] = useSearchParams();
+  const requested = parseRecordLink(voyageId, searchParams);
+  const resolution = resolveRecordLink(requested, {
+    voyage: { data: voyage, error },
+    contracts: myContracts,
+    notices,
+    instructions,
+    documents,
+  });
+  const showLinkedRecord = useFocusLinkedRecord(
+    requested.status === 'valid' && resolution.status === 'resolved' ? requested.key : null,
+  );
+
   if (!isValidId || (error instanceof ApiError && error.status === 404)) {
     return <VoyageNotFound />;
   }
@@ -109,24 +127,27 @@ export function VoyageDetailsPage() {
             adornment={<VoyageStatusChip status={voyage.status} />}
             subtitle={`${voyage.vessel.name} · ${voyage.commodity.name} · ${voyage.loadPort.name} → ${voyage.dischargePort.name}`}
           />
-          <Stack spacing={3}>
-            <VoyageFacts voyage={voyage} />
-            <TradeStringCard
-              voyage={voyage}
-              tradeString={tradeString.data}
-              error={tradeString.error}
-              onRetry={() => void tradeString.refetch()}
-            />
-            <NoticesCard voyageId={voyage.id} contracts={myContracts} notices={notices} />
-            <DocumentaryInstructionsCard
-              voyageId={voyage.id}
-              contracts={myContracts}
-              instructions={instructions}
-              documents={documents}
-            />
-            <ParticipantsCard participants={voyage.participants} />
-            <TimelineCard timeline={timeline} />
-          </Stack>
+          <LinkedRecordContext value={resolution.status === 'resolved' ? resolution.record : null}>
+            <Stack spacing={3}>
+              <LinkedRecordStatus resolution={resolution} onShow={showLinkedRecord} />
+              <VoyageFacts voyage={voyage} />
+              <TradeStringCard
+                voyage={voyage}
+                tradeString={tradeString.data}
+                error={tradeString.error}
+                onRetry={() => void tradeString.refetch()}
+              />
+              <NoticesCard voyageId={voyage.id} contracts={myContracts} notices={notices} />
+              <DocumentaryInstructionsCard
+                voyageId={voyage.id}
+                contracts={myContracts}
+                instructions={instructions}
+                documents={documents}
+              />
+              <ParticipantsCard participants={voyage.participants} />
+              <TimelineCard timeline={timeline} />
+            </Stack>
+          </LinkedRecordContext>
         </div>
       )}
     </Stack>

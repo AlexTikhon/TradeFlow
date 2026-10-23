@@ -13,6 +13,7 @@ import type { DocumentaryInstructionRevision, InstructionActor } from '@tradeflo
 import type { ReactNode } from 'react';
 import { formatInstant } from '../../../shared/lib/format';
 import { DOCUMENT_LABELS } from '../domain/documentary-instructions';
+import { linkedRecordProps, linkedRecordSx } from '../navigation/linked-record';
 
 const actor = ({ name, organization }: InstructionActor) => `${name} (${organization.name})`;
 
@@ -37,13 +38,24 @@ interface InstructionRevisionProps {
   revision: DocumentaryInstructionRevision;
   /** Whether this revision is the one in force. */
   current: boolean;
+  /** Whether the page was opened with a link to this revision. */
+  linked?: boolean;
 }
 
 /** One revision as written, with who gave it and whether the seller acknowledged it. */
-export function InstructionRevision({ revision, current }: InstructionRevisionProps) {
+export function InstructionRevision({
+  revision,
+  current,
+  linked = false,
+}: InstructionRevisionProps) {
   const { acknowledgement } = revision;
   return (
-    <Box component="section" aria-label={`Revision ${revision.number}`}>
+    <Box
+      component="section"
+      aria-label={`Revision ${revision.number}`}
+      {...(linked && linkedRecordProps)}
+      sx={[linked && linkedRecordSx]}
+    >
       <Stack
         direction="row"
         spacing={1}

@@ -33,6 +33,7 @@ import {
   isPreconditionFailure,
   useAcknowledgeRevision,
 } from '../hooks/use-documentary-instruction-commands';
+import { useDisclosure, useLinkedRecord } from '../navigation/linked-record';
 import { InstructionForm } from './InstructionForm';
 import { InstructionRevision } from './InstructionRevision';
 import { RevisionDocuments } from './RevisionDocuments';
@@ -69,6 +70,18 @@ function ContractInstructions({
   const { acknowledge, error, isPending } = useAcknowledgeRevision(voyageId);
   const buying = contract.side === 'BUYER';
   const heading = describeContract(contract);
+  // A link to an earlier revision, or to a document presented against one, opens the history.
+  const linked = useLinkedRecord();
+  const linkedRevision =
+    linked?.kind === 'INSTRUCTION_REVISION' && linked.instruction.id === instruction?.id
+      ? linked.revision.number
+      : null;
+  const [historyExpanded, setHistoryExpanded] = useDisclosure(
+    linked !== null &&
+      linked.kind !== 'NOTICE' &&
+      linked.instruction.id === instruction?.id &&
+      (linked.kind === 'INSTRUCTION_REVISION' ? !linked.current : !linked.revisionCurrent),
+  );
 
   let content: ReactNode;
   if (editing) {
@@ -118,7 +131,11 @@ function ContractInstructions({
     const { currentRevision, previousRevisions } = instruction;
     content = (
       <Stack spacing={2}>
-        <InstructionRevision revision={currentRevision} current />
+        <InstructionRevision
+          revision={currentRevision}
+          current
+          linked={linkedRevision === currentRevision.number}
+        />
 
         {error && <Alert severity="error">{describeAcknowledgeFailure(error)}</Alert>}
 
@@ -162,7 +179,14 @@ function ContractInstructions({
         />
 
         {previousRevisions.length > 0 && (
-          <Accordion disableGutters variant="outlined">
+          <Accordion
+            disableGutters
+            variant="outlined"
+            expanded={historyExpanded}
+            onChange={(_event, expanded) => {
+              setHistoryExpanded(expanded);
+            }}
+          >
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
               <Typography variant="body2">
                 Earlier revisions ({previousRevisions.length})
@@ -172,7 +196,11 @@ function ContractInstructions({
               <Stack spacing={2} divider={<Divider flexItem />}>
                 {previousRevisions.map((revision) => (
                   <Stack key={revision.number} spacing={2}>
-                    <InstructionRevision revision={revision} current={false} />
+                    <InstructionRevision
+                      revision={revision}
+                      current={false}
+                      linked={linkedRevision === revision.number}
+                    />
                     <RevisionDocuments
                       voyageId={voyageId}
                       contract={contract}

@@ -40,6 +40,12 @@ import {
   shortChecksum,
 } from '../domain/documents';
 import { useDownloadDocument } from '../hooks/use-document-commands';
+import {
+  linkedRecordProps,
+  linkedRecordSx,
+  useDisclosure,
+  useLinkedRecord,
+} from '../navigation/linked-record';
 import { DocumentReviewForm } from './DocumentReviewForm';
 import { DocumentUploadForm } from './DocumentUploadForm';
 
@@ -112,6 +118,8 @@ interface VersionLineProps {
   buyerName: string;
   downloading: boolean;
   onDownload: () => void;
+  /** Whether the page was opened with a link to this version. */
+  linked: boolean;
 }
 
 /** One version: what was uploaded, by whom and when, the decision on it, and a way to get it. */
@@ -122,13 +130,22 @@ function VersionLine({
   buyerName,
   downloading,
   onDownload,
+  linked,
 }: VersionLineProps) {
   const { uploadedBy } = version;
   return (
     <Stack
       direction={{ xs: 'column', sm: 'row' }}
       spacing={1}
-      sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}
+      {...(linked && {
+        ...linkedRecordProps,
+        role: 'group',
+        'aria-label': `Version ${version.number} of the ${label.toLowerCase()}`,
+      })}
+      sx={[
+        { alignItems: { sm: 'center' }, justifyContent: 'space-between' },
+        linked && linkedRecordSx,
+      ]}
     >
       <Box sx={{ minWidth: 0 }}>
         <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
@@ -199,6 +216,15 @@ function DocumentItem({
     download({ target, versionNumber: version.number, fileName: version.fileName });
   };
   const isDownloading = (version: DocumentVersion) => pending?.versionNumber === version.number;
+  const linked = useLinkedRecord();
+  const linkedVersion =
+    linked?.kind === 'DOCUMENT_VERSION' && linked.document.id === document?.id
+      ? linked.version.number
+      : null;
+  // A link to a replaced file opens the earlier versions; the latest is always in view.
+  const [historyExpanded, setHistoryExpanded] = useDisclosure(
+    linkedVersion !== null && linkedVersion !== document?.currentVersion.number,
+  );
 
   return (
     <Box
@@ -235,12 +261,20 @@ function DocumentItem({
             onDownload={() => {
               downloadVersion(document.currentVersion);
             }}
+            linked={linkedVersion === document.currentVersion.number}
           />
         )}
         {error && <Alert severity="error">{describeDownloadFailure(error)}</Alert>}
 
         {document && document.previousVersions.length > 0 && (
-          <Accordion disableGutters variant="outlined">
+          <Accordion
+            disableGutters
+            variant="outlined"
+            expanded={historyExpanded}
+            onChange={(_event, expanded) => {
+              setHistoryExpanded(expanded);
+            }}
+          >
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
               <Typography variant="body2">
                 Earlier versions ({document.previousVersions.length})
@@ -265,6 +299,7 @@ function DocumentItem({
                       onDownload={() => {
                         downloadVersion(version);
                       }}
+                      linked={linkedVersion === version.number}
                     />
                   </li>
                 ))}

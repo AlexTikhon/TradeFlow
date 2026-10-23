@@ -490,6 +490,9 @@ request and never stored ([ADR 0017](decisions/0017-action-center.md)):
    in memory. The response is bounded by `limit`; the loading grows with the organization's
    current work. No total.
 
+The web page that reads it, and the links into voyage pages, are described under
+[Data access](#data-access).
+
 ### Live updates: voyage event streams
 
 `GET /api/voyages/:voyageId/events` is a server-sent-event stream that tells the voyage page
@@ -608,9 +611,16 @@ src/
                     useReviewDocument, useDownloadDocument: mutations and what happens after
                     them; useVoyageLiveUpdates: the event stream, invalidation and polling
       components/   feature UI (table, filter, facts card, trade string, notices, participants,
-                    timeline)
+                    timeline, the linked record's status)
+      navigation/   record links (ADR 0017): recordLinkPath/parseRecordLink (the address),
+                    resolveRecordLink (against fetched records), the linked-record context
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
+    action-center/  (ADR 0017)
+      api/          GET /action-items + the infinite query factory (keys under the scope)
+      domain/       action labels, URL filters (parse, ignore unknown), item wording
+      components/   queue (states, pages), item card, filters
+      pages/        ActionCenterPage (/actions)
   shared/
     api/        fetch wrapper: ApiError (Problem Details), ApiContractError; JSON, one-file
                 multipart uploads and blob downloads
@@ -621,17 +631,20 @@ src/
 ```
 
 **Rule of thumb:** code lives in a feature until a second feature needs it, and only then moves to
-`shared/`. `shared/` never imports from `features/`.
+`shared/`. `shared/` never imports from `features/`. A feature may use another feature's
+`domain/` and `navigation/` modules, never its components, and only one way: the Action Center
+builds record links and names documents with the voyages feature's modules, and nothing in
+`voyages/` imports `action-center/`.
 
 ### State ([ADR 0003](decisions/0003-frontend-server-state.md))
 
-| Kind of state       | Where it lives                                       |
-| ------------------- | ---------------------------------------------------- |
-| Server data         | TanStack Query cache (`voyageQueries.*` factories)   |
-| Who is signed in    | TanStack Query too: `['session']` from `/auth/me`    |
-| Shareable UI state  | URL (`?status=LOADING`), validated with the contract |
-| Ephemeral UI state  | Component state                                      |
-| Global client state | None yet; Zustand when a real case appears           |
+| Kind of state       | Where it lives                                                                    |
+| ------------------- | --------------------------------------------------------------------------------- |
+| Server data         | TanStack Query cache (`voyageQueries.*`, `actionItemQueries.*` factories)         |
+| Who is signed in    | TanStack Query too: `['session']` from `/auth/me`                                 |
+| Shareable UI state  | URL (`?status=LOADING`, queue filters, record links), validated with the contract |
+| Ephemeral UI state  | Component state                                                                   |
+| Global client state | None yet; Zustand when a real case appears                                        |
 
 ### Data access
 
@@ -748,6 +761,28 @@ src/
   `refetchInterval` (paused while the tab is hidden; `staleTime` alone never refetches). If the
   browser gives up on a stream (the server refused it), a new one is opened after 5 s, 15 s,
   then every 60 s; one timer at most.
+- **Action Center** (`/actions`, [ADR 0017](decisions/0017-action-center.md#the-web-slice)). An
+  infinite query per set of filters under the identity scope (`actionItemQueries.list`), each
+  page validated with `ActionItemPageSchema` and sent with the query's abort signal. Filters
+  live in the URL (`?type=…&overdue=true`), parsed with the contract's enum: unknown or repeated
+  values are ignored and reported, with a way to remove them from the address. A filter change
+  is a new key, so it starts from the first page and never shows another filter's items.
+  **Load more** sends `nextCursor` unchanged; a failed page keeps the items shown. The walk is
+  not cached once unobserved (`gcTime: 0`) and is not refetched on focus: **Refresh** resets the
+  query to its first page, and coming back to the page starts there too. No count is shown.
+  Items link to their exact record; nothing on the page sends a command, and viewers read the
+  same queue. **Freshness is manual:** no stream, polling or command invalidates the queue yet.
+- **Record links** (`features/voyages/navigation/`). `/voyages/:voyageId?open=…&contract=…`
+  plus the target's identifiers. The voyage page parses them with the contract's target schemas
+  (a malformed link names nothing), then resolves them against the records it fetched once the
+  queries the kind needs have answered; every identifier must match, and no newer revision or
+  file is chosen in place of the one named. A status above the sections says what the record is
+  now (waiting, done since, superseded or replaced history, not found, malformed, or waiting for
+  a failed section's retry). The section holding it marks its container through a context
+  (`LinkedRecordContext`), collapsed history around it opens once (`useDisclosure`), and
+  `useFocusLinkedRecord` moves focus to it once per link, as soon as it is rendered, never on a
+  later refresh. Opening a link sends nothing and starts no decision; drafts and their bases are
+  untouched.
 
 ### Authentication in the browser
 
@@ -958,6 +993,18 @@ reconnect reads again, a stream the browser gave up on is reopened after growing
 stream closes on unmount and moves with the voyage, and late events from a closed stream do
 nothing after a sign-out, after the same user signs back in, and after session checks went to
 someone else and back. `session.ts`'s transition listeners are unit-tested on their own.
+The Action Center is tested through the same route tree: the protected route and its navigation
+item, all four kinds of action and the fields each shows or leaves out, filters through the URL
+(reload, back and forward, unknown and repeated values), the filters and cursor each request
+sends, a filter change that starts from the first page without showing the previous filter's
+items, loading, empty, first-page and next-page failures, Refresh from the first page, viewers,
+malformed first and later pages, and pages still on their way when another tab signs in as
+someone else. Record links are tested on the voyage page: located after delayed loading, the
+status for each state of each kind, superseded revisions, replaced files and documents of
+superseded revisions opened as history, mismatched, missing and malformed links that open
+nothing in their place, a failed section retried, focus moved once per link (and kept through a
+refresh with a draft open), history the user folds again, the path from the queue, and no
+command sent from any link. The link codec and URL filters are unit-tested.
 
 ## Operational concerns (current state)
 

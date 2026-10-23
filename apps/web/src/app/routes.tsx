@@ -1,4 +1,5 @@
 import { Navigate, type RouteObject } from 'react-router';
+import { actionCenterRoutes } from '../features/action-center/routes';
 import { RequireAuth } from '../features/auth/components/RequireAuth';
 import { authRoutes } from '../features/auth/routes';
 import { voyageRoutes } from '../features/voyages/routes';
@@ -22,6 +23,7 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, element: <Navigate to="/voyages" replace /> },
           ...voyageRoutes,
+          ...actionCenterRoutes,
           { path: '*', element: <NotFoundPage /> },
         ],
       },

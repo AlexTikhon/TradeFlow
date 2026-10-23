@@ -30,6 +30,7 @@ import {
   noticeState,
 } from '../domain/notices';
 import { useAcknowledgeNotice } from '../hooks/use-notice-commands';
+import { linkedRecordProps, linkedRecordSx, useLinkedRecord } from '../navigation/linked-record';
 import { IssueNoticeForm } from './IssueNoticeForm';
 
 const STATES: Record<
@@ -70,12 +71,18 @@ function NoticeItem({ voyageId, notice }: { voyageId: string; notice: Notice }) 
   const state = STATES[noticeState(notice)];
   const waitingForUs = notice.status === 'ISSUED' && notice.contract.side === 'BUYER';
   const heading = `ETA notice, contract ${notice.contract.position}`;
+  const linked = useLinkedRecord();
+  const isLinked = linked?.kind === 'NOTICE' && linked.notice.id === notice.id;
 
   return (
     <Box
       component="li"
       aria-label={heading}
-      sx={{ p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}
+      {...(isLinked && linkedRecordProps)}
+      sx={[
+        { p: 2, border: 1, borderColor: 'divider', borderRadius: 1 },
+        isLinked && linkedRecordSx,
+      ]}
     >
       <Stack
         direction="row"

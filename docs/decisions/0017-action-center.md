@@ -2,8 +2,10 @@
 
 - **Status:** Proposed. The projection rules (`apps/api/src/modules/action-center/`), the wire
   contract (`packages/contracts/src/action-items.ts`) and `GET /api/action-items` are implemented;
-  the rules are unit-tested and the endpoint is tested over HTTP against PostgreSQL. No web page
-  yet.
+  the rules are unit-tested and the endpoint is tested over HTTP against PostgreSQL. The web
+  page (`/actions`, `apps/web/src/features/action-center/`) and exact-record links into the
+  voyage page (`apps/web/src/features/voyages/navigation/`) are implemented and tested through
+  the real route tree ([the web slice](#the-web-slice)). The queue does not refresh itself yet.
 - **Date:** 2026-10-22
 
 ## Context
@@ -200,8 +202,11 @@ not restate it.
 - Page cost grows with the organization's open work. The move to SQL ordering is prepared (same
   position, ASCII keys) but not built.
 - A queue left open does not update itself: SSE streams are per voyage
-  ([ADR 0015](0015-voyage-event-streams.md)) and this slice adds none. `overdue` is true as of
-  `generatedAt`.
+  ([ADR 0015](0015-voyage-event-streams.md)) and neither slice adds one. `overdue` is true as of
+  `generatedAt`. The page says when it was loaded and that it does not update on its own; it is
+  read again on **Refresh**, and from its first page whenever the user comes back to it. An
+  action answered on a voyage's page stays in a queue already on screen until then (no
+  command invalidates it).
 
 ### The endpoint slice
 
@@ -223,3 +228,73 @@ not restate it.
 
 Not tested: participation removed under a contract. The composite foreign keys refuse to delete
 a participant a contract names, so that state cannot exist; the predicate states it anyway.
+
+### The web slice
+
+**`/actions`** is a protected page in the main navigation (the default landing page stays
+`/voyages`). It is a reader of the endpoint, nothing more:
+
+- **Server state only.** One infinite query per set of filters
+  (`actionItemQueries.list(scope, filters)`, under the identity's protected scope), fetched with
+  the shared client, validated with `ActionItemPageSchema`, and each page request carries the
+  query's abort signal. An identity change cancels a page on its way, first or next, and its
+  late answer reaches nobody; a 401 signs out as for any protected query.
+- **Filters in the URL** (`?type=…&overdue=true`), so reload, back and forward and shared links
+  work. Each change is a history entry; a value the page does not know (or a parameter given
+  twice) is ignored, never guessed at, and the page says so and offers to remove it from the
+  address. A filter has a key of its own, so another filter's items are never shown while its
+  first page loads, and its walk starts from the first page.
+- **Pages are positions, not a snapshot**, so a walk is not kept once nothing shows it
+  (`gcTime: 0`): coming back to the queue starts again from its first page. **Load more** sends
+  the last `nextCursor` unchanged with the same filters; a failed page keeps the items shown and
+  offers its own retry. **Refresh** drops every page loaded and reads the first one again. The
+  page shows no count, since the API serves no total and the items loaded are not the queue. It
+  does not refetch on window focus.
+- **Each item** names the action, the voyage, the counterparty and the contract's position, the
+  exact revision or file version (never for a notice), the deadline and overdue only for
+  notices, the rejection reason only for a replacement, and its source instants. It sends no
+  command: it links to the record. Viewers see the same queue and links, with a line saying an
+  operator acts.
+
+**Record links** (`features/voyages/navigation/`) open one exact record on the voyage's page:
+`/voyages/:voyageId?open=notice|instruction-revision|document-version&contract=…` with the
+identifiers of the item's `target` (`notice`; `instruction` and `revision`; `revision`,
+`documentType`, `document` and `version`). The voyages feature owns them (`recordLinkPath`,
+`parseRecordLink`, `resolveRecordLink`); the Action Center only builds links, and nothing in
+the voyages feature depends on it.
+
+- **The address is untrusted.** It is parsed back into a target with the contract's own target
+  schemas (UUIDs, positive numbers without leading zeros, a known document type), with the
+  voyage taken from the path; a repeated parameter makes a link malformed. A malformed link names
+  nothing.
+- **Resolved against what the page fetched**, once the queries the kind needs have answered
+  (the voyage, the organization's contracts, and the notices, or the instructions, or the
+  instructions and documents). Every identifier must match the record found: the contract must
+  be one of the organization's on this voyage, the notice or instruction must be under it, and a
+  document must match its id, contract, revision and type. Nothing else stands in for a record
+  that does not match: a newer revision or file is never chosen instead.
+- **What the record is now** is said in a status above the voyage's sections, from the
+  organization's side of the contract: still waiting (for it, or for the counterparty),
+  acknowledged or decided since (nothing waiting), a superseded revision or a replaced file
+  (shown as history, read-only, nothing waiting on it; for a replaced file, that a decision or a
+  replacement applies only to the latest one), not found, malformed, or not yet shown because a
+  section it needs failed (the section offers the retry).
+- **Showing it**: the section holding the record marks its container (the notice, the revision,
+  the exact file version), and collapsed history around it opens once (earlier revisions,
+  earlier versions); the user can fold it again and a refresh does not reopen it. Focus moves to
+  the container once per link, as soon as it is on the page, and never again for the same link,
+  so background refreshes leave the user where they are; **Show it** moves it there on request.
+  A different link on the same page is a new request. Drafts, chosen files and conflict notices
+  are untouched: navigation only reads, and the forms keep their own basis.
+- **No command is sent and no decision is started** by opening a link. The usual forms stay
+  where they were, under their usual permissions, with nothing chosen.
+
+Tested through the real route tree, providers and MSW (`ActionCenterPage.test.tsx`,
+`VoyageRecordLinks.test.tsx`, and unit tests of the link codec and URL filters): routing and the
+navigation item, all four kinds and their conditional fields, filters through the URL and back
+and forward, cursors and the reset on a filter change, loading, empty, first-page and next-page
+failures, Refresh, viewers, malformed responses (first and later pages), late pages after an
+identity change, links resolved after delayed loading, superseded revisions, replaced files and
+documents of superseded revisions shown as history, stale, mismatched and malformed links that
+open nothing, a failed section retried, focus moved once (and kept through a refresh with a
+draft open), and no command sent from any link.
