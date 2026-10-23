@@ -94,7 +94,8 @@ src/
                                 configure: the one-time setup of a new voyage (ADR 0016)
       trade-string.controller.ts  GET and POST /voyages/:voyageId/trade-string
       counterparty-contracts.ts   CounterpartyContracts: a contract as its seller or buyer sees
-                                  it; exported, the only way other modules resolve a contract
+                                  it; exported, the only way other modules resolve a contract;
+                                  listAcrossVoyages: every contract in scope (Action Center)
       counterparty-contracts.controller.ts  GET /voyages/:voyageId/my-contracts
       voyage-timeline.service.ts  the reader's scope (participation, contracts) and the page,
                                   from one REPEATABLE READ snapshot
@@ -110,6 +111,7 @@ src/
       notices.service.ts        list, get, issue, acknowledge; role and side checked here;
                                 announces each command after it committed
       notices.controller.ts     /voyages/:voyageId/notices[/:noticeId[/acknowledgement]]
+      issued-notices.ts         IssuedNotices: ISSUED notices under given contracts; exported
     documentary-instructions/
       instruction-rules.ts      MVP content rules: what counts as an unchanged revision (pure)
       instruction.read-model.ts allowlisted select (all revisions, acknowledgements) + mapping
@@ -118,6 +120,8 @@ src/
       documentary-instructions.controller.ts  preconditions (If-Match / If-None-Match), ETag
       instruction-revisions.ts  InstructionRevisions: the current revision and what a revision
                                 requires; exported, share-locks the instruction for a commit
+      current-revisions.ts      CurrentRevisions: each instruction's current revision and its
+                                acknowledgement, under given contracts; exported
     documents/
       document-rules.ts         PDF signature, display file names, UploadInspection (size, hash)
       document.read-model.ts    allowlisted select (every version and its review, never the
@@ -127,9 +131,15 @@ src/
       documents.service.ts      list, upload (check, receive, keep, commit, compensate), review,
                                 download
       documents.controller.ts   multipart upload, review, preconditions, ETag, attachment download
-    action-center/              (ADR 0017; rules only, no endpoint or Nest module yet)
+      latest-document-versions.ts  LatestDocumentVersions: latest file and review of each
+                                document of given revisions; exported
+    action-center/              (ADR 0017; owns no table)
       action-items.ts           which records ask what of an organization, keys, page order (pure)
       action-item-pages.ts      filters, keyset pages, opaque cursors (pure)
+      contract-facts.ts         the owning modules' reader outputs → the rules' facts
+      action-center.service.ts  scope and facts from one REPEATABLE READ snapshot, one clock
+                                reading, the page cut in memory
+      action-center.controller.ts  GET /action-items
   common/http/preconditions.ts  If-Match / If-None-Match parsing, 428 (no comparison: the DB does it)
 ```
 
@@ -463,6 +473,22 @@ first, a page at a time:
    who acted, for which organization, when, and identifiers. Instruction contents, file names,
    checksums and rejection reasons stay in the panels that own them. The cursor is the last
    served `(occurredAt, id)`, base64url; a hand-made one moves only within the bearer's scope.
+
+### The Action Center: what each organization owes
+
+`GET /api/action-items` serves the organization's open actions across voyages, derived on every
+request and never stored ([ADR 0017](decisions/0017-action-center.md)):
+
+1. Guards, then the query (`type`, `overdue=true`, `limit` 1–50, default 20; `cursor` only as the
+   API issued it, else 400 before anything is read). The organization comes from the session
+   alone; viewers and operators read the same queue.
+2. In one `REPEATABLE READ` transaction: the contracts in scope on every voyage
+   (`CounterpartyContracts.listAcrossVoyages`), then one statement per kind of fact, each from
+   the module that owns it (`IssuedNotices`, `CurrentRevisions`, `LatestDocumentVersions`), with
+   history excluded in SQL. The clock is read once, after the reads.
+3. `contract-facts.ts` adapts the readers' outputs; the pure rules project them and cut the page
+   in memory. The response is bounded by `limit`; the loading grows with the organization's
+   current work. No total.
 
 ### Live updates: voyage event streams
 

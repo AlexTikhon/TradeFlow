@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from './config/app-config.js';
 import { HealthModule } from './health/health.module.js';
 import { PrismaModule } from './infrastructure/prisma/prisma.module.js';
+import { ActionCenterModule } from './modules/action-center/action-center.module.js';
 import { AuditModule } from './modules/audit/audit.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
 import { DocumentaryInstructionsModule } from './modules/documentary-instructions/documentary-instructions.module.js';
@@ -24,6 +25,7 @@ import { VoyagesModule } from './modules/voyages/voyages.module.js';
     NoticesModule,
     DocumentaryInstructionsModule,
     DocumentsModule,
+    ActionCenterModule,
   ],
 })
 export class AppModule {}

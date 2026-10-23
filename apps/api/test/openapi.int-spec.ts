@@ -59,6 +59,7 @@ describe('OpenAPI document', () => {
         '/api/commodities',
         '/api/ports',
         '/api/organizations',
+        '/api/action-items',
       ]),
     );
 
@@ -118,6 +119,7 @@ describe('OpenAPI document', () => {
       operation('/api/ports', 'get'),
       operation('/api/voyages/{voyageId}/trade-string', 'post'),
       operation('/api/organizations', 'get'),
+      operation('/api/action-items', 'get'),
     ];
     for (const op of protectedOperations) {
       expect(op?.security).toEqual([{ session: [] }]);
@@ -522,6 +524,94 @@ describe('OpenAPI document', () => {
       'reason',
       'reviewedAt',
       'reviewedBy',
+    ]);
+  });
+
+  it('documents the Action Center: its query, a page without a total, and each item’s fields', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Parameter = {
+      name: string;
+      in: string;
+      required?: boolean;
+      schema?: Record<string, unknown>;
+    };
+    type Operation = {
+      parameters?: Parameter[];
+      responses: Record<string, { content?: Record<string, unknown> }>;
+    };
+    type Schema = {
+      properties?: Record<string, Record<string, unknown>>;
+      required?: string[];
+      oneOf?: Schema[];
+      enum?: string[];
+    };
+    const document = response.body as {
+      paths: Record<string, Record<string, Operation>>;
+      components: { schemas: Record<string, Schema> };
+    };
+
+    const list = document.paths['/api/action-items']?.get;
+    expect(Object.keys(document.paths['/api/action-items'] ?? {})).toEqual(['get']);
+    expect(Object.keys(list?.responses ?? {}).sort()).toEqual(['200', '400', '401']);
+    expect(list?.responses['200']?.content?.['application/json']).toEqual({
+      schema: { $ref: '#/components/schemas/ActionItemPage' },
+    });
+    // Filters, limit and cursor only: the organization comes from the session.
+    const parameters = Object.fromEntries(
+      (list?.parameters ?? []).map(({ name, in: where, required, schema }) => [
+        name,
+        { where, required, schema },
+      ]),
+    );
+    expect(Object.keys(parameters).sort()).toEqual(['cursor', 'limit', 'overdue', 'type']);
+    for (const parameter of Object.values(parameters)) {
+      expect(parameter).toMatchObject({ where: 'query', required: false });
+    }
+    expect(parameters.type?.schema?.enum).toEqual([
+      'ACKNOWLEDGE_NOTICE',
+      'ACKNOWLEDGE_INSTRUCTIONS',
+      'REVIEW_DOCUMENT',
+      'REPLACE_REJECTED_DOCUMENT',
+    ]);
+    expect(parameters.overdue?.schema?.enum).toEqual(['true']);
+    expect(parameters.limit?.schema).toMatchObject({ minimum: 1, maximum: 50, default: 20 });
+    expect(parameters.cursor?.schema).toMatchObject({ maxLength: 300 });
+
+    const { schemas } = document.components;
+    expect(Object.keys(schemas.ActionItemPage?.properties ?? {}).sort()).toEqual([
+      'generatedAt',
+      'items',
+      'nextCursor',
+    ]);
+    expect(schemas.ActionItemPage?.properties?.items?.maxItems).toBe(50);
+    expect(schemas.ActionItemType?.enum).toHaveLength(4);
+    const common = ['contract', 'counterparty', 'key', 'target', 'type', 'voyage'];
+    expect(
+      (schemas.ActionItem?.oneOf ?? []).map((variant) =>
+        Object.keys(variant.properties ?? {}).sort(),
+      ),
+    ).toEqual([
+      [...common, 'acknowledgementDueAt', 'issuedAt', 'overdue'].sort(),
+      [...common, 'revisionCreatedAt'].sort(),
+      [...common, 'uploadedAt'].sort(),
+      [...common, 'rejectedAt', 'rejectionReason', 'uploadedAt'].sort(),
+    ]);
+    expect(Object.keys(schemas.ActionItemVoyage?.properties ?? {}).sort()).toEqual([
+      'id',
+      'reference',
+    ]);
+    expect(Object.keys(schemas.ActionItemContract?.properties ?? {}).sort()).toEqual([
+      'id',
+      'position',
+    ]);
+    expect(Object.keys(schemas.DocumentVersionTarget?.properties ?? {}).sort()).toEqual([
+      'contractId',
+      'documentId',
+      'documentType',
+      'kind',
+      'revisionNumber',
+      'versionNumber',
+      'voyageId',
     ]);
   });
 });

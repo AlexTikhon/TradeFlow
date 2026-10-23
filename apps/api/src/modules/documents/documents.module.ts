@@ -6,6 +6,7 @@ import { DocumentaryInstructionsModule } from '../documentary-instructions/docum
 import { VoyagesModule } from '../voyages/voyages.module.js';
 import { DocumentsController } from './documents.controller.js';
 import { DocumentsService } from './documents.service.js';
+import { LatestDocumentVersions } from './latest-document-versions.js';
 
 /**
  * Owns `documents` and `document_versions`, and the bytes in document storage. Resolves sale
@@ -23,6 +24,8 @@ import { DocumentsService } from './documents.service.js';
     DocumentStorageModule,
   ],
   controllers: [DocumentsController],
-  providers: [DocumentsService],
+  providers: [DocumentsService, LatestDocumentVersions],
+  // The Action Center learns which files wait for a decision, or were rejected, only here.
+  exports: [LatestDocumentVersions],
 })
 export class DocumentsModule {}

@@ -1,8 +1,9 @@
 # 0017. Action Center: a read-only projection of what each organization owes, across voyages
 
-- **Status:** Proposed. The projection rules (`apps/api/src/modules/action-center/`) and the wire
-  contract (`packages/contracts/src/action-items.ts`) are implemented and unit-tested; the
-  endpoint is the next slice.
+- **Status:** Proposed. The projection rules (`apps/api/src/modules/action-center/`), the wire
+  contract (`packages/contracts/src/action-items.ts`) and `GET /api/action-items` are implemented;
+  the rules are unit-tested and the endpoint is tested over HTTP against PostgreSQL. No web page
+  yet.
 - **Date:** 2026-10-22
 
 ## Context
@@ -35,7 +36,7 @@ The forces:
 
 ### A projection, not a store
 
-**`GET /api/action-items` will return the signed-in organization's open actions, computed on every
+**`GET /api/action-items` returns the signed-in organization's open actions, computed on every
 request from the records as they are.** Nothing is written: no table, no status, no
 assignment, no completion. An action disappears when the command that answers it commits; the
 command, not the Action Center, decides who may run it.
@@ -125,8 +126,10 @@ is ASCII, so code-unit order (in TypeScript) and `COLLATE "C"` (in SQL) agree.
   just a position in the same order.
 - **Strategy for the first endpoint:** load the organization's candidate facts in scope (issued
   notices, current revisions, latest files of current-revision documents; never history), project
-  them, and cut the page in memory (`actionItemPage`). The cost of a page is the organization's
-  open work, not its history. When that is too much, the same order moves into SQL (a
+  them, and cut the page in memory (`actionItemPage`). The response is bounded by `limit`; the
+  loading is not: every page reads all of the organization's candidates, so its cost scales with
+  the organization's current work across its contracts, never with its history. No total is
+  counted. When that is too much, the same order moves into SQL (a
   `UNION ALL` of the four kinds with the same position columns and `key COLLATE "C"`), behind the
   same contract and the same unit-tested rules.
 
@@ -136,23 +139,36 @@ is ASCII, so code-unit order (in TypeScript) and `COLLATE "C"` (in SQL) agree.
   `REPEATABLE READ` transaction, as for the timeline and documents, and the API's clock is read
   once: it decides `overdue` and is returned as `generatedAt`.
 - **No snapshot across requests.** Each page is projected again from the records as they are when
-  it is requested. Between pages: an action answered meanwhile is not served on a later page; an
-  action that appears meanwhile is served if it sorts after the cursor (a new revision, upload or
-  rejection does, its time being the latest, unless it ties the cursor's time and key) and missed if it sorts before (a new notice with an
-  earlier deadline) until the client starts again from the first page; a notice that becomes
-  overdue keeps its place, since its deadline does not move. Because positions never change, one
-  walk through the pages serves no action twice. Clients that need the current state read the
-  first page again; nothing promises more.
+  it is requested. Between pages: an action answered meanwhile is not served on a later page. An
+  action that appears meanwhile is served if its complete position `(dated, at, key)` sorts after
+  the cursor, and missed if it sorts before, until the client starts again from the first page.
+  Its time is a fact of the record (the deadline the seller chose; when a revision was given, a
+  file uploaded or rejected, by the API's clock before its transaction committed), not the order
+  of commits: a new notice with an earlier deadline sorts before the cursor, and so can a new
+  revision, upload or rejection whose time does not exceed the cursor's, a tie falling to the key.
+  A notice that becomes overdue keeps its place, since its deadline does not move. Because
+  positions never change, one walk through the pages serves no action twice. Clients that need
+  the current state read the first page again; nothing promises more.
 
 ### Module boundaries for the endpoint
 
 A new `action-center` module owns no table. It reads only through providers that the owning
-modules export, each taking the caller's transaction: the voyages module's contracts in scope
-across voyages (with `voyage.reference`), and the notices, documentary-instructions and documents
-modules' candidate facts under given contract ids. None of these exists yet except
-`CounterpartyContracts` (per voyage) and `InstructionRevisions` (per revision). Importing
-`isOverdue` from the notices module is the first cross-module use of a rules file; it is a pure
-function and the point is to share the rule, not restate it.
+modules export, each taking the caller's transaction and returning a type of its own module,
+which `contract-facts.ts` adapts to the rules' facts; none of those modules depends on the
+Action Center:
+
+- voyages: `CounterpartyContracts.listAcrossVoyages(principal, tx)`, the contracts in scope on
+  every voyage, with `voyage.reference` and both counterparties, under `counterpartyContracts`;
+- notices: `IssuedNotices.listUnderContracts`, `ISSUED` notices only (id, contract, two instants);
+- documentary-instructions: `CurrentRevisions.listUnderContracts`, each instruction's current
+  revision joined to its acknowledgement, if any;
+- documents: `LatestDocumentVersions.listForRevisions`, documents of the revisions the previous
+  read found current, each joined to its latest file and that file's review.
+
+One query each (a single SQL statement for the three fact readers), whatever the number of
+voyages, contracts, revisions or documents; history is excluded in SQL, not discarded afterwards. Importing `isOverdue` from the notices module is the
+first cross-module use of a rules file; it is a pure function and the point is to share the rule,
+not restate it.
 
 ## Alternatives considered
 
@@ -178,24 +194,32 @@ function and the point is to share the rule, not restate it.
 
 - No migration and no write path: the queue is right as of each read, and is gone where the
   records say so.
-- The endpoint must read four modules' facts in one snapshot; each owning module grows a narrow
-  exported reader. The scope across voyages is a new query, and must be tested like
-  `CounterpartyContracts` (service providers, other traders, removed participation, spoofed ids).
+- The endpoint reads four modules' facts in one snapshot; each owning module grew a narrow
+  exported reader. The scope across voyages is a new query, tested like `CounterpartyContracts`
+  (service providers, other traders, spoofed ids, another organization's cursor).
 - Page cost grows with the organization's open work. The move to SQL ordering is prepared (same
   position, ASCII keys) but not built.
 - A queue left open does not update itself: SSE streams are per voyage
   ([ADR 0015](0015-voyage-event-streams.md)) and this slice adds none. `overdue` is true as of
   `generatedAt`.
 
-### What remains for the endpoint slice
+### The endpoint slice
 
-1. Exported readers: contracts in scope across voyages (voyages module), issued notices
-   (notices), current revisions with their acknowledgement (documentary-instructions), latest
-   files and reviews of current-revision documents (documents).
-2. The `action-center` module, its service (one `REPEATABLE READ` transaction, one clock reading,
-   `decodeActionItemCursor` → 400, `actionItemPage`) and controller for `GET /api/action-items`
-   with `ActionItemsQuerySchema`, `@ApiSessionAuth()` and `ActionItemPage`.
-3. Integration tests against PostgreSQL: both sides and both roles, service providers and other
-   traders (nothing), removed participation, superseded revisions and replaced files written
-   through the API, deadline boundaries, filters, cursor walks with changes between pages,
-   malformed cursors, and the exact field set of each item; the OpenAPI path list.
+1. The four exported readers above.
+2. `ActionCenterModule`: `ActionCenterService` (cursor decoded first, a 400 before anything is
+   read; one `REPEATABLE READ` transaction for the scope and every fact; the injectable
+   `ACTION_CENTER_CLOCK` read once, after the reads, for `overdue` and `generatedAt`;
+   `actionItemPage`) and `ActionCenterController` for `GET /api/action-items` with
+   `ActionItemsQuerySchema`, `@ApiSessionAuth()` and `ActionItemPage`. No role check: viewers
+   and operators read the same queue.
+3. `apps/api/test/action-items.int-spec.ts`, over HTTP against PostgreSQL with every constraint
+   in place, with the workflow written through the commands' own endpoints: both sides of all
+   four types, a trader on both sides, viewers and operators, service providers and outsiders
+   (empty pages), another contract on the same voyage, supplied organization ids and another
+   organization's cursor, the exact field set, every transition (acknowledgements, rejection,
+   replacement, approval, a new revision), deadline boundaries on a controlled clock, filters,
+   limits, equal deadlines, changes between pages, malformed queries, and a page held between
+   two of its reads (by a table lock) while a command commits, which it does not see.
+
+Not tested: participation removed under a contract. The composite foreign keys refuse to delete
+a participant a contract names, so that state cannot exist; the predicate states it anyway.

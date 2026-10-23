@@ -5,6 +5,10 @@ import { AppModule } from '../../src/app.module.js';
 import { configureApp } from '../../src/app.setup.js';
 import { PrismaService } from '../../src/infrastructure/prisma/prisma.service.js';
 import { DocumentStorage } from '../../src/infrastructure/storage/document-storage.js';
+import {
+  ACTION_CENTER_CLOCK,
+  type Clock,
+} from '../../src/modules/action-center/action-center.service.js';
 import { VoyageEventBus } from '../../src/modules/voyages/voyage-event-bus.js';
 import {
   VOYAGE_EVENT_STREAM_OPTIONS,
@@ -25,6 +29,8 @@ export interface TestAppOptions {
   eventBus?: VoyageEventBus;
   /** Event stream options instead of the defaults. Read when the first stream opens. */
   eventStreams?: VoyageEventStreamOptions;
+  /** The Action Center's clock instead of the real one (one a test can set, say). */
+  actionCenterClock?: Clock;
 }
 
 /** Boots the real application module and HTTP pipeline against the test database. */
@@ -32,6 +38,7 @@ export async function createTestApp({
   storage,
   eventBus,
   eventStreams,
+  actionCenterClock,
 }: TestAppOptions = {}): Promise<TestApp> {
   const builder = Test.createTestingModule({ imports: [AppModule] });
   if (storage) {
@@ -42,6 +49,9 @@ export async function createTestApp({
   }
   if (eventStreams) {
     builder.overrideProvider(VOYAGE_EVENT_STREAM_OPTIONS).useValue(eventStreams);
+  }
+  if (actionCenterClock) {
+    builder.overrideProvider(ACTION_CENTER_CLOCK).useValue(actionCenterClock);
   }
   const moduleRef = await builder.compile();
   const app = configureApp(moduleRef.createNestApplication({ logger: false }));
