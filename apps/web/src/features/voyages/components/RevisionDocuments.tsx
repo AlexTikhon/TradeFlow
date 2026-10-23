@@ -280,7 +280,7 @@ function DocumentItem({
                 Earlier versions ({document.previousVersions.length})
               </Typography>
             </AccordionSummary>
-            <AccordionDetails>
+            <AccordionDetails data-collapsed={!historyExpanded || undefined}>
               <Stack
                 component="ul"
                 role="list"

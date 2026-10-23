@@ -11,6 +11,7 @@ import {
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cachedActionQueue } from '../../../test/action-queue';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import { anInstruction, aRevision } from '../../../test/fixtures/documentary-instructions';
 import {
@@ -426,8 +427,9 @@ describe('Documents on the voyage page', () => {
         state.documents = [uploaded];
         return HttpResponse.json(uploaded, { status: 201 });
       });
-      const { user } = renderRoute(page);
+      const { user, queryClient } = renderRoute(page);
       const item = await billOfLading();
+      const queue = cachedActionQueue(queryClient, ana);
       const bytes = pdfBytes(4096);
 
       await chooseFile(user, item, aPdf('bl-signed.pdf', bytes));
@@ -449,6 +451,9 @@ describe('Documents on the voyage page', () => {
       ]);
       expect(item.getByText('Version 1: bl-signed.pdf (47.1 KB)')).toBeVisible();
       expect(item.getByText('No file chosen')).toBeVisible();
+      // Ana's Action Center queue is marked stale; nothing shows it, so nothing reads it.
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('replaces the current version, naming the one it replaces (If-Match)', async () => {
@@ -860,6 +865,7 @@ describe('Documents on the voyage page', () => {
       await signIn(rendered, ana);
       const item = await billOfLading();
       expect(item.getByText('Not uploaded yet')).toBeVisible();
+      const queue = cachedActionQueue(queryClient, ana);
       const documentRequests = state.documentRequests;
       const instructionRequests = state.instructionRequests;
       upload.release();
@@ -872,6 +878,8 @@ describe('Documents on the voyage page', () => {
       const [documents] = anasDocuments(queryClient);
       expect(documents?.state.data).toEqual({ items: [] });
       expect(documents?.state.isInvalidated).toBe(false);
+      expect(queue.invalidated()).toBe(false);
+      expect(queue.requests()).toBe(0);
     });
 
     it('lets a 409 sent before another tab went to Claire and back to Ana refresh nothing', async () => {

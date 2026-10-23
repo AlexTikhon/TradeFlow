@@ -192,7 +192,7 @@ function ContractInstructions({
                 Earlier revisions ({previousRevisions.length})
               </Typography>
             </AccordionSummary>
-            <AccordionDetails>
+            <AccordionDetails data-collapsed={!historyExpanded || undefined}>
               <Stack spacing={2} divider={<Divider flexItem />}>
                 {previousRevisions.map((revision) => (
                   <Stack key={revision.number} spacing={2}>

@@ -16,9 +16,9 @@ import { TimelineCard } from '../components/TimelineCard';
 import { TradeStringCard } from '../components/TradeStringCard';
 import { VoyageFacts } from '../components/VoyageFacts';
 import { VoyageStatusChip } from '../components/VoyageStatusChip';
-import { useFocusLinkedRecord } from '../hooks/use-focus-linked-record';
+import { useRevealLinkedRecord } from '../hooks/use-reveal-linked-record';
 import { useVoyageLiveUpdates } from '../hooks/use-voyage-live-updates';
-import { LinkedRecordContext } from '../navigation/linked-record';
+import { LinkedRecordContext, RevealRequestContext } from '../navigation/linked-record';
 import { parseRecordLink } from '../navigation/record-link';
 import { resolveRecordLink } from '../navigation/record-resolution';
 
@@ -87,7 +87,7 @@ export function VoyageDetailsPage() {
     instructions,
     documents,
   });
-  const showLinkedRecord = useFocusLinkedRecord(
+  const reveal = useRevealLinkedRecord(
     requested.status === 'valid' && resolution.status === 'resolved' ? requested.key : null,
   );
 
@@ -128,25 +128,27 @@ export function VoyageDetailsPage() {
             subtitle={`${voyage.vessel.name} · ${voyage.commodity.name} · ${voyage.loadPort.name} → ${voyage.dischargePort.name}`}
           />
           <LinkedRecordContext value={resolution.status === 'resolved' ? resolution.record : null}>
-            <Stack spacing={3}>
-              <LinkedRecordStatus resolution={resolution} onShow={showLinkedRecord} />
-              <VoyageFacts voyage={voyage} />
-              <TradeStringCard
-                voyage={voyage}
-                tradeString={tradeString.data}
-                error={tradeString.error}
-                onRetry={() => void tradeString.refetch()}
-              />
-              <NoticesCard voyageId={voyage.id} contracts={myContracts} notices={notices} />
-              <DocumentaryInstructionsCard
-                voyageId={voyage.id}
-                contracts={myContracts}
-                instructions={instructions}
-                documents={documents}
-              />
-              <ParticipantsCard participants={voyage.participants} />
-              <TimelineCard timeline={timeline} />
-            </Stack>
+            <RevealRequestContext value={reveal.request}>
+              <Stack spacing={3}>
+                <LinkedRecordStatus resolution={resolution} onShow={reveal.show} />
+                <VoyageFacts voyage={voyage} />
+                <TradeStringCard
+                  voyage={voyage}
+                  tradeString={tradeString.data}
+                  error={tradeString.error}
+                  onRetry={() => void tradeString.refetch()}
+                />
+                <NoticesCard voyageId={voyage.id} contracts={myContracts} notices={notices} />
+                <DocumentaryInstructionsCard
+                  voyageId={voyage.id}
+                  contracts={myContracts}
+                  instructions={instructions}
+                  documents={documents}
+                />
+                <ParticipantsCard participants={voyage.participants} />
+                <TimelineCard timeline={timeline} />
+              </Stack>
+            </RevealRequestContext>
           </LinkedRecordContext>
         </div>
       )}

@@ -8,6 +8,7 @@ import {
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
+import { cachedActionQueue } from '../../../test/action-queue';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import { anInstruction } from '../../../test/fixtures/documentary-instructions';
 import { aDocument, davidReviews, replacedBy, reviewedAs } from '../../../test/fixtures/documents';
@@ -244,8 +245,9 @@ describe('Reviewing documents on the voyage page', () => {
         state.documents = [decided];
         return HttpResponse.json(decided);
       });
-      const { user } = renderRoute(page, { signedInAs: claire });
+      const { user, queryClient } = renderRoute(page, { signedInAs: claire });
       const item = await billOfLading();
+      const queue = cachedActionQueue(queryClient, claire);
       expect(item.getByText('Pending review')).toBeVisible();
       expect(item.getByText('Pending review by Lacustra Commodities SA')).toBeVisible();
 
@@ -261,6 +263,9 @@ describe('Reviewing documents on the voyage page', () => {
       expect(item.getByText('Approved')).toBeVisible();
       expect(item.getByText(/^Approved by Claire Morel \(Lacustra Commodities SA\)/)).toBeVisible();
       expect(item.queryByRole('radio', { name: 'Approve' })).not.toBeInTheDocument();
+      // Claire's Action Center queue is marked stale; nothing shows it, so nothing reads it.
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('asks why before it sends a rejection, then sends the reason', async () => {
@@ -582,6 +587,7 @@ describe('Reviewing documents on the voyage page', () => {
       await signIn(rendered, claire);
       const item = await billOfLading();
       expect(item.getByText('Pending review')).toBeVisible();
+      const queue = cachedActionQueue(queryClient, claire);
       const documentRequests = state.documentRequests;
       const instructionRequests = state.instructionRequests;
       review.release();
@@ -594,6 +600,8 @@ describe('Reviewing documents on the voyage page', () => {
       const [documents] = clairesDocuments(queryClient);
       expect(documents?.state.data).toEqual({ items: [forBuyer(aDocument())] });
       expect(documents?.state.isInvalidated).toBe(false);
+      expect(queue.invalidated()).toBe(false);
+      expect(queue.requests()).toBe(0);
     });
 
     it.each<[string, () => Response]>([
@@ -618,6 +626,7 @@ describe('Reviewing documents on the voyage page', () => {
         expect(await screen.findByText('Claire Morel')).toBeInTheDocument();
         const item = await billOfLading();
         expect(await item.findByText('Pending review')).toBeVisible();
+        const queue = cachedActionQueue(queryClient, claire);
         const documentRequests = state.documentRequests;
         const instructionRequests = state.instructionRequests;
         review.release();
@@ -627,9 +636,11 @@ describe('Reviewing documents on the voyage page', () => {
         expect(item.queryByRole('region', { name: 'Changes to Bill of lading' })).toBeNull();
         expect(state.documentRequests).toBe(documentRequests);
         expect(state.instructionRequests).toBe(instructionRequests);
+        // Claire's Action Center queue among them.
         for (const query of protectedQueries(queryClient)) {
           expect(query.state.isInvalidated).toBe(false);
         }
+        expect(queue.requests()).toBe(0);
       },
     );
 

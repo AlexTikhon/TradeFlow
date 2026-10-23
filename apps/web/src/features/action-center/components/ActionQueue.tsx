@@ -1,10 +1,9 @@
 import { Alert, Box, Button, CircularProgress, Skeleton, Stack, Typography } from '@mui/material';
-import type { InfiniteData, UseInfiniteQueryResult } from '@tanstack/react-query';
-import type { ActionItemPage } from '@tradeflow/contracts';
 import { ApiError } from '../../../shared/api/http-client';
 import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import type { ActionItemFilters } from '../api/action-items.api';
 import { ACTION_TYPE_LABELS } from '../domain/action-items';
+import type { ActionQueue as ActionQueueState } from '../hooks/use-action-queue';
 import { ActionItemCard } from './ActionItemCard';
 
 function describeLoadMoreFailure(error: Error): string {
@@ -29,7 +28,7 @@ function EmptyQueue({ filters, onClearFilters }: EmptyQueueProps) {
         </Typography>
         <Typography color="text.secondary">
           No notice, instruction or document under your contracts needs your organization right now.
-          Refresh to check again.
+          This page checks again while it is open.
         </Typography>
       </Stack>
     );
@@ -57,7 +56,7 @@ function EmptyQueue({ filters, onClearFilters }: EmptyQueueProps) {
 }
 
 interface ActionQueueProps {
-  queue: UseInfiniteQueryResult<InfiniteData<ActionItemPage>>;
+  queue: ActionQueueState;
   filters: ActionItemFilters;
   onClearFilters: () => void;
 }
@@ -68,15 +67,14 @@ interface ActionQueueProps {
  * items loaded so far are not the whole queue.
  */
 export function ActionQueue({ queue, filters, onClearFilters }: ActionQueueProps) {
-  const { data, error, isFetchNextPageError, isFetchingNextPage, hasNextPage } = queue;
-  const items = data?.pages.flatMap((page) => page.items);
+  const { items, loadError, nextPageError, isFetchingNextPage, hasNextPage } = queue;
 
   if (!items) {
-    return error ? (
+    return loadError ? (
       <QueryErrorAlert
         title="Actions could not be loaded"
-        error={error}
-        onRetry={() => void queue.refetch()}
+        error={loadError}
+        onRetry={queue.refresh}
       />
     ) : (
       <Stack spacing={2} aria-busy aria-label="Loading actions">
@@ -104,25 +102,25 @@ export function ActionQueue({ queue, filters, onClearFilters }: ActionQueueProps
           <ActionItemCard key={item.key} item={item} />
         ))}
       </Stack>
-      {error && isFetchNextPageError && (
+      {nextPageError && (
         <Alert
           severity="error"
           action={
-            <Button color="inherit" size="small" onClick={() => void queue.fetchNextPage()}>
+            <Button color="inherit" size="small" onClick={queue.retryNextPage}>
               Retry
             </Button>
           }
         >
-          {describeLoadMoreFailure(error)}
+          {describeLoadMoreFailure(nextPageError)}
         </Alert>
       )}
-      {hasNextPage && !isFetchNextPageError && (
+      {hasNextPage && !nextPageError && (
         <Box>
           <Button
             variant="outlined"
             disabled={isFetchingNextPage}
             startIcon={isFetchingNextPage ? <CircularProgress size={18} color="inherit" /> : null}
-            onClick={() => void queue.fetchNextPage()}
+            onClick={queue.fetchNextPage}
           >
             Load more
           </Button>
@@ -130,7 +128,7 @@ export function ActionQueue({ queue, filters, onClearFilters }: ActionQueueProps
       )}
       {!hasNextPage && (
         <Typography variant="body2" color="text.secondary">
-          End of the list as loaded. Refresh to see what has changed since.
+          End of the list.
         </Typography>
       )}
     </Stack>

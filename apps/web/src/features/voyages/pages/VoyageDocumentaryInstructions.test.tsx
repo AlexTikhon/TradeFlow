@@ -9,6 +9,7 @@ import type {
 } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
+import { cachedActionQueue } from '../../../test/action-queue';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../../test/fixtures/auth';
 import {
   acknowledgedRevision,
@@ -431,9 +432,10 @@ describe('Documentary instructions on the voyage page', () => {
         state.instructions = [given];
         return HttpResponse.json(given, { status: 201 });
       });
-      const { user } = renderRoute(page, { signedInAs: claire });
+      const { user, queryClient } = renderRoute(page, { signedInAs: claire });
 
       const form = await openForm(user, 'Give documentary instructions');
+      const queue = cachedActionQueue(queryClient, claire);
       await fillFirstContent(user, form);
       await user.click(form.getByRole('button', { name: 'Send instructions' }));
 
@@ -448,6 +450,9 @@ describe('Documentary instructions on the voyage page', () => {
       expect(panel.getByRole('region', { name: 'Revision 1' })).toHaveTextContent(
         'Certificate of origin',
       );
+      // Claire's Action Center queue is marked stale; nothing shows it, so nothing reads it.
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('revises from the current revision, sending the version it started from', async () => {
@@ -471,9 +476,10 @@ describe('Documentary instructions on the voyage page', () => {
         state.instructions = [revised];
         return HttpResponse.json(revised);
       });
-      const { user } = renderRoute(page, { signedInAs: claire });
+      const { user, queryClient } = renderRoute(page, { signedInAs: claire });
 
       const form = await openForm(user, 'Revise instructions');
+      const queue = cachedActionQueue(queryClient, claire);
       // The draft starts as the current revision.
       expect(form.getByLabelText(/Consignee/)).toHaveValue('To order of Banco Exemplo S.A.');
       expect(rows(form)).toHaveLength(2);
@@ -503,6 +509,8 @@ describe('Documentary instructions on the voyage page', () => {
         'Not acknowledged',
       );
       expect(panel.getByRole('button', { name: 'Earlier revisions (1)' })).toBeVisible();
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('checks the draft before sending anything', async () => {
@@ -750,9 +758,10 @@ describe('Documentary instructions on the voyage page', () => {
         state.instructions = [done];
         return HttpResponse.json(done);
       });
-      const { user } = renderRoute(page);
+      const { user, queryClient } = renderRoute(page);
 
       const panel = await contractPanel();
+      const queue = cachedActionQueue(queryClient, ana);
       await user.click(panel.getByRole('button', { name: 'Acknowledge receipt of revision 2' }));
 
       const revision = panel.getByRole('region', { name: 'Revision 2' });
@@ -763,6 +772,8 @@ describe('Documentary instructions on the voyage page', () => {
       });
       expect(panel.queryByRole('button', { name: /Acknowledge receipt/ })).not.toBeInTheDocument();
       expect(acknowledgement.sent).toEqual([{ body: {}, ifMatch: '"4"', ifNoneMatch: null }]);
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('reports a revision that arrived first, shows it, and does not acknowledge it on its own', async () => {
@@ -971,12 +982,15 @@ describe('Documentary instructions on the voyage page', () => {
       expect(
         await (await contractPanel()).findByRole('button', { name: 'Revise instructions' }),
       ).toBeVisible();
+      const queue = cachedActionQueue(rendered.queryClient, claire);
       const listRequests = state.listRequests;
       put.release();
       await allAnswered(rendered.queryClient);
 
       expect(state.listRequests).toBe(listRequests);
       expectUntouched(rendered.queryClient, claire, [forBuyer()]);
+      expect(queue.invalidated()).toBe(false);
+      expect(queue.requests()).toBe(0);
     });
 
     it.each(acknowledgementCases)(
@@ -992,6 +1006,7 @@ describe('Documentary instructions on the voyage page', () => {
         expect(
           await panel.findByRole('button', { name: 'Acknowledge receipt of revision 1' }),
         ).toBeVisible();
+        const queue = cachedActionQueue(rendered.queryClient, ana);
         const listRequests = state.listRequests;
         acknowledgement.release();
         await allAnswered(rendered.queryClient);
@@ -1001,6 +1016,8 @@ describe('Documentary instructions on the voyage page', () => {
           panel.getByRole('button', { name: 'Acknowledge receipt of revision 1' }),
         ).toBeEnabled();
         expectUntouched(rendered.queryClient, ana, [current]);
+        expect(queue.invalidated()).toBe(false);
+        expect(queue.requests()).toBe(0);
       },
     );
 
@@ -1013,13 +1030,16 @@ describe('Documentary instructions on the voyage page', () => {
       expect(
         await (await contractPanel()).findByRole('button', { name: 'Revise instructions' }),
       ).toBeVisible();
+      const queue = cachedActionQueue(rendered.queryClient, claire);
       const listRequests = state.listRequests;
       put.release();
       await allAnswered(rendered.queryClient);
 
       expect(state.listRequests).toBe(listRequests);
       expectUntouched(rendered.queryClient, claire, [forBuyer()]);
+      // Claire's Action Center queue among them.
       expectNothingInvalidated(rendered.queryClient);
+      expect(queue.requests()).toBe(0);
     });
 
     it.each(acknowledgementCases)(
@@ -1034,13 +1054,16 @@ describe('Documentary instructions on the voyage page', () => {
         expect(
           await panel.findByRole('button', { name: 'Acknowledge receipt of revision 1' }),
         ).toBeVisible();
+        const queue = cachedActionQueue(rendered.queryClient, ana);
         const listRequests = state.listRequests;
         acknowledgement.release();
         await allAnswered(rendered.queryClient);
 
         expect(state.listRequests).toBe(listRequests);
         expectUntouched(rendered.queryClient, ana, [current]);
+        // Ana's Action Center queue among them.
         expectNothingInvalidated(rendered.queryClient);
+        expect(queue.requests()).toBe(0);
       },
     );
 

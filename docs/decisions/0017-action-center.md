@@ -5,8 +5,10 @@
   the rules are unit-tested and the endpoint is tested over HTTP against PostgreSQL. The web
   page (`/actions`, `apps/web/src/features/action-center/`) and exact-record links into the
   voyage page (`apps/web/src/features/voyages/navigation/`) are implemented and tested through
-  the real route tree ([the web slice](#the-web-slice)). The queue does not refresh itself yet.
-- **Date:** 2026-10-22
+  the real route tree ([the web slice](#the-web-slice)). The page keeps its queue current
+  ([freshness](#freshness)): polling, visibility, focus, reconnection and the voyage commands'
+  invalidation, all tested on controlled timers. Browser end-to-end coverage is still to come.
+- **Date:** 2026-10-22 (freshness: 2026-10-23)
 
 ## Context
 
@@ -191,6 +193,17 @@ not restate it.
   acknowledge or review; deriving deadlines from it would invent business rules.
 - **Serving every reason, message or file name.** Convenient, but the queue would become a second
   reader of confidential contents with its own rules to keep in step.
+- **For freshness, an organization-wide event stream.** Pushes would reach the queue sooner, but
+  streams are per voyage ([ADR 0015](0015-voyage-event-streams.md)) and best effort, so the
+  queue would still need reads to reconcile; polling and invalidation need no new
+  infrastructure.
+- **For freshness, reading every loaded page again** (TanStack's default refetch of an infinite
+  query, with fresh cursors). It keeps the user's depth, but costs a request per loaded page on
+  every refresh, and a refresh and a "Load more" on the same query either cancel or swallow each
+  other. Restarting from the first page keeps one read per refresh and one rule for what is shown.
+- **For freshness, an invalidation bus between the features.** The query cache already is one:
+  commands invalidate the queue's key through a shared module, and TanStack refetches only what
+  is on screen.
 
 ## Consequences
 
@@ -201,12 +214,15 @@ not restate it.
   (service providers, other traders, spoofed ids, another organization's cursor).
 - Page cost grows with the organization's open work. The move to SQL ordering is prepared (same
   position, ASCII keys) but not built.
-- A queue left open does not update itself: SSE streams are per voyage
-  ([ADR 0015](0015-voyage-event-streams.md)) and neither slice adds one. `overdue` is true as of
-  `generatedAt`. The page says when it was loaded and that it does not update on its own; it is
-  read again on **Refresh**, and from its first page whenever the user comes back to it. An
-  action answered on a voyage's page stays in a queue already on screen until then (no
-  command invalidates it).
+- No stream: SSE streams are per voyage ([ADR 0015](0015-voyage-event-streams.md)) and none is
+  added for the queue. A queue on screen reads its first page again on a timer, on the events
+  that make it likely to be stale, and after the voyage commands of the same session
+  ([freshness](#freshness)), so it lags the records by at most the interval while visible and
+  online. Another organization's command (the counterparty presenting a file, say) reaches it
+  only by those reads. `overdue` is true as of `generatedAt`, which the page shows as the last
+  update; a deadline that passes is shown by the next read, with nothing written.
+- Every refresh costs one page read per open Action Center tab, every 30 s while visible, each
+  loading the organization's candidates (see the strategy above).
 
 ### The endpoint slice
 
@@ -234,11 +250,12 @@ a participant a contract names, so that state cannot exist; the predicate states
 **`/actions`** is a protected page in the main navigation (the default landing page stays
 `/voyages`). It is a reader of the endpoint, nothing more:
 
-- **Server state only.** One infinite query per set of filters
-  (`actionItemQueries.list(scope, filters)`, under the identity's protected scope), fetched with
-  the shared client, validated with `ActionItemPageSchema`, and each page request carries the
-  query's abort signal. An identity change cancels a page on its way, first or next, and its
-  late answer reaches nobody; a 401 signs out as for any protected query.
+- **Server state only.** Per set of filters, under the identity's protected scope: a query for
+  the first page (`actionItemQueries.list(scope, filters)`) and one per later page of the
+  current walk (`actionItemQueries.page`), fetched with the shared client, validated with
+  `ActionItemPageSchema`, and each request carries its query's abort signal. An identity change
+  cancels a page on its way, first or next, and its late answer reaches nobody; a 401 signs out
+  as for any protected query.
 - **Filters in the URL** (`?type=…&overdue=true`), so reload, back and forward and shared links
   work. Each change is a history entry; a value the page does not know (or a parameter given
   twice) is ignored, never guessed at, and the page says so and offers to remove it from the
@@ -247,9 +264,9 @@ a participant a contract names, so that state cannot exist; the predicate states
 - **Pages are positions, not a snapshot**, so a walk is not kept once nothing shows it
   (`gcTime: 0`): coming back to the queue starts again from its first page. **Load more** sends
   the last `nextCursor` unchanged with the same filters; a failed page keeps the items shown and
-  offers its own retry. **Refresh** drops every page loaded and reads the first one again. The
-  page shows no count, since the API serves no total and the items loaded are not the queue. It
-  does not refetch on window focus.
+  offers its own retry. **Refresh** reads the first page again and, once it answers, drops every
+  page loaded after the previous one. The page shows no count, since the API serves no total
+  and the items loaded are not the queue.
 - **Each item** names the action, the voyage, the counterparty and the contract's position, the
   exact revision or file version (never for a notice), the deadline and overdue only for
   notices, the rejection reason only for a replacement, and its source instants. It sends no
@@ -280,21 +297,75 @@ the voyages feature depends on it.
   replacement applies only to the latest one), not found, malformed, or not yet shown because a
   section it needs failed (the section offers the retry).
 - **Showing it**: the section holding the record marks its container (the notice, the revision,
-  the exact file version), and collapsed history around it opens once (earlier revisions,
-  earlier versions); the user can fold it again and a refresh does not reopen it. Focus moves to
-  the container once per link, as soon as it is on the page, and never again for the same link,
-  so background refreshes leave the user where they are; **Show it** moves it there on request.
-  A different link on the same page is a new request. Drafts, chosen files and conflict notices
-  are untouched: navigation only reads, and the forms keep their own basis.
+  the exact file version). Revealing it is a request, made by a link not seen before on the page
+  (another revision or file on the same voyage included) and by **Show it**. For each request,
+  every collapsed history holding the record opens (earlier revisions, earlier versions, both
+  for a replaced file of a superseded revision), whatever the user did with it before, and
+  history that does not hold it is left as it is. Focus then moves to the container once nothing
+  collapsed encloses it (history stays mounted while folded, so being on the page is not
+  enough) and focus has actually landed, which completes the request. Refreshes are not
+  requests: history the user folded stays folded, even if a refresh moves the record into it,
+  and focus stays where the user put it; the same link located again asks nothing. Drafts,
+  chosen files and conflict notices are untouched: navigation only reads, and the forms keep
+  their own basis.
 - **No command is sent and no decision is started** by opening a link. The usual forms stay
   where they were, under their usual permissions, with nothing chosen.
 
+### Freshness
+
+A queue on screen keeps itself current by reading its **first page** again, never a later one
+(`useActionQueue`, `actionItemQueries.list`):
+
+- **When:** every 30 s while the tab is visible and the browser online (`refetchInterval`;
+  ticks are skipped while hidden, and offline a read waits unsent); as soon as the tab becomes
+  visible or the window regains focus; when the connection returns; on **Refresh**; and after a
+  voyage command succeeds in the same session.
+- **Commands** (issuing and acknowledging notices, giving, revising and acknowledging
+  instructions, uploading and deciding on documents) call `invalidateActionQueue` from
+  `shared/cache/action-queue.ts`, which owns the queue's key, so neither feature imports the
+  other. It is called inside each command's existing session-epoch guard: a command answered
+  after a sign-out, a sign-in as someone else, the same user signing back in, or session checks
+  going to someone else and back, invalidates nothing. Only queues on screen are read again;
+  another filter cached is marked stale, not fetched. No write is retried, and the commands'
+  pre-dispatch check for commands that waited offline is unchanged.
+- **Coalescing:** a trigger that arrives while a read is on its way shares it, so focus,
+  visibility, reconnection and the interval never cancel or repeat a read. A command's
+  invalidation is the exception: the read on its way may predate the command, so it is
+  replaced by one sent now, and the change is never lost.
+- **Pagination restarts.** Each successful read of the first page ends the walk that followed
+  the previous one: its later pages are no longer shown, and a page still on its way loses its
+  observer, is cancelled, and can never be appended to the new queue. **Load more** then follows
+  the new page's cursor; walks are numbered so that none reuses another's pages or cursors.
+  Refreshed first pages are never shown next to pages read before them. Filters stay as they
+  are in the URL.
+- **Failures and staleness.** A failed read changes nothing shown and is reported beside the
+  queue with a retry. The header says when the queue was last updated (`generatedAt` of the
+  last successful read, so older items are never presented as just checked), and that it may be
+  out of date after a failure or while offline.
+- **Overdue** changes only through reads: a deadline that passes appears as overdue, and in the
+  overdue filter, on the next read, with nothing written.
+- **Lifetime:** the interval, the focus listener and any read on its way end with the page,
+  which the auth boundary replaces whenever the session changes.
+
+Trade-off: a refresh returns a user who loaded later pages to the first one (at most every 30 s
+while visible), the price of never mixing reads; reading every loaded page again would keep
+the depth at the cost of a request per page on each refresh.
+
 Tested through the real route tree, providers and MSW (`ActionCenterPage.test.tsx`,
-`VoyageRecordLinks.test.tsx`, and unit tests of the link codec and URL filters): routing and the
-navigation item, all four kinds and their conditional fields, filters through the URL and back
-and forward, cursors and the reset on a filter change, loading, empty, first-page and next-page
-failures, Refresh, viewers, malformed responses (first and later pages), late pages after an
-identity change, links resolved after delayed loading, superseded revisions, replaced files and
-documents of superseded revisions shown as history, stale, mismatched and malformed links that
-open nothing, a failed section retried, focus moved once (and kept through a refresh with a
-draft open), and no command sent from any link.
+`VoyageRecordLinks.test.tsx`, the command tests of the voyage page, and unit tests of the link
+codec and URL filters): routing and the navigation item, all four kinds and their conditional
+fields, filters through the URL and back and forward, cursors and the reset on a filter change,
+loading, empty, first-page and next-page failures, Refresh, viewers, malformed responses (first
+and later pages), late pages after an identity change, links resolved after delayed loading,
+superseded revisions, replaced files and documents of superseded revisions shown as history,
+stale, mismatched and malformed links that open nothing, a failed section retried, focus moved
+once (and kept through a refresh with a draft open), history folded by the user and opened
+again by another link on the same page or by Show it (revisions, versions, and both around a
+replaced file of a superseded revision) with a draft kept on its version, and no command sent
+from any link. Freshness on controlled timers with request barriers: polling and its pauses,
+visibility, focus and reconnection, shared reads, cleanup on leaving and on session
+replacement (including the same user signing back in), a walk restarted by a refresh and a late
+page never appended, a deadline passing with nothing written, a failed refresh and its
+recovery, an invalidation replacing a read on its way without fetching another filter, and a
+command succeeding after the queue was shown; each command's own tests check its invalidation,
+and that a completion for an ended session invalidates nothing.

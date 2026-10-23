@@ -691,6 +691,176 @@ describe('Opening a record link on the voyage page', () => {
     });
   });
 
+  describe('history folded by the user', () => {
+    const earlierRevisions = () => screen.getByRole('button', { name: /^Earlier revisions/ });
+    const earlierVersions = () => screen.getByRole('button', { name: /^Earlier versions/ });
+
+    /** Folds a history open around the linked record, as the user would. */
+    async function fold(user: ReturnType<typeof renderRoute>['user'], history: HTMLElement) {
+      await waitFor(() => {
+        expect(history).toHaveAttribute('aria-expanded', 'true');
+      });
+      await user.click(history);
+      expect(history).toHaveAttribute('aria-expanded', 'false');
+    }
+
+    it('opens again for a link to another earlier revision on the same voyage', async () => {
+      const instruction = instructionsAt(asSeller, 3);
+      const state = servePage({ contracts: [asSeller], instructions: [instruction] });
+      const { user, router } = renderRoute(revisionLink(instruction, 1), { signedInAs: ana });
+      await waitFor(() => {
+        expect(screen.getByRole('region', { name: 'Revision 1' })).toHaveFocus();
+      });
+      await fold(user, earlierRevisions());
+
+      await act(() => router.navigate(revisionLink(instruction, 2)));
+
+      expect(earlierRevisions()).toHaveAttribute('aria-expanded', 'true');
+      const revision2 = screen.getByRole('region', { name: 'Revision 2' });
+      await waitFor(() => {
+        expect(revision2).toHaveFocus();
+      });
+      expect(revision2).toBeVisible();
+      expect(await linkedStatus()).toHaveTextContent('Revision 2 has been superseded');
+      expect(state.commands).toEqual([]);
+    });
+
+    it('opens again when the user asks to be shown the revision', async () => {
+      const instruction = instructionsAt(asSeller, 2);
+      servePage({ contracts: [asSeller], instructions: [instruction] });
+      const { user } = renderRoute(revisionLink(instruction, 1), { signedInAs: ana });
+      await fold(user, await screen.findByRole('button', { name: 'Earlier revisions (1)' }));
+
+      await user.click(screen.getByRole('button', { name: 'Show it' }));
+
+      expect(earlierRevisions()).toHaveAttribute('aria-expanded', 'true');
+      const revision1 = screen.getByRole('region', { name: 'Revision 1' });
+      expect(revision1).toHaveFocus();
+      expect(revision1).toBeVisible();
+    });
+
+    it('opens again for a link to another earlier version of a document', async () => {
+      // Versions 1 and 2 were both replaced; version 3 is the latest.
+      const document = forBuyer(replacedBy(replacedBy(aDocument())));
+      servePage({ instructions: [instructionsAt(asBuyer, 1)], documents: [document] });
+      const { user, router } = renderRoute(documentLink(document, 1), { signedInAs: claire });
+      await waitFor(() => {
+        expect(
+          screen.getByRole('group', { name: 'Version 1 of the bill of lading' }),
+        ).toHaveFocus();
+      });
+      await fold(user, earlierVersions());
+
+      await act(() => router.navigate(documentLink(document, 2)));
+
+      expect(earlierVersions()).toHaveAttribute('aria-expanded', 'true');
+      const version2 = screen.getByRole('group', { name: 'Version 2 of the bill of lading' });
+      await waitFor(() => {
+        expect(version2).toHaveFocus();
+      });
+      expect(version2).toBeVisible();
+      expect(await linkedStatus()).toHaveTextContent(
+        'Version 2 of the bill of lading has been replaced',
+      );
+    });
+
+    it('opens again when the user asks to be shown an earlier version, keeping their draft', async () => {
+      const document = forBuyer(replacedBy(aDocument()));
+      const state = servePage({
+        instructions: [instructionsAt(asBuyer, 1)],
+        documents: [document],
+      });
+      const { user } = renderRoute(documentLink(document, 1), { signedInAs: claire });
+      await fold(user, await screen.findByRole('button', { name: 'Earlier versions (1)' }));
+      // A decision on the latest file is being drafted meanwhile.
+      const form = screen.getByRole('form', { name: 'Review version 2 of the bill of lading' });
+      await user.click(within(form).getByRole('radio', { name: 'Reject' }));
+      const reason = within(form).getByRole('textbox', { name: /Reason for rejecting/ });
+      await user.type(reason, REASON);
+
+      await user.click(screen.getByRole('button', { name: 'Show it' }));
+
+      expect(earlierVersions()).toHaveAttribute('aria-expanded', 'true');
+      const version1 = screen.getByRole('group', { name: 'Version 1 of the bill of lading' });
+      expect(version1).toHaveFocus();
+      expect(version1).toBeVisible();
+      // The draft stays as it was, on the version it was started on.
+      expect(screen.getByRole('form', { name: 'Review version 2 of the bill of lading' })).toBe(
+        form,
+      );
+      expect(reason).toHaveValue(REASON);
+      expect(within(form).getByRole('radio', { name: 'Reject' })).toBeChecked();
+      expect(
+        screen.queryByRole('form', { name: 'Review version 1 of the bill of lading' }),
+      ).not.toBeInTheDocument();
+      expect(state.commands).toEqual([]);
+    });
+
+    it('opens every fold around a replaced file of a superseded revision when asked', async () => {
+      // Version 1, replaced by version 2, both presented against revision 1; revision 2 is in force.
+      const document = forBuyer(replacedBy(aDocument()));
+      servePage({ instructions: [instructionsAt(asBuyer, 2)], documents: [document] });
+      const { user } = renderRoute(documentLink(document, 1), { signedInAs: claire });
+      await waitFor(() => {
+        expect(
+          screen.getByRole('group', { name: 'Version 1 of the bill of lading' }),
+        ).toHaveFocus();
+      });
+      expect(earlierRevisions()).toHaveAttribute('aria-expanded', 'true');
+      await fold(user, earlierVersions());
+      await fold(user, earlierRevisions());
+
+      await user.click(screen.getByRole('button', { name: 'Show it' }));
+
+      expect(earlierRevisions()).toHaveAttribute('aria-expanded', 'true');
+      expect(earlierVersions()).toHaveAttribute('aria-expanded', 'true');
+      const version1 = screen.getByRole('group', { name: 'Version 1 of the bill of lading' });
+      expect(version1).toHaveFocus();
+      expect(version1).toBeVisible();
+    });
+
+    it('opens only the folds that hide the record a new link names', async () => {
+      const document = forBuyer(replacedBy(aDocument()));
+      const instruction = instructionsAt(asBuyer, 2);
+      servePage({ instructions: [instruction], documents: [document] });
+      const { user, router } = renderRoute(documentLink(document, 1), { signedInAs: claire });
+      await fold(user, await screen.findByRole('button', { name: 'Earlier versions (1)' }));
+
+      // Version 2 is the latest of its document, under the superseded revision 1.
+      await act(() => router.navigate(documentLink(document, 2)));
+
+      expect(earlierRevisions()).toHaveAttribute('aria-expanded', 'true');
+      expect(earlierVersions()).toHaveAttribute('aria-expanded', 'false');
+      await waitFor(() => {
+        expect(
+          screen.getByRole('group', { name: 'Version 2 of the bill of lading' }),
+        ).toHaveFocus();
+      });
+    });
+
+    it('stays folded through a refresh, which leaves focus alone', async () => {
+      const document = forBuyer(replacedBy(aDocument()));
+      const state = servePage({
+        instructions: [instructionsAt(asBuyer, 1)],
+        documents: [document],
+      });
+      const { user, queryClient } = renderRoute(documentLink(document, 1), { signedInAs: claire });
+      const history = await screen.findByRole('button', { name: 'Earlier versions (1)' });
+      await fold(user, history);
+
+      // The refresh brings something new (version 2 approved), so the page renders again.
+      state.documents = [reviewedAs(document)];
+      await act(() => queryClient.invalidateQueries({ queryKey: ['protected'] }));
+      await waitFor(() => {
+        expect(screen.getByText('Approved')).toBeInTheDocument();
+      });
+
+      expect(history).toHaveAttribute('aria-expanded', 'false');
+      expect(history).toHaveFocus();
+      expect(state.commands).toEqual([]);
+    });
+  });
+
   it('is where an item of the Action Center leads', async () => {
     const review = aReviewAction();
     const document = forBuyer(replacedBy(aDocument()));

@@ -17,6 +17,7 @@ import {
   claire as claireActor,
   contractList,
 } from '../../../test/fixtures/notices';
+import { cachedActionQueue } from '../../../test/action-queue';
 import { aTradeString, aVoyageDetail, tradeParties } from '../../../test/fixtures/voyages';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
 import { problemResponse, server } from '../../../test/msw-server';
@@ -342,9 +343,10 @@ describe('ETA notices on the voyage page', () => {
         state.notices.unshift(issuedNotice);
         return HttpResponse.json(issuedNotice, { status: 201 });
       });
-      const { user } = renderRoute(page);
+      const { user, queryClient } = renderRoute(page);
 
       const form = await openIssueForm(user);
+      const queue = cachedActionQueue(queryClient, ana);
       // Ana's organization sells under one contract here: it is already chosen.
       expect(form.getByLabelText(/Contract/)).toHaveValue(aCounterpartyContract().id);
       expect(form.getByText(/Times are in your time zone \(America\/Sao_Paulo\)/)).toBeVisible();
@@ -359,6 +361,9 @@ describe('ETA notices on the voyage page', () => {
       const [item] = await noticeItems();
       expect(item).toHaveTextContent('Estimated arrival25 Oct 2030, 14:00 GMT-3');
       expect(state.listRequests).toBe(2);
+      // Ana's Action Center queue is marked stale; nothing shows it, so nothing reads it.
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('leaves the message out when none is written', async () => {
@@ -728,9 +733,10 @@ describe('ETA notices on the voyage page', () => {
         state.notices = [done];
         return HttpResponse.json(done);
       });
-      const { user } = renderRoute(page, { signedInAs: claire });
+      const { user, queryClient } = renderRoute(page, { signedInAs: claire });
 
       const [item] = await noticeItems();
+      const queue = cachedActionQueue(queryClient, claire);
       expect(item).toHaveTextContent('Sent to you');
       await user.click(
         within(item as HTMLElement).getByRole('button', { name: 'Acknowledge receipt' }),
@@ -745,6 +751,8 @@ describe('ETA notices on the voyage page', () => {
         within(item as HTMLElement).queryByRole('button', { name: 'Acknowledge receipt' }),
       ).not.toBeInTheDocument();
       expect(acknowledgement.bodies).toEqual([{}]);
+      expect(queue.invalidated()).toBe(true);
+      expect(queue.requests()).toBe(0);
     });
 
     it('accepts a late acknowledgement of an overdue notice', async () => {
@@ -988,6 +996,7 @@ describe('ETA notices on the voyage page', () => {
       await signOut(user);
       await signIn(rendered, ana);
       expect(await screen.findByText('No notices under your contracts yet.')).toBeVisible();
+      const queue = cachedActionQueue(queryClient, ana);
       const listRequests = state.listRequests;
       issue.release();
       await allAnswered(queryClient);
@@ -997,6 +1006,8 @@ describe('ETA notices on the voyage page', () => {
       const notices = noticesOf(queryClient, ana);
       expect(notices?.state.data).toEqual({ items: [] });
       expect(notices?.state.isInvalidated).toBe(false);
+      expect(queue.invalidated()).toBe(false);
+      expect(queue.requests()).toBe(0);
     });
 
     it.each<[string, () => Response]>([
@@ -1016,6 +1027,7 @@ describe('ETA notices on the voyage page', () => {
         await signOut(user);
         await signIn(rendered, claire);
         const [item] = await noticeItems();
+        const queue = cachedActionQueue(queryClient, claire);
         const listRequests = state.listRequests;
         acknowledgement.release();
         await allAnswered(queryClient);
@@ -1026,6 +1038,8 @@ describe('ETA notices on the voyage page', () => {
         const notices = noticesOf(queryClient, claire);
         expect(notices?.state.data).toEqual({ items: [awaitingForBuyer] });
         expect(notices?.state.isInvalidated).toBe(false);
+        expect(queue.invalidated()).toBe(false);
+        expect(queue.requests()).toBe(0);
       },
     );
 
@@ -1071,6 +1085,7 @@ describe('ETA notices on the voyage page', () => {
 
         await sessionChecksGoTo(rendered, ana, claire);
         const [item] = await noticeItems();
+        const queue = cachedActionQueue(queryClient, claire);
         const listRequests = state.listRequests;
         acknowledgement.release();
         await allAnswered(queryClient);
@@ -1079,9 +1094,11 @@ describe('ETA notices on the voyage page', () => {
         expect(screen.queryByRole('alert')).not.toBeInTheDocument();
         expect(state.listRequests).toBe(listRequests);
         expect(noticesOf(queryClient, claire)?.state.data).toEqual({ items: [awaitingForBuyer] });
+        // Claire's queue among them: the completion speaks for a session that has ended.
         for (const query of protectedQueries(queryClient)) {
           expect(query.state.isInvalidated).toBe(false);
         }
+        expect(queue.requests()).toBe(0);
       },
     );
 

@@ -1,15 +1,34 @@
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { Alert, Button, Stack } from '@mui/material';
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { useIdentity, useProtectedScope } from '../../../shared/auth/identity';
 import { formatInstant } from '../../../shared/lib/format';
 import { PageHeader } from '../../../shared/ui/PageHeader';
+import { QueryErrorAlert } from '../../../shared/ui/QueryErrorAlert';
 import type { ActionItemFilters } from '../api/action-items.api';
-import { actionItemQueries } from '../api/action-items.queries';
 import { ActionQueue } from '../components/ActionQueue';
 import { ActionQueueFilters } from '../components/ActionQueueFilters';
 import { parseQueueFilters, queueSearch } from '../domain/action-items';
+import { type ActionQueue as ActionQueueState, useActionQueue } from '../hooks/use-action-queue';
+
+const PURPOSE = 'What your organization has to do next, across voyages.';
+
+/**
+ * How current the queue shown is: the API's time for the last first page read successfully, and
+ * why nothing newer is shown when a refresh failed or cannot be sent. A failure never moves that
+ * time, so older items are never presented as just checked.
+ */
+function describeFreshness({ generatedAt, refreshError, online }: ActionQueueState): string {
+  if (!generatedAt) return PURPOSE;
+  const at = formatInstant(generatedAt);
+  if (!online) {
+    return `${PURPOSE} Last updated ${at}. You are offline, so it may be out of date; it is checked again when the connection returns.`;
+  }
+  if (refreshError) {
+    return `${PURPOSE} Last updated ${at}. It could not be checked since, so it may be out of date.`;
+  }
+  return `${PURPOSE} Updated ${at}, and checked again every 30 seconds while this page is open.`;
+}
 
 /**
  * Filters live in the URL (reload, back and forward, links), validated as they are read; the
@@ -36,31 +55,19 @@ function useQueueFilters() {
  * The Action Center (ADR 0017): what the signed-in organization has to do next, across every
  * voyage, as the API derives it from the records. Read-only: each item links to its exact record
  * on the voyage's page, where the usual commands and permissions apply. Viewers read the same
- * queue.
+ * queue. It keeps itself current while open (`useActionQueue`); Refresh reads it at once.
  */
 export function ActionCenterPage() {
   const scope = useProtectedScope();
   const identity = useIdentity();
-  const queryClient = useQueryClient();
   const { filters, ignored, setFilters, dropIgnored } = useQueueFilters();
-  const options = actionItemQueries.list(scope, filters);
-  const queue = useInfiniteQuery(options);
-  const loadedAt = queue.data?.pages[0]?.generatedAt;
-
-  const refresh = () => {
-    // Drops every page loaded so far and reads the first one again.
-    void queryClient.resetQueries({ queryKey: options.queryKey, exact: true });
-  };
+  const queue = useActionQueue(scope, filters);
 
   return (
     <>
       <PageHeader
         title="Action Center"
-        subtitle={
-          loadedAt
-            ? `What your organization has to do next, across voyages. Loaded ${formatInstant(loadedAt)}; it does not update on its own.`
-            : 'What your organization has to do next, across voyages.'
-        }
+        subtitle={describeFreshness(queue)}
         actions={
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
@@ -71,8 +78,8 @@ export function ActionCenterPage() {
             <Button
               variant="outlined"
               startIcon={<RefreshIcon aria-hidden />}
-              disabled={queue.isFetching && !queue.isFetchingNextPage}
-              onClick={refresh}
+              disabled={queue.refreshing}
+              onClick={queue.refresh}
             >
               Refresh
             </Button>
@@ -80,6 +87,13 @@ export function ActionCenterPage() {
         }
       />
       <Stack spacing={2}>
+        {queue.refreshError && (
+          <QueryErrorAlert
+            title="Actions could not be refreshed"
+            error={queue.refreshError}
+            onRetry={queue.refresh}
+          />
+        )}
         {ignored.length > 0 && (
           <Alert
             severity="warning"

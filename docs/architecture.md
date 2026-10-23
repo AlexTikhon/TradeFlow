@@ -609,22 +609,28 @@ src/
       hooks/        useCreateVoyage, useIssueNotice, useAcknowledgeNotice,
                     useSubmitInstruction, useAcknowledgeRevision, useUploadDocument,
                     useReviewDocument, useDownloadDocument: mutations and what happens after
-                    them; useVoyageLiveUpdates: the event stream, invalidation and polling
+                    them; useVoyageLiveUpdates: the event stream, invalidation and polling;
+                    useRevealLinkedRecord: reveal requests and focus for a record link
       components/   feature UI (table, filter, facts card, trade string, notices, participants,
                     timeline, the linked record's status)
       navigation/   record links (ADR 0017): recordLinkPath/parseRecordLink (the address),
-                    resolveRecordLink (against fetched records), the linked-record context
+                    resolveRecordLink (against fetched records), the linked-record and
+                    reveal-request contexts, useDisclosure (history that opens per request)
       pages/        route components; compose data hooks and components
       routes.tsx    the feature's routes; the app shell only composes them
     action-center/  (ADR 0017)
-      api/          GET /action-items + the infinite query factory (keys under the scope)
+      api/          GET /action-items + query factories: the first page (refreshed) and the
+                    later pages of one walk (keys under the scope)
       domain/       action labels, URL filters (parse, ignore unknown), item wording
+      hooks/        useActionQueue: the first page kept current, later pages restarted by
+                    every refresh, window focus
       components/   queue (states, pages), item card, filters
       pages/        ActionCenterPage (/actions)
   shared/
     api/        fetch wrapper: ApiError (Problem Details), ApiContractError; JSON, one-file
                 multipart uploads and blob downloads
     auth/       identity context and identity-scoped query keys
+    cache/      the Action Center queue's key and its invalidation, for voyage commands
     lib/        formatting (numbers, calendar dates, countries), saving a downloaded file
     ui/         generic UI: PageHeader, QueryErrorAlert, NotFoundState
   test/         MSW server, typed fixtures, renderRoute helper
@@ -634,7 +640,8 @@ src/
 `shared/`. `shared/` never imports from `features/`. A feature may use another feature's
 `domain/` and `navigation/` modules, never its components, and only one way: the Action Center
 builds record links and names documents with the voyages feature's modules, and nothing in
-`voyages/` imports `action-center/`.
+`voyages/` imports `action-center/`. Voyage commands reach the queue through
+`shared/cache/action-queue.ts` (its key and `invalidateActionQueue`), which both features use.
 
 ### State ([ADR 0003](decisions/0003-frontend-server-state.md))
 
@@ -761,17 +768,27 @@ builds record links and names documents with the voyages feature's modules, and 
   `refetchInterval` (paused while the tab is hidden; `staleTime` alone never refetches). If the
   browser gives up on a stream (the server refused it), a new one is opened after 5 s, 15 s,
   then every 60 s; one timer at most.
-- **Action Center** (`/actions`, [ADR 0017](decisions/0017-action-center.md#the-web-slice)). An
-  infinite query per set of filters under the identity scope (`actionItemQueries.list`), each
-  page validated with `ActionItemPageSchema` and sent with the query's abort signal. Filters
-  live in the URL (`?type=…&overdue=true`), parsed with the contract's enum: unknown or repeated
-  values are ignored and reported, with a way to remove them from the address. A filter change
-  is a new key, so it starts from the first page and never shows another filter's items.
-  **Load more** sends `nextCursor` unchanged; a failed page keeps the items shown. The walk is
-  not cached once unobserved (`gcTime: 0`) and is not refetched on focus: **Refresh** resets the
-  query to its first page, and coming back to the page starts there too. No count is shown.
-  Items link to their exact record; nothing on the page sends a command, and viewers read the
-  same queue. **Freshness is manual:** no stream, polling or command invalidates the queue yet.
+- **Action Center** (`/actions`, [ADR 0017](decisions/0017-action-center.md#the-web-slice)). Per
+  set of filters, under the identity scope: a first-page query (`actionItemQueries.list`, under
+  `actionQueueKey`) and, after it, a walk of later pages (`actionItemQueries.page`, keyed by the
+  walk's number and cursor), each page validated with `ActionItemPageSchema` and sent with the
+  query's abort signal (`useActionQueue`). Filters live in the URL (`?type=…&overdue=true`),
+  parsed with the contract's enum: unknown or repeated values are ignored and reported, with a
+  way to remove them from the address. A filter change is a new key, so it starts from the first
+  page and never shows another filter's items. **Load more** sends `nextCursor` unchanged; a
+  failed page keeps the items shown. Nothing is cached once unobserved (`gcTime: 0`), so coming
+  back to the page starts from the first page. No count is shown. Items link to their exact
+  record; nothing on the page sends a command, and viewers read the same queue.
+  **Freshness:** only the first page is ever read again: every 30 s through `refetchInterval`
+  (skipped while the tab is hidden; offline, the read waits and nothing is sent), when the tab
+  becomes visible or the window regains focus, when the connection returns, on **Refresh**, and
+  when a voyage command succeeds in the same session (`invalidateActionQueue`, active queries
+  only). Triggers share a read already on its way; a command's invalidation replaces it, since its
+  answer may predate the command. Each successful read is a page of its own
+  (`structuralSharing: false`) and ends the walk from the previous one: later pages disappear,
+  and a page still on its way loses its observer, is cancelled, and is never appended. A failed
+  read keeps the items shown, with an error and "last updated" at the API's time of the last
+  successful read (`generatedAt`); the offline state is said too. No stream: SSE stays per voyage.
 - **Record links** (`features/voyages/navigation/`). `/voyages/:voyageId?open=…&contract=…`
   plus the target's identifiers. The voyage page parses them with the contract's target schemas
   (a malformed link names nothing), then resolves them against the records it fetched once the
@@ -779,10 +796,14 @@ builds record links and names documents with the voyages feature's modules, and 
   file is chosen in place of the one named. A status above the sections says what the record is
   now (waiting, done since, superseded or replaced history, not found, malformed, or waiting for
   a failed section's retry). The section holding it marks its container through a context
-  (`LinkedRecordContext`), collapsed history around it opens once (`useDisclosure`), and
-  `useFocusLinkedRecord` moves focus to it once per link, as soon as it is rendered, never on a
-  later refresh. Opening a link sends nothing and starts no decision; drafts and their bases are
-  untouched.
+  (`LinkedRecordContext`). Revealing it is a numbered request (`useRevealLinkedRecord`): a link
+  not seen before, or **Show it**. While a request is pending (`RevealRequestContext`), every
+  collapsed history holding the record opens for it once (`useDisclosure`), however the user left
+  it; focus then moves to the container, but only once no collapsed history (`data-collapsed`)
+  encloses it and focus has actually landed there, which fulfils the request. Refreshes are not
+  requests: history the user folded stays folded, even when a refresh moves the record into it,
+  and focus stays where it is. Opening a link sends nothing and starts no decision; drafts and
+  their bases are untouched.
 
 ### Authentication in the browser
 
@@ -999,12 +1020,25 @@ item, all four kinds of action and the fields each shows or leaves out, filters 
 sends, a filter change that starts from the first page without showing the previous filter's
 items, loading, empty, first-page and next-page failures, Refresh from the first page, viewers,
 malformed first and later pages, and pages still on their way when another tab signs in as
-someone else. Record links are tested on the voyage page: located after delayed loading, the
+someone else. Its freshness is tested on controlled timers with request barriers: polling, its
+pause while hidden or offline, reads on visibility, focus and reconnection, triggers that share a
+read on its way, nothing left reading after the page is left or the session replaced (another
+identity, or the same user signed back in), a refresh that restarts the walk and continues from
+the new cursor, a page asked for before a refresh that answers after it and is not appended, a
+deadline passing with nothing written (overdue, and the overdue filter), a failed refresh and its
+recovery, an invalidation that replaces a read on its way without fetching another filter, and a
+command that succeeds after the queue is shown. Each command's tests check that a success
+invalidates its session's queue without fetching it, and that a completion for an ended session
+(signed out and back in, or session checks to someone else and back) leaves it alone. Record
+links are tested on the voyage page: located after delayed loading, the
 status for each state of each kind, superseded revisions, replaced files and documents of
 superseded revisions opened as history, mismatched, missing and malformed links that open
 nothing in their place, a failed section retried, focus moved once per link (and kept through a
-refresh with a draft open), history the user folds again, the path from the queue, and no
-command sent from any link. The link codec and URL filters are unit-tested.
+refresh with a draft open), history the user folds again, history reopened for another earlier
+revision or version on the same page and by Show it (both folds around a replaced file of a
+superseded revision, and only the folds a new target needs), with a draft kept on its version,
+the path from the queue, and no command sent from any link. The link codec and URL filters are
+unit-tested.
 
 ## Operational concerns (current state)
 

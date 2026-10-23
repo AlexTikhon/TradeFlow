@@ -6,6 +6,7 @@ import type {
 } from '@tradeflow/contracts';
 import { ApiError } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
+import { invalidateActionQueue } from '../../../shared/cache/action-queue';
 import { saveFile } from '../../../shared/lib/save-file';
 import {
   currentSessionEpoch,
@@ -33,6 +34,8 @@ import { voyageQueries } from '../api/voyage.queries';
  *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
  *   no completion callback, and a download is not saved: even if the same user has signed back
  *   in meanwhile, and even if the component that issued it has unmounted.
+ * - A successful upload or review in that session also invalidates its Action Center queue
+ *   (`invalidateActionQueue`).
  * - Uploads and reviews are never retried automatically. A 412 (someone uploaded a file, or made
  *   a decision, since the user's draft was based) is reported, never resolved by re-sending
  *   against the newer version: only the user, having seen it, may base a write on it.
@@ -53,6 +56,8 @@ function useDocumentCache(voyageId: string) {
     stillCurrent: (epoch: SessionEpoch) =>
       isCurrentSession(queryClient, epoch) && isCurrentIdentity(queryClient, identity),
     refresh: () => queryClient.invalidateQueries({ queryKey }),
+    /** This identity's Action Center queue, which the command may have changed. */
+    refreshActionQueue: () => invalidateActionQueue(queryClient, scope),
     /** The instructions too: a 409 means they moved on to a new revision. */
     refreshInstructions: () =>
       queryClient.invalidateQueries({
@@ -111,6 +116,7 @@ export function useUploadDocument(voyageId: string) {
       if (!cache.stillCurrent(epoch)) return;
       cache.store(document);
       void cache.refresh();
+      void cache.refreshActionQueue();
     },
     onError: (error, { epoch }) => {
       if (isSuperseded(error) && cache.stillCurrent(epoch)) {
@@ -174,6 +180,7 @@ export function useReviewDocument(voyageId: string) {
       if (!cache.stillCurrent(epoch)) return;
       cache.store(document);
       void cache.refresh();
+      void cache.refreshActionQueue();
     },
     onError: (error, { epoch }) => {
       if (!cache.stillCurrent(epoch)) return;

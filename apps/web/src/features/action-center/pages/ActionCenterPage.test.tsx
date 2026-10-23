@@ -1,7 +1,10 @@
+import { onlineManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
-import type { ActionItemPage, CurrentUser } from '@tradeflow/contracts';
+import type { ActionItemPage, CurrentUser, Notice } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { actionQueueKey, invalidateActionQueue } from '../../../shared/cache/action-queue';
+import { cachedActionQueue } from '../../../test/action-queue';
 import {
   actionPage,
   aNoticeAction,
@@ -13,11 +16,22 @@ import {
   REJECTION_REASON,
 } from '../../../test/fixtures/action-items';
 import { aCurrentUser, anotherUser } from '../../../test/fixtures/auth';
-import { aVoyageDetail } from '../../../test/fixtures/voyages';
+import { anInstruction } from '../../../test/fixtures/documentary-instructions';
+import { aDocument } from '../../../test/fixtures/documents';
+import {
+  aCounterpartyContract,
+  acknowledged,
+  aNotice,
+  claire as claireActor,
+  contractList,
+} from '../../../test/fixtures/notices';
+import { emptyTimeline } from '../../../test/fixtures/timeline';
+import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
 import { problemResponse, server } from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
 import { recordLinkPath } from '../../voyages/navigation/record-link';
+import { QUEUE_REFRESH_INTERVAL_MS } from '../api/action-items.queries';
 
 const voyage = aVoyageDetail();
 /** Claire operates for Lacustra, which buys under contract 1 and sells under contract 2. */
@@ -250,23 +264,22 @@ describe('The Action Center', () => {
       expect(within(item).getByText('20 Oct 2030, 12:00 GMT-3')).toBeInTheDocument();
     });
 
-    it('says when it was loaded and never counts the items as the whole queue', async () => {
+    it('says when it was updated and never counts the items as the whole queue', async () => {
       serveQueue(({ cursor }) =>
         json(cursor ? actionPage([noticeAction(3)]) : actionPage([noticeAction(1)], 'next')),
       );
       const { user } = renderRoute('/actions', { signedInAs: claire });
 
       expect(
-        await screen.findByText(/Loaded 18 Oct 2030, 09:00 GMT-3; it does not update on its own\./),
+        await screen.findByText(
+          /Updated 18 Oct 2030, 09:00 GMT-3, and checked again every 30 seconds while this page is open\./,
+        ),
       ).toBeInTheDocument();
+      expect(screen.queryByText(/does not update/)).not.toBeInTheDocument();
       expect(screen.queryByText(/\d+ actions?\b/)).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: 'Load more' }));
-      expect(
-        await screen.findByText(
-          'End of the list as loaded. Refresh to see what has changed since.',
-        ),
-      ).toBeInTheDocument();
+      expect(await screen.findByText('End of the list.')).toBeInTheDocument();
       expect(screen.queryByText(/\d+ actions?\b/)).not.toBeInTheDocument();
     });
 
@@ -583,10 +596,14 @@ describe('The Action Center', () => {
       expect(requests.map(({ cursor }) => cursor)).toEqual([null, 'after-1', 'after-1']);
     });
 
-    it('refreshes from the first page, dropping every page loaded before', async () => {
+    it('refreshes from the first page, dropping every page loaded before once it answers', async () => {
+      const refreshing = aGate();
       let refreshed = false;
-      const requests = serveQueue(({ cursor }) => {
-        if (refreshed) return json(actionPage([aReviewAction()], 'fresh-cursor'));
+      const requests = serveQueue(async ({ cursor }) => {
+        if (refreshed) {
+          await refreshing.pass();
+          return json(actionPage([aReviewAction()], 'fresh-cursor'));
+        }
         return json(
           cursor ? actionPage([noticeAction(2)]) : actionPage([noticeAction(1)], 'after-1'),
         );
@@ -601,6 +618,12 @@ describe('The Action Center', () => {
 
       refreshed = true;
       await user.click(screen.getByRole('button', { name: 'Refresh' }));
+      await refreshing.received;
+      // What was loaded stays on screen until the first page answers.
+      expect(await queueItems()).toHaveLength(2);
+      expect(screen.queryByLabelText('Loading actions')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+      refreshing.release();
 
       await waitFor(async () => {
         expect(await headings()).toEqual(['Review document']);
@@ -735,6 +758,508 @@ describe('The Action Center', () => {
       for (const query of queryClient.getQueryCache().findAll({ queryKey: ['protected'] })) {
         expect(query.queryKey[1]).toBe(scopeOf(claire));
       }
+    });
+  });
+
+  describe('keeping itself current', () => {
+    let visibility: DocumentVisibilityState = 'visible';
+
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      visibility = 'visible';
+      vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      onlineManager.setOnline(true);
+    });
+
+    const passes = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    /** The tab is hidden or shown again, as the browser reports it. */
+    function tabBecomes(state: DocumentVisibilityState) {
+      act(() => {
+        visibility = state;
+        document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+      });
+    }
+    function windowRegainsFocus() {
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+    }
+    function connection(state: 'offline' | 'online') {
+      act(() => {
+        window.dispatchEvent(new Event(state));
+      });
+    }
+
+    /** The notices the items shown link to, in order. */
+    const linkedNotices = async () =>
+      (await queueItems()).map((item) =>
+        new URL(
+          within(item).getByRole('link').getAttribute('href') ?? '',
+          'http://localhost',
+        ).searchParams.get('notice'),
+      );
+    const noticeOf = (n: number) => noticeAction(n).target.noticeId;
+    /** The API's clock reading for its `n`th read: a minute after the one before. */
+    const minute = (n: number) => `2030-10-18T12:${String(n).padStart(2, '0')}:00.000Z`;
+
+    it('reads its first page again every 30 seconds while visible and online', async () => {
+      let reads = 0;
+      const requests = serveQueue(() => {
+        reads += 1;
+        const items = Array.from({ length: reads }, (_, index) => noticeAction(index + 1));
+        return json(actionPage(items, null, minute(reads - 1)));
+      });
+      renderRoute('/actions', { signedInAs: claire });
+
+      expect(await queueItems()).toHaveLength(1);
+      expect(screen.getByText(/Updated 18 Oct 2030, 09:00 GMT-3/)).toBeInTheDocument();
+      await passes(QUEUE_REFRESH_INTERVAL_MS / 2);
+      expect(requests).toHaveLength(1);
+
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      await waitFor(async () => {
+        expect(await queueItems()).toHaveLength(2);
+      });
+      expect(screen.getByText(/Updated 18 Oct 2030, 09:01 GMT-3/)).toBeInTheDocument();
+
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      await waitFor(async () => {
+        expect(await queueItems()).toHaveLength(3);
+      });
+      expect(requests).toHaveLength(3);
+      expect(requests.every(({ cursor }) => cursor === null)).toBe(true);
+    });
+
+    it('pauses while the tab is hidden, and reads once as soon as it is shown again', async () => {
+      const requests = serveQueue(() => json(actionPage([noticeAction(requests.length)])));
+      renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+
+      tabBecomes('hidden');
+      await passes(3 * QUEUE_REFRESH_INTERVAL_MS);
+      expect(requests).toHaveLength(1);
+
+      tabBecomes('visible');
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(2)]);
+      });
+      expect(requests).toHaveLength(2);
+    });
+
+    it('pauses while offline, says so, and reads once when the connection returns', async () => {
+      const requests = serveQueue(() => json(actionPage([noticeAction(requests.length)])));
+      renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+
+      connection('offline');
+      expect(
+        screen.getByText(
+          /Last updated 18 Oct 2030, 09:00 GMT-3\. You are offline, so it may be out of date; it is checked again when the connection returns\./,
+        ),
+      ).toBeInTheDocument();
+      await passes(3 * QUEUE_REFRESH_INTERVAL_MS);
+      expect(requests).toHaveLength(1);
+
+      connection('online');
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(2)]);
+      });
+      expect(requests).toHaveLength(2);
+      expect(screen.queryByText(/You are offline/)).not.toBeInTheDocument();
+    });
+
+    it('reads again when the window regains focus, and every trigger meanwhile shares that read', async () => {
+      /** Gates the next reads wait for, in order. */
+      const gates: ReturnType<typeof aGate>[] = [];
+      const requests = serveQueue(async () => {
+        const items = [noticeAction(requests.length)];
+        await gates.shift()?.pass();
+        return json(actionPage(items));
+      });
+      renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+
+      const held = aGate();
+      gates.push(held);
+      windowRegainsFocus();
+      await held.received;
+      expect(requests).toHaveLength(2);
+
+      // Focus again, the tab hidden and shown, the interval: none cancels or repeats the read.
+      windowRegainsFocus();
+      tabBecomes('hidden');
+      tabBecomes('visible');
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      expect(requests).toHaveLength(2);
+      expect(requests[1]?.signal.aborted).toBe(false);
+
+      held.release();
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(2)]);
+      });
+      expect(requests).toHaveLength(2);
+    });
+
+    it('stops reading once the page is left, cancelling a read on its way', async () => {
+      server.use(http.get('*/api/voyages', () => HttpResponse.json({ items: [] })));
+      const gates: ReturnType<typeof aGate>[] = [];
+      const requests = serveQueue(async () => {
+        await gates.shift()?.pass();
+        return json(actionPage([noticeAction(1)]));
+      });
+      const { router } = renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+      const held = aGate();
+      gates.push(held);
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      await held.received;
+
+      await act(() => router.navigate('/voyages'));
+      expect(await screen.findByRole('heading', { name: 'Voyages' })).toBeInTheDocument();
+      expect(requests[1]?.signal.aborted).toBe(true);
+      held.release();
+
+      await passes(3 * QUEUE_REFRESH_INTERVAL_MS);
+      windowRegainsFocus();
+      tabBecomes('hidden');
+      tabBecomes('visible');
+      connection('offline');
+      connection('online');
+      expect(requests).toHaveLength(2);
+    });
+
+    it("stops reading for Ana once another tab has signed in as Claire, and reads Claire's alone", async () => {
+      const rendered = renderRoute('/actions', { signedInAs: ana, accounts: [ana, claire] });
+      const { session, queryClient } = rendered;
+      const otherTab = anotherTab(queryClient);
+      const readFor: (string | undefined)[] = [];
+      serveQueue(() => {
+        readFor.push(session.current?.user.fullName);
+        return json(actionPage(session.current === claire ? [aReviewAction()] : [noticeAction(1)]));
+      });
+      expect(await headings()).toEqual(['Acknowledge ETA notice']);
+
+      await anotherTabSignsInAs(otherTab, rendered, claire);
+      expect(await headings()).toEqual(['Review document']);
+      const before = readFor.length;
+      await passes(2.5 * QUEUE_REFRESH_INTERVAL_MS);
+
+      // One page reads, for Claire, once per interval: nothing is left over from Ana's.
+      await waitFor(() => {
+        expect(readFor.slice(before)).toEqual(['Claire Morel', 'Claire Morel']);
+      });
+      await passes(1_000);
+      expect(readFor.slice(before)).toEqual(['Claire Morel', 'Claire Morel']);
+    });
+
+    it('keeps a single reader when the same user signs out and back in', async () => {
+      server.use(http.get('*/api/voyages', () => HttpResponse.json({ items: [] })));
+      const requests = serveQueue(() => json(actionPage([noticeAction(1)])));
+      const { user, router } = renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+
+      await user.click(screen.getByRole('button', { name: 'Sign out' }));
+      await user.type(await screen.findByLabelText(/Email/), claire.user.email);
+      await user.type(screen.getByLabelText(/Password/), 'tradeflow-demo');
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+      expect(await screen.findByText(claire.user.fullName)).toBeInTheDocument();
+      await act(() => router.navigate('/actions'));
+      await queueList();
+      const before = requests.length;
+
+      await passes(QUEUE_REFRESH_INTERVAL_MS + 1_000);
+      await waitFor(() => {
+        expect(requests.length).toBe(before + 1);
+      });
+      await passes(1_000);
+      expect(requests.length).toBe(before + 1);
+    });
+
+    it('restarts from the first page on a refresh, and continues from its cursor, never an old one', async () => {
+      let refreshed = false;
+      const requests = serveQueue(({ cursor }) => {
+        if (!refreshed) {
+          return json(
+            cursor ? actionPage([noticeAction(2)]) : actionPage([noticeAction(1)], 'after-1'),
+          );
+        }
+        return json(
+          cursor === 'after-3'
+            ? actionPage([noticeAction(4)])
+            : actionPage([noticeAction(3)], 'after-3', minute(1)),
+        );
+      });
+      const { user } = renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+      await user.click(screen.getByRole('button', { name: 'Load more' }));
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(1), noticeOf(2)]);
+      });
+
+      refreshed = true;
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      // The refreshed first page alone: never next to a page read before it.
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(3)]);
+      });
+
+      await user.click(screen.getByRole('button', { name: 'Load more' }));
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(3), noticeOf(4)]);
+      });
+      expect(requests.map(({ cursor }) => cursor)).toEqual([null, 'after-1', null, 'after-3']);
+    });
+
+    it('never adds a page asked for before a refresh, even when it answers after it', async () => {
+      const late = aGate();
+      let refreshed = false;
+      const requests = serveQueue(async ({ cursor }) => {
+        if (cursor === 'after-1') {
+          await late.pass();
+          return json(actionPage([noticeAction(2)]));
+        }
+        return json(
+          refreshed
+            ? actionPage([noticeAction(3)], 'after-3', minute(1))
+            : actionPage([noticeAction(1)], 'after-1'),
+        );
+      });
+      const { user } = renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+      await user.click(screen.getByRole('button', { name: 'Load more' }));
+      await late.received;
+      expect(screen.getByRole('button', { name: 'Load more' })).toBeDisabled();
+
+      refreshed = true;
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(3)]);
+      });
+      // The page asked for after the old first page is cancelled, and its answer goes nowhere.
+      expect(requests[1]?.signal.aborted).toBe(true);
+      late.release();
+      await passes(100);
+
+      expect(await linkedNotices()).toEqual([noticeOf(3)]);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled();
+      expect(requests.map(({ cursor }) => cursor)).toEqual([null, 'after-1', null]);
+    });
+
+    describe('a notice whose deadline passes, with nothing written', () => {
+      /** The API's clock: whether it reads past the notice's deadline. */
+      let pastDeadline = false;
+      beforeEach(() => {
+        pastDeadline = false;
+      });
+
+      function serveDeadline() {
+        return serveQueue(({ overdue }) => {
+          const notice = aNoticeAction({ overdue: pastDeadline });
+          const items = overdue === 'true' && !pastDeadline ? [] : [notice];
+          return json(actionPage(items, null, pastDeadline ? minute(1) : minute(0)));
+        });
+      }
+
+      it('shows it overdue once a read says so', async () => {
+        serveDeadline();
+        renderRoute('/actions', { signedInAs: claire });
+        const [item] = await queueItems();
+        expect(within(item as HTMLElement).queryByText('Overdue')).not.toBeInTheDocument();
+
+        pastDeadline = true;
+        await passes(QUEUE_REFRESH_INTERVAL_MS);
+
+        await waitFor(async () => {
+          const [refreshed] = await queueItems();
+          expect(within(refreshed as HTMLElement).getByText('Overdue')).toBeInTheDocument();
+        });
+      });
+
+      it('brings it into the overdue filter once a read says so', async () => {
+        const requests = serveDeadline();
+        renderRoute('/actions?overdue=true', { signedInAs: claire });
+        expect(await screen.findByText('No actions match these filters')).toBeVisible();
+
+        pastDeadline = true;
+        await passes(QUEUE_REFRESH_INTERVAL_MS);
+
+        expect(await headings()).toEqual(['Acknowledge ETA notice']);
+        expect(requests.every(({ overdue }) => overdue === 'true')).toBe(true);
+      });
+    });
+
+    it('keeps what it showed when a refresh fails, says it may be out of date, and recovers', async () => {
+      let fail = false;
+      let reads = 0;
+      serveQueue(() => {
+        reads += 1;
+        if (fail) return problemResponse(500, 'Boom');
+        return json(actionPage([noticeAction(reads)], null, minute(reads - 1)));
+      });
+      const { user } = renderRoute('/actions', { signedInAs: claire });
+      await queueList();
+
+      fail = true;
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Actions could not be refreshed');
+      expect(alert).not.toHaveTextContent('Boom');
+      expect(await linkedNotices()).toEqual([noticeOf(1)]);
+      expect(
+        screen.getByText(
+          /Last updated 18 Oct 2030, 09:00 GMT-3\. It could not be checked since, so it may be out of date\./,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/checked again every 30 seconds/)).not.toBeInTheDocument();
+
+      fail = false;
+      await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+
+      await waitFor(async () => {
+        expect(await linkedNotices()).toEqual([noticeOf(3)]);
+      });
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText(/Updated 18 Oct 2030, 09:02 GMT-3/)).toBeInTheDocument();
+    });
+
+    it('replaces a read on its way when the queue is invalidated, and fetches no other filter', async () => {
+      let held: ReturnType<typeof aGate> | undefined;
+      let changed = false;
+      const requests = serveQueue(async () => {
+        // The answer is decided when the request arrives, as on the real server.
+        const items = changed ? [] : [aNoticeAction()];
+        const gate = held;
+        held = undefined;
+        await gate?.pass();
+        return json(actionPage(items));
+      });
+      const { queryClient } = renderRoute('/actions?type=ACKNOWLEDGE_NOTICE', {
+        signedInAs: claire,
+      });
+      await queueList();
+      // Another filter read earlier, cached though nothing shows it.
+      const scope = ['protected', scopeOf(claire)] as const;
+      const otherFilter = [...actionQueueKey(scope), {}];
+      queryClient.setQueryData(otherFilter, actionPage([aReviewAction()]));
+
+      const stale = aGate();
+      held = stale;
+      await passes(QUEUE_REFRESH_INTERVAL_MS);
+      await stale.received;
+
+      // A command commits after that read arrived; its success invalidates the queue.
+      changed = true;
+      await act(() => invalidateActionQueue(queryClient, scope));
+      expect(requests[1]?.signal.aborted).toBe(true);
+      expect(await screen.findByText('No actions match these filters')).toBeVisible();
+
+      stale.release();
+      await passes(100);
+      expect(screen.getByText('No actions match these filters')).toBeVisible();
+      expect(requests).toHaveLength(3);
+      expect(requests.every(({ type }) => type === 'ACKNOWLEDGE_NOTICE')).toBe(true);
+      expect(queryClient.getQueryState(otherFilter)?.isInvalidated).toBe(true);
+    });
+  });
+
+  describe('after a command on a voyage’s page', () => {
+    const asBuyer = aCounterpartyContract({ side: 'BUYER' });
+    const notice = aNotice({ contract: asBuyer });
+    const bill = { ...aDocument(), contract: asBuyer };
+
+    /** Claire's side of contract 1: a notice to acknowledge and a file to decide on. */
+    function serveVoyage() {
+      const state = { notices: [notice] };
+      server.use(
+        http.get(`*/api/voyages/${voyage.id}`, () => HttpResponse.json(voyage)),
+        http.get(`*/api/voyages/${voyage.id}/trade-string`, () =>
+          HttpResponse.json(aTradeString()),
+        ),
+        http.get(`*/api/voyages/${voyage.id}/my-contracts`, () =>
+          HttpResponse.json(contractList(asBuyer)),
+        ),
+        http.get(`*/api/voyages/${voyage.id}/notices`, () =>
+          HttpResponse.json({ items: state.notices }),
+        ),
+        http.get(`*/api/voyages/${voyage.id}/documentary-instructions`, () =>
+          HttpResponse.json({ items: [{ ...anInstruction(), contract: asBuyer }] }),
+        ),
+        http.get(`*/api/voyages/${voyage.id}/documents`, () =>
+          HttpResponse.json({ items: [bill] }),
+        ),
+        http.get(`*/api/voyages/${voyage.id}/timeline`, () => HttpResponse.json(emptyTimeline)),
+      );
+      return state;
+    }
+
+    /** The acknowledgement, held until released; the server commits it as it answers. */
+    function serveAcknowledgement(state: { notices: Notice[] }) {
+      const gate = aGate();
+      const done = acknowledged(notice, claireActor, '2030-10-16T13:30:00.000Z');
+      server.use(
+        http.post(`*/api/voyages/${voyage.id}/notices/${notice.id}/acknowledgement`, async () => {
+          await gate.pass();
+          state.notices = [done];
+          return HttpResponse.json(done);
+        }),
+      );
+      return gate;
+    }
+
+    it('reads the queue on screen again once a command sent before it was shown succeeds', async () => {
+      const state = serveVoyage();
+      const acknowledgement = serveAcknowledgement(state);
+      const requests = serveQueue(() =>
+        json(
+          state.notices.some(({ status }) => status === 'ISSUED')
+            ? actionPage([aNoticeAction()])
+            : emptyActionPage(),
+        ),
+      );
+      const { user, router } = renderRoute(`/voyages/${voyage.id}`, { signedInAs: claire });
+
+      await user.click(await screen.findByRole('button', { name: 'Acknowledge receipt' }));
+      await acknowledgement.received;
+      // Claire goes to the Action Center before the answer arrives: the queue still lists it.
+      await act(() => router.navigate('/actions'));
+      expect(await headings()).toEqual(['Acknowledge ETA notice']);
+
+      acknowledgement.release();
+      expect(await screen.findByText('Nothing is waiting for your organization')).toBeVisible();
+      expect(requests).toHaveLength(2);
+    });
+
+    it('keeps a decision being drafted, and its version, when a command invalidates the queue', async () => {
+      const state = serveVoyage();
+      const acknowledgement = serveAcknowledgement(state);
+      const { user, queryClient } = renderRoute(`/voyages/${voyage.id}`, {
+        signedInAs: claire,
+      });
+      const form = await screen.findByRole('form', {
+        name: 'Review version 1 of the bill of lading',
+      });
+      const queue = cachedActionQueue(queryClient, claire);
+      await user.click(within(form).getByRole('radio', { name: 'Reject' }));
+      const reason = within(form).getByRole('textbox', { name: /Reason for rejecting/ });
+      await user.type(reason, 'The consignee does not match.');
+
+      await user.click(screen.getByRole('button', { name: 'Acknowledge receipt' }));
+      acknowledgement.release();
+      await waitFor(() => {
+        expect(queue.invalidated()).toBe(true);
+      });
+
+      expect(reason).toHaveValue('The consignee does not match.');
+      expect(within(form).getByRole('radio', { name: 'Reject' })).toBeChecked();
+      expect(screen.getByRole('form', { name: 'Review version 1 of the bill of lading' })).toBe(
+        form,
+      );
+      expect(queue.requests()).toBe(0);
     });
   });
 });

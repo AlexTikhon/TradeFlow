@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { IssueNoticeRequest, Notice, NoticeListResponse } from '@tradeflow/contracts';
 import { ApiError } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
+import { invalidateActionQueue } from '../../../shared/cache/action-queue';
 import {
   currentSessionEpoch,
   isCurrentSession,
@@ -23,6 +24,7 @@ import { voyageQueries } from '../api/voyage.queries';
  *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
  *   no completion callback and shows no error: even if the same user has signed back in
  *   meanwhile, and even if the component that issued it has unmounted.
+ * - A success in that session also invalidates its Action Center queue (`invalidateActionQueue`).
  * - Writes are never retried automatically. The user decides whether to try again.
  */
 
@@ -39,6 +41,8 @@ function useNoticeCache(voyageId: string) {
     stillCurrent: (epoch: SessionEpoch) =>
       isCurrentSession(queryClient, epoch) && isCurrentIdentity(queryClient, identity),
     refresh: () => queryClient.invalidateQueries({ queryKey }),
+    /** This identity's Action Center queue, which the command may have changed. */
+    refreshActionQueue: () => invalidateActionQueue(queryClient, scope),
     replace: (notice: Notice) => {
       queryClient.setQueryData<NoticeListResponse>(
         queryKey,
@@ -61,7 +65,9 @@ export function useIssueNotice(voyageId: string) {
       sendForCurrentSession(cache.queryClient, epoch, () => issueNotice(voyageId, request)),
     // Runs even if the form has unmounted meanwhile: the list must show the new notice.
     onSuccess: (_notice, { epoch }) => {
-      if (cache.stillCurrent(epoch)) void cache.refresh();
+      if (!cache.stillCurrent(epoch)) return;
+      void cache.refresh();
+      void cache.refreshActionQueue();
     },
   });
 
@@ -104,6 +110,7 @@ export function useAcknowledgeNotice(voyageId: string) {
       if (!cache.stillCurrent(epoch)) return;
       cache.replace(notice);
       void cache.refresh();
+      void cache.refreshActionQueue();
     },
     onError: (error, { epoch }) => {
       if (error instanceof ApiError && error.status === 409 && cache.stillCurrent(epoch)) {

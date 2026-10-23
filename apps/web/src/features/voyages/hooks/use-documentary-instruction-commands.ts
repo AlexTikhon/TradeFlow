@@ -6,6 +6,7 @@ import type {
 } from '@tradeflow/contracts';
 import { ApiError } from '../../../shared/api/http-client';
 import { isCurrentIdentity, useIdentity, useProtectedScope } from '../../../shared/auth/identity';
+import { invalidateActionQueue } from '../../../shared/cache/action-queue';
 import {
   currentSessionEpoch,
   isCurrentSession,
@@ -30,6 +31,7 @@ import { voyageQueries } from '../api/voyage.queries';
  *   arrives once that session has ended writes nothing to the cache, refreshes nothing, calls
  *   no completion callback and shows no error: even if the same user has signed back in
  *   meanwhile, and even if the component that issued it has unmounted.
+ * - A success in that session also invalidates its Action Center queue (`invalidateActionQueue`).
  * - Writes are never retried automatically. A 412 (the instructions changed since the user's
  *   read) is reported, never resolved by re-sending with a newer version: only the user, having
  *   seen the newer version, may decide to base a write on it.
@@ -52,6 +54,8 @@ function useInstructionCache(voyageId: string) {
     stillCurrent: (epoch: SessionEpoch) =>
       isCurrentSession(queryClient, epoch) && isCurrentIdentity(queryClient, identity),
     refresh: () => queryClient.invalidateQueries({ queryKey }),
+    /** This identity's Action Center queue, which the command may have changed. */
+    refreshActionQueue: () => invalidateActionQueue(queryClient, scope),
     /** Puts `instruction` in the list, in contract order, unless the list holds a newer one. */
     store: (instruction: DocumentaryInstruction) => {
       queryClient.setQueryData<DocumentaryInstructionListResponse>(queryKey, (list) => {
@@ -92,6 +96,7 @@ export function useSubmitInstruction(voyageId: string) {
       if (!cache.stillCurrent(epoch)) return;
       cache.store(instruction);
       void cache.refresh();
+      void cache.refreshActionQueue();
     },
   });
 
@@ -145,6 +150,7 @@ export function useAcknowledgeRevision(voyageId: string) {
       if (!cache.stillCurrent(epoch)) return;
       cache.store(instruction);
       void cache.refresh();
+      void cache.refreshActionQueue();
     },
     onError: (error, { epoch }) => {
       if (
