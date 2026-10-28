@@ -84,5 +84,6 @@ sign-in.
 - `crypto.argon2` is new in Node (24.7). The PHC format is library-independent, so moving to
   another argon2 implementation would not require rehashing.
 - **Known gaps, deliberately out of scope for this milestone:** sign-in rate limiting and lockout
-  (needs a shared store, which arrives with Redis), password reset and user administration, MFA,
+  (needs a shared store, which arrives with Redis; an in-process attempt budget and concurrency
+  cap were added later, without lockout, by [ADR 0018](0018-sign-in-admission.md)), password reset and user administration, MFA,
   idle timeout, and an audit trail of sign-ins (arrives with the audit milestone).

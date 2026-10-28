@@ -23,6 +23,7 @@ with a link to its replacement.
 | 0015 | [Voyage event streams: SSE invalidation signals, in-process and best effort (MVP)](0015-voyage-event-streams.md)           | Accepted                                     |
 | 0016 | [Initial voyage setup: one atomic command records a new voyage's whole trade chain](0016-initial-voyage-setup.md)          | Accepted                                     |
 | 0017 | [Action Center: a read-only projection of what each organization owes, across voyages](0017-action-center.md)              | Proposed (endpoint, web page and freshness)  |
+| 0018 | [Sign-in admission: a per-address attempt budget and a concurrency cap, in process](0018-sign-in-admission.md)             | Accepted                                     |
 
 Template: **Context** (forces at play), **Decision**, **Alternatives considered**,
 **Consequences** (good and bad).

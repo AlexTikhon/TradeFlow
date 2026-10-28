@@ -8,6 +8,7 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -17,6 +18,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { type CurrentUser, type SignInRequest, SignInRequestSchema } from '@tradeflow/contracts';
@@ -27,6 +29,7 @@ import { ApiSessionAuth, CurrentPrincipal, Public } from './auth.decorators.js';
 import { AuthService } from './auth.service.js';
 import type { Principal } from './principal.js';
 import { SessionCookie } from './session-cookie.js';
+import { SignInAdmissionGuard } from './sign-in-admission.guard.js';
 
 const problem = schemaRef('ProblemDetails');
 
@@ -40,6 +43,7 @@ export class AuthController {
 
   @Public()
   @Post('sign-in')
+  @UseGuards(SignInAdmissionGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Sign in with email and password',
@@ -50,6 +54,19 @@ export class AuthController {
   @ApiBadRequestResponse({ description: 'Invalid request', schema: problem })
   @ApiUnauthorizedResponse({ description: 'Email or password is incorrect', schema: problem })
   @ApiForbiddenResponse({ description: 'Cross-site request', schema: problem })
+  @ApiTooManyRequestsResponse({
+    description:
+      'Refused before any credential was checked: this client address has used its sign-in ' +
+      'attempts for the current window, or too many sign-ins are in progress. No cookie is set ' +
+      'or cleared, and a session the browser already has stays valid.',
+    schema: problem,
+    headers: {
+      'Retry-After': {
+        description: 'Whole seconds to wait before trying again.',
+        schema: { type: 'integer', minimum: 1 },
+      },
+    },
+  })
   async signIn(
     @Body(new ZodValidationPipe(SignInRequestSchema)) body: SignInRequest,
     @Req() request: Request,

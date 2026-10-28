@@ -170,6 +170,7 @@ extraction ([README](../README.md#roadmap)).
   is proposed there. The [fresh-voyage walkthrough](demo.md#walkthrough-2-a-fresh-voyage) has
   not been run at all, by a script or a person. In a browser, voyage creation and setup have run
   only in the one Chromium test, which stops at the buyer's first instructions.
-- **Other known gaps:** no sign-in rate limiting or lockout, no SSO, no password reset
+- **Other known gaps:** sign-in is limited only in process, per client address (no lockout, no
+  limit shared between instances, [ADR 0018](decisions/0018-sign-in-admission.md)), no SSO, no password reset
   ([ADR 0007](decisions/0007-cookie-sessions.md)). Seeded notice times are relative to when the
   seed ran, so their awaiting, overdue and acknowledged states drift until the next seed.

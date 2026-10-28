@@ -135,6 +135,36 @@ describe('OpenAPI document', () => {
     }
   });
 
+  it('documents the sign-in refusals, 429 with Retry-After included', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      responses: Record<
+        string,
+        { content?: Record<string, unknown>; headers?: Record<string, { schema?: unknown }> }
+      >;
+    };
+    const document = response.body as { paths: Record<string, Record<string, Operation>> };
+
+    const signIn = document.paths['/api/auth/sign-in']?.post;
+    expect(Object.keys(signIn?.responses ?? {}).sort()).toEqual(
+      ['200', '400', '401', '403', '429'].sort(),
+    );
+    expect(signIn?.responses['429']?.content?.['application/json']).toEqual({
+      schema: { $ref: '#/components/schemas/ProblemDetails' },
+    });
+    expect(signIn?.responses['429']?.headers?.['Retry-After']?.schema).toEqual({
+      type: 'integer',
+      minimum: 1,
+    });
+    // Only sign-in is admission-controlled.
+    for (const [path, method] of [
+      ['/api/auth/sign-out', 'post'],
+      ['/api/auth/me', 'get'],
+    ] as const) {
+      expect(document.paths[path]?.[method]?.responses).not.toHaveProperty('429');
+    }
+  });
+
   it('documents voyage creation with a closed request schema and its failure responses', async () => {
     const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
     type Operation = {

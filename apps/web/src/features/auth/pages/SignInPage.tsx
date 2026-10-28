@@ -37,6 +37,11 @@ function describeSignInError(error: Error): string {
   if (isUnauthenticated(error)) {
     return 'Email or password is incorrect.';
   }
+  // Too many attempts from this address, or the server is busy (ADR 0018). Nothing is retried
+  // for the user: the form keeps what they typed until they send it again.
+  if (error instanceof ApiError && error.status === 429) {
+    return 'Too many sign-in attempts. Wait a minute, then try again.';
+  }
   if (error instanceof ApiError && error.status < 500) {
     return error.message;
   }

@@ -9,11 +9,27 @@ import {
   ACTION_CENTER_CLOCK,
   type Clock,
 } from '../../src/modules/action-center/action-center.service.js';
+import {
+  DEFAULT_SIGN_IN_ADMISSION_OPTIONS,
+  SIGN_IN_ADMISSION_OPTIONS,
+  type SignInAdmissionOptions,
+} from '../../src/modules/auth/sign-in-admission.js';
 import { VoyageEventBus } from '../../src/modules/voyages/voyage-event-bus.js';
 import {
   VOYAGE_EVENT_STREAM_OPTIONS,
   type VoyageEventStreamOptions,
 } from '../../src/modules/voyages/voyage-event-streams.js';
+
+/**
+ * Sign-in admission for suites that do not test it. Every request in these suites comes from one
+ * loopback address, and many sign in a dozen users per test, which would spend the production
+ * budget (20 a minute) on setup. Only that budget is raised: the guard, window, storage bound and
+ * concurrency cap are the production ones. The admission suite passes the production options.
+ */
+const SUITE_SIGN_IN_ADMISSION: SignInAdmissionOptions = {
+  ...DEFAULT_SIGN_IN_ADMISSION_OPTIONS,
+  attemptsPerWindow: 10_000,
+};
 
 export interface TestApp {
   app: INestApplication;
@@ -31,6 +47,8 @@ export interface TestAppOptions {
   eventStreams?: VoyageEventStreamOptions;
   /** The Action Center's clock instead of the real one (one a test can set, say). */
   actionCenterClock?: Clock;
+  /** Sign-in admission options instead of the suites' default (see SUITE_SIGN_IN_ADMISSION). */
+  signInAdmission?: SignInAdmissionOptions;
 }
 
 /** Boots the real application module and HTTP pipeline against the test database. */
@@ -39,8 +57,10 @@ export async function createTestApp({
   eventBus,
   eventStreams,
   actionCenterClock,
+  signInAdmission = SUITE_SIGN_IN_ADMISSION,
 }: TestAppOptions = {}): Promise<TestApp> {
   const builder = Test.createTestingModule({ imports: [AppModule] });
+  builder.overrideProvider(SIGN_IN_ADMISSION_OPTIONS).useValue(signInAdmission);
   if (storage) {
     builder.overrideProvider(DocumentStorage).useValue(storage);
   }

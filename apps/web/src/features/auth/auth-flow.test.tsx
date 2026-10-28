@@ -1,8 +1,8 @@
 import { QueryObserver } from '@tanstack/react-query';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
-import type { CurrentUser, VoyageListResponse } from '@tradeflow/contracts';
+import type { CurrentUser, ProblemDetails, VoyageListResponse } from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { aCurrentUser, anotherUser, TEST_PASSWORD } from '../../test/fixtures/auth';
 import { aVoyageSummary } from '../../test/fixtures/voyages';
 import { type FakeSession, problemResponse, server } from '../../test/msw-server';
@@ -143,6 +143,60 @@ describe('authentication', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Email or password is incorrect.');
     expect(router.state.location.pathname).toBe('/sign-in');
+  });
+
+  it('asks the user to wait after a 429, keeps what they typed and sends nothing by itself', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { router, user, session } = renderRoute('/sign-in', {
+        signedInAs: null,
+        accounts: [ana],
+      });
+      serveScopedVoyages(session);
+      const sent: Request[] = [];
+      let refuse = true;
+      server.use(
+        http.post('*/api/auth/sign-in', ({ request }) => {
+          sent.push(request);
+          if (!refuse) return undefined; // on to the fake session's handler
+          const problem: ProblemDetails = {
+            type: 'about:blank',
+            title: 'Too Many Requests',
+            status: 429,
+            detail: 'Too many sign-in attempts. Try again later.',
+            instance: '/api/auth/sign-in',
+          };
+          return HttpResponse.json(problem, {
+            status: 429,
+            headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '60' },
+          });
+        }),
+      );
+
+      await signInWith(user, ana.user.email);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Too many sign-in attempts. Wait a minute, then try again.',
+      );
+      expect(router.state.location.pathname).toBe('/sign-in');
+      expect(screen.getByLabelText(/Email/)).toHaveValue(ana.user.email);
+      expect(screen.getByLabelText(/Password/)).toHaveValue(TEST_PASSWORD);
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+
+      // Well past Retry-After, nothing has been sent again.
+      await act(() => vi.advanceTimersByTimeAsync(120_000));
+      expect(sent).toHaveLength(1);
+      expect(session.signInRequests).toBe(0);
+      expect(screen.getByLabelText(/Email/)).toHaveValue(ana.user.email);
+
+      // The user sends it again, and only then is it sent.
+      refuse = false;
+      await user.click(screen.getByRole('button', { name: 'Sign in' }));
+      expect(await screen.findByRole('link', { name: 'TF-ANA-ONLY' })).toBeInTheDocument();
+      expect(sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('validates the form before sending anything', async () => {

@@ -11,6 +11,7 @@ describe('loadConfig', () => {
       port: 4000,
       databaseUrl: 'postgresql://u:p@localhost:5433/tradeflow',
       session: { ttlMs: 8 * 60 * 60_000, secureCookie: false },
+      signIn: { attemptsPerMinute: 20 },
       documentStorage: { directory: resolve('var/documents') },
     });
   });
@@ -36,6 +37,18 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ DATABASE_URL: 'mysql://localhost/db', PORT: 'abc' })).toThrow(
       /DATABASE_URL[\s\S]*PORT|PORT[\s\S]*DATABASE_URL/,
     );
+  });
+
+  it('honours a sign-in budget of at least one attempt a minute', () => {
+    const base = { DATABASE_URL: 'postgresql://u:p@db/t' };
+    expect(loadConfig({ ...base, SIGN_IN_ATTEMPTS_PER_MINUTE: '50' }).signIn).toEqual({
+      attemptsPerMinute: 50,
+    });
+    for (const value of ['0', '-1', '2.5', 'many']) {
+      expect(() => loadConfig({ ...base, SIGN_IN_ATTEMPTS_PER_MINUTE: value })).toThrow(
+        /SIGN_IN_ATTEMPTS_PER_MINUTE/,
+      );
+    }
   });
 
   it('rejects a session lifetime outside the allowed range', () => {

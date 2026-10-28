@@ -10,6 +10,7 @@ import {
 import { PROBLEM_CONTENT_TYPE, type ProblemDetails, ProblemTypes } from '@tradeflow/contracts';
 import type { Request, Response } from 'express';
 import { RequestValidationException } from './request-validation.exception.js';
+import { TooManyRequestsException } from './too-many-requests.exception.js';
 import { discardUnreadBody } from './unread-body.js';
 
 /**
@@ -37,6 +38,9 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     // otherwise the connection is reset under the client and the answer never arrives.
     void discardUnreadBody(request, response).then(() => {
       if (response.headersSent || response.destroyed) return;
+      if (exception instanceof TooManyRequestsException) {
+        response.setHeader('Retry-After', String(exception.retryAfterSeconds));
+      }
       response.status(problem.status).type(PROBLEM_CONTENT_TYPE).json(problem);
     });
   }

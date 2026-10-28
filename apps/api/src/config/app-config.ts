@@ -17,6 +17,9 @@ const EnvironmentSchema = z
       .min(5)
       .max(7 * 24 * 60)
       .default(8 * 60),
+    // Sign-in attempts per client address per minute (ADR 0018). Raise it only where many
+    // users share one address, such as behind a proxy whose hops are not trusted.
+    SIGN_IN_ATTEMPTS_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(20),
     // Private directory for uploaded document bytes (ADR 0013). Never served statically.
     DOCUMENT_STORAGE_DIR: z.string().trim().min(1).optional(),
   })
@@ -41,6 +44,10 @@ export interface AppConfig {
     /** Secure (HTTPS-only) cookies everywhere except local development and tests over HTTP. */
     secureCookie: boolean;
   };
+  signIn: {
+    /** Attempts one client address may make per one-minute window (ADR 0018). */
+    attemptsPerMinute: number;
+  };
   documentStorage: {
     /** Absolute path of the private directory that holds uploaded document bytes. */
     directory: string;
@@ -55,12 +62,20 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (!result.success) {
     throw new Error(`Invalid environment configuration:\n${z.prettifyError(result.error)}`);
   }
-  const { NODE_ENV, PORT, DATABASE_URL, SESSION_TTL_MINUTES, DOCUMENT_STORAGE_DIR } = result.data;
+  const {
+    NODE_ENV,
+    PORT,
+    DATABASE_URL,
+    SESSION_TTL_MINUTES,
+    SIGN_IN_ATTEMPTS_PER_MINUTE,
+    DOCUMENT_STORAGE_DIR,
+  } = result.data;
   return {
     nodeEnv: NODE_ENV,
     port: PORT,
     databaseUrl: DATABASE_URL,
     session: { ttlMs: SESSION_TTL_MINUTES * 60_000, secureCookie: NODE_ENV === 'production' },
+    signIn: { attemptsPerMinute: SIGN_IN_ATTEMPTS_PER_MINUTE },
     documentStorage: {
       directory: resolve(DOCUMENT_STORAGE_DIR ?? DEFAULT_DOCUMENT_STORAGE_DIR),
     },

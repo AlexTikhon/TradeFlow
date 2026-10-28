@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { CurrentUser, SignInRequest } from '@tradeflow/contracts';
+import { TooManyRequestsException } from '../../common/http/too-many-requests.exception.js';
 import { APP_CONFIG, type AppConfig } from '../../config/app-config.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { hashPassword, verifyPassword } from './password.js';
@@ -10,6 +11,7 @@ import {
   hashSessionToken,
   isWellFormedSessionToken,
 } from './session-token.js';
+import { SIGN_IN_BUSY_RETRY_AFTER_MS, SignInAdmission } from './sign-in-admission.js';
 
 export interface SignInResult {
   /** The raw token. It goes into the cookie and is never stored or logged. */
@@ -26,13 +28,36 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly admission: SignInAdmission,
   ) {}
 
   /**
    * Verifies credentials and opens a new session. Returns null for every kind of failure
    * (unknown email, wrong password, user without a password) so callers cannot tell them apart.
+   *
+   * Holds one of a few sign-in slots from before the credential lookup until it returns or
+   * throws (ADR 0018), so password hashing cannot pile up; with every slot taken it refuses at
+   * once, touching nothing.
    */
   async signIn(
+    credentials: SignInRequest,
+    previousToken: string | undefined,
+  ): Promise<SignInResult | null> {
+    const leave = this.admission.enter();
+    if (!leave) {
+      throw new TooManyRequestsException(
+        'Too many sign-ins are in progress. Try again shortly.',
+        SIGN_IN_BUSY_RETRY_AFTER_MS,
+      );
+    }
+    try {
+      return await this.verifyAndOpenSession(credentials, previousToken);
+    } finally {
+      leave();
+    }
+  }
+
+  private async verifyAndOpenSession(
     { email, password }: SignInRequest,
     previousToken: string | undefined,
   ): Promise<SignInResult | null> {

@@ -147,6 +147,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           NODE_ENV: 'test',
           PORT: String(apiPort),
           DOCUMENT_STORAGE_DIR: documents,
+          // Every browser context reaches the API through the one web server proxy, so the
+          // whole run shares one client address: the production budget (20 a minute) would
+          // refuse the suite's own sign-ins. Admission itself stays on (ADR 0018).
+          SIGN_IN_ATTEMPTS_PER_MINUTE: '1000',
         },
         logFile: join(logsDir, 'api.log'),
       }),
