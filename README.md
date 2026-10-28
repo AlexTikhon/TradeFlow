@@ -22,12 +22,15 @@ Next come further notices, deadlines and workflow.
 
 ## Status: original MVP complete
 
-The eight original MVP areas are implemented and verified in Linux CI, and the demo has been
-driven through a real browser by a script (not yet by a person). `pnpm demo` starts a fresh,
-isolated demo with one command, and `pnpm demo:verify` drives its fresh-voyage walkthrough in
-Chromium (passed locally, not in CI):
-[acceptance summary](docs/mvp-status.md) (verified commit, CI run, coverage by test layer,
-limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records).
+The eight original MVP areas are implemented and verified in Linux CI. The latest hosted run
+passed on `2ad0cd1`, the Action Center included. As of 2026-10-28, two later commits have passed
+locally but have no hosted run yet: sign-in admission (`42ee8f2`) and the one-command demo
+(`b91f477`). `pnpm demo` starts a fresh, isolated demo with one command. `pnpm demo:verify`
+drives its fresh-voyage walkthrough in Chromium; CI is configured to run it as the `demo` job,
+which has not run on a hosted runner yet. No person has run a walkthrough.
+[Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
+by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
+[handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).
 
 | Area         | Delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -44,7 +47,7 @@ limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records).
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `GET .../trade-string`, `POST .../trade-string` (one-time setup of a new voyage, [ADR 0016](docs/decisions/0016-initial-voyage-setup.md), proposed), `GET /api/organizations?search=` (operators), `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/action-items` (the organization's open actions across voyages, [ADR 0017](docs/decisions/0017-action-center.md), proposed), `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order (and, for operators of the exporter of a new voyage, a form to set it up once: search, order, review), an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices, instructions, documents and timeline kept current from the voyage's event stream (polling while it is down; a chosen file or a decision being made is never re-based, re-sent or re-targeted by a push), an Action Center (`/actions`: the organization's open actions across voyages, filters in the URL, a page at a time, refreshed on its own) whose items open the exact notice, revision or file version on its voyage's page (history when superseded or replaced, never a command), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 1,417 Vitest tests (authorization, transactions, races and constraints tested against real PostgreSQL) and 14 Chromium end-to-end tests run separately (`pnpm test:e2e`), as counted in a local run on 2026-10-23 ([MVP status](docs/mvp-status.md#local-verification-2026-10-23)), GitHub Actions CI running the checks and the smoke suite as separate jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 1,447 Vitest tests (authorization, transactions, races and constraints tested against real PostgreSQL), 14 Chromium end-to-end tests run separately (`pnpm test:e2e`) and the one-test demo walkthrough (`pnpm demo:verify`), as counted locally on `b91f477` on 2026-10-28 ([MVP status](docs/mvp-status.md#local-verification-of-b91f477-2026-10-28)); GitHub Actions CI runs the checks, the smoke suite and the demo walkthrough as three jobs (the third configured, not yet run)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 Voyage creation, the one-time setup of a new voyage's trade string, ETA notices, documentary instructions,
 documents and their review write data. Seeded trade strings are read-only; an exporter's operator sets up a
@@ -108,7 +111,7 @@ packages/
   contracts/           Zod schemas + inferred types shared by api and web
 e2e/                   Playwright smoke tests in Chromium (support/: run setup, fixtures, proxy)
   demo/                `pnpm demo` and `pnpm demo:verify`: one-command demo, automated walkthrough
-docs/                  architecture, domain model, ADRs, demo, MVP status
+docs/                  architecture, domain model, ADRs, demo, MVP status, handoff
 docker/                Postgres init scripts
 ```
 
@@ -136,6 +139,7 @@ before it can clean up: [docs/demo.md](docs/demo.md#starting-the-demo-pnpm-demo)
 `pnpm demo:verify` starts a demo the same way, drives the fresh-voyage walkthrough through it in
 headless Chromium (two browser contexts, seller and buyer), and removes everything afterwards.
 It needs Playwright's Chromium once: `pnpm --filter @tradeflow/e2e exec playwright install chromium`.
+CI runs the same command as its `demo` job.
 
 ### Development setup
 
@@ -200,7 +204,11 @@ API docs are at <http://localhost:3000/api/docs>.
 > The demo password is public. Never run the seed against a database holding real users.
 
 > Postgres is published on **5433**, not 5432, so it does not clash with a locally installed
-> Postgres. Change the port in `docker-compose.yml` and `apps/api/.env` if needed.
+> Postgres. Change the port in `docker-compose.yml` and `apps/api/.env` if needed. Check that
+> 5433 is free first: something else may already listen there. The test commands fall back to
+> `localhost:5433` too; to verify without depending on it, use a throwaway server and explicit
+> `TEST_DATABASE_URL` and `E2E_DATABASE_URL`
+> ([handoff](docs/handoff.md#verification-against-isolated-postgresql-only)).
 
 ### Everyday commands
 
@@ -214,7 +222,7 @@ API docs are at <http://localhost:3000/api/docs>.
 | `pnpm check`       | CI's verify job: format, lint, typecheck, test, build       |
 | `pnpm test:e2e`    | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
 | `pnpm demo`        | A fresh, isolated demo until Ctrl+C; nothing is kept        |
-| `pnpm demo:verify` | The fresh-voyage walkthrough in Chromium on a fresh demo    |
+| `pnpm demo:verify` | Walkthrough 2 in Chromium on a fresh demo (CI's demo job)   |
 | `pnpm db:reset`    | Drop, re-migrate and re-seed the development database       |
 
 Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database needed),
@@ -243,6 +251,12 @@ fresh runner with its own PostgreSQL 18 service, `E2E_DATABASE_URL` pointing at
 retries. On failure the job is set up to upload `e2e/.output/` (server logs, failure
 screenshots, the HTML report; nothing there records headers or cookies) as the
 `e2e-diagnostics` artifact, kept for seven days. No failing run has exercised that upload yet.
+
+A third job, `demo`, runs `pnpm demo:verify` on its own runner. It has no database service: the
+demo starts its own PostgreSQL 18 container on the runner's Docker daemon and removes it
+afterwards. It installs Chromium the same way, has no retries, and on a failing walkthrough
+uploads `e2e/.output/demo/` as `demo-diagnostics`, with the same exclusions. The job is configured
+but has not run on a hosted runner yet ([MVP status](docs/mvp-status.md#verification-at-a-glance)).
 
 ### How tests work
 

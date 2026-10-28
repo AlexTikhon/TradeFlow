@@ -986,6 +986,12 @@ scrolling at 390 px; the responsive trade string is not checked), real window fo
 visibility changes, the browser's own `datetime-local` and file pickers,
 downloads, or anything beyond notices that the stream does not carry yet.
 
+The demo walkthrough (`e2e/demo/`, `pnpm demo:verify`) is a separate Playwright project with
+one test, not part of the suite: it starts a demo with the same code as `pnpm demo` (its own
+PostgreSQL container, all migrations, the real seed, production sign-in admission) and drives
+the fresh-voyage walkthrough through the UI. CI runs it as the `demo` job, beside `verify` and
+`e2e`; [MVP status](mvp-status.md) records which commits each job has passed on.
+
 Web tests use a stateful fake of the auth endpoints, so sign-in, sign-out, identity switches and
 cross-tab changes run through the real router, query client and cache. They assert, among other
 things, that an in-flight request is aborted on sign-out and that a previous user's data never

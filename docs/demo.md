@@ -113,7 +113,9 @@ Starts a demo with the same code as `pnpm demo`, drives
 [walkthrough 2](#walkthrough-2-a-fresh-voyage) through it in headless Chromium, then stops it and
 removes everything, pass or fail. It needs Playwright's Chromium once per machine:
 `pnpm --filter @tradeflow/e2e exec playwright install chromium`. On failure, a screenshot is
-kept in `e2e/.output/demo/` (ignored by Git).
+kept in `e2e/.output/demo/` (ignored by Git). CI runs the same command as its `demo` job, on
+Linux, and uploads that directory as `demo-diagnostics` when the walkthrough fails; which
+commits it has run on is recorded in [MVP status](mvp-status.md#verification-at-a-glance).
 
 ```bash
 pnpm demo:verify

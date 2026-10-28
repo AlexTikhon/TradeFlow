@@ -118,3 +118,49 @@ jobs:
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
+
+  # The fresh-voyage walkthrough (docs/demo.md, walkthrough 2) on a demo started by the same code
+  # as `pnpm demo`: built apps, all migrations, the real seed, production sign-in admission. No
+  # database service: the demo starts its own PostgreSQL 18 container on the runner's Docker
+  # daemon, on a loopback port Docker picks, and removes it, its temporary directory and its
+  # servers at the end, pass or fail. No retries: demo/playwright.config.ts sets `retries: 0`.
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Chromium build pinned by e2e's @playwright/test, and the system libraries it needs.
+      - run: pnpm --filter @tradeflow/e2e exec playwright install --with-deps chromium
+
+      - id: demo
+        run: pnpm demo:verify
+
+      # The walkthrough's failure screenshot, error context and results/.last-run.json, whenever
+      # the walkthrough itself failed. Traces, videos and storage state are off
+      # (demo/playwright.config.ts); the exclusions below keep it so if that ever changes. The
+      # server logs live in the run's temporary directory and are removed with it; a failing
+      # startup step or a server exiting on its own prints their last lines to the job log.
+      - if: failure() && steps.demo.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-diagnostics
+          path: |
+            e2e/.output/demo/
+            !e2e/.output/demo/**/*.storage-state.json
+            !e2e/.output/demo/**/.auth/**
+            !e2e/.output/demo/**/*.har
+            !e2e/.output/demo/**/trace.zip
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
