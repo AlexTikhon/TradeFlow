@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "test:e2e": "playwright test",
+    "demo": "node --import tsx demo/demo.ts",
+    "demo:verify": "playwright test --config demo/playwright.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -13,6 +15,7 @@
     "@types/node": "24.19.2",
     "@types/pg": "8.23.1",
     "pg": "8.23.1",
+    "tsx": "4.23.15",
     "typescript": "6.0.3"
   }
 }

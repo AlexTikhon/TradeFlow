@@ -23,9 +23,11 @@ Next come further notices, deadlines and workflow.
 ## Status: original MVP complete
 
 The eight original MVP areas are implemented and verified in Linux CI, and the demo has been
-driven once through a real browser by a script (not yet by a person):
+driven through a real browser by a script (not yet by a person). `pnpm demo` starts a fresh,
+isolated demo with one command, and `pnpm demo:verify` drives its fresh-voyage walkthrough in
+Chromium (passed locally, not in CI):
 [acceptance summary](docs/mvp-status.md) (verified commit, CI run, coverage by test layer,
-limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough record).
+limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records).
 
 | Area         | Delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -105,6 +107,7 @@ apps/
 packages/
   contracts/           Zod schemas + inferred types shared by api and web
 e2e/                   Playwright smoke tests in Chromium (support/: run setup, fixtures, proxy)
+  demo/                `pnpm demo` and `pnpm demo:verify`: one-command demo, automated walkthrough
 docs/                  architecture, domain model, ADRs, demo, MVP status
 docker/                Postgres init scripts
 ```
@@ -113,6 +116,28 @@ docker/                Postgres init scripts
 
 **Prerequisites:** Node.js ≥ 24.11, pnpm 11 (`corepack enable` picks up the pinned version),
 Docker.
+
+### Quick demo: one command
+
+With a running Docker daemon, after `pnpm install`, in PowerShell or a Linux shell:
+
+```bash
+pnpm demo
+```
+
+It starts a PostgreSQL 18 container of its own, applies the migrations, runs the demo seed,
+builds and starts the API and the web app on 127.0.0.1, then prints the address to open, the
+accounts (password `tradeflow-demo`) and the walkthrough to follow. **Every run starts fresh and
+nothing is kept:** press Ctrl+C (or type `q` and Enter) and it removes its container, data,
+uploaded files and builds. It never uses `DATABASE_URL`, `.env` files or your development
+database, and leaves other containers and servers alone. Details, and recovery if it is killed
+before it can clean up: [docs/demo.md](docs/demo.md#starting-the-demo-pnpm-demo).
+
+`pnpm demo:verify` starts a demo the same way, drives the fresh-voyage walkthrough through it in
+headless Chromium (two browser contexts, seller and buyer), and removes everything afterwards.
+It needs Playwright's Chromium once: `pnpm --filter @tradeflow/e2e exec playwright install chromium`.
+
+### Development setup
 
 ```bash
 pnpm install
@@ -179,16 +204,18 @@ API docs are at <http://localhost:3000/api/docs>.
 
 ### Everyday commands
 
-| Command          | What it does                                                |
-| ---------------- | ----------------------------------------------------------- |
-| `pnpm dev`       | Contracts watcher, API (watch mode) and Vite dev server     |
-| `pnpm test`      | All tests. API integration tests need `pnpm db:up`          |
-| `pnpm lint`      | ESLint with type-aware rules across the monorepo            |
-| `pnpm typecheck` | `tsc --noEmit` in every package                             |
-| `pnpm build`     | Production builds of contracts, API and web                 |
-| `pnpm check`     | CI's verify job: format, lint, typecheck, test, build       |
-| `pnpm test:e2e`  | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
-| `pnpm db:reset`  | Drop, re-migrate and re-seed the development database       |
+| Command            | What it does                                                |
+| ------------------ | ----------------------------------------------------------- |
+| `pnpm dev`         | Contracts watcher, API (watch mode) and Vite dev server     |
+| `pnpm test`        | All tests. API integration tests need `pnpm db:up`          |
+| `pnpm lint`        | ESLint with type-aware rules across the monorepo            |
+| `pnpm typecheck`   | `tsc --noEmit` in every package                             |
+| `pnpm build`       | Production builds of contracts, API and web                 |
+| `pnpm check`       | CI's verify job: format, lint, typecheck, test, build       |
+| `pnpm test:e2e`    | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
+| `pnpm demo`        | A fresh, isolated demo until Ctrl+C; nothing is kept        |
+| `pnpm demo:verify` | The fresh-voyage walkthrough in Chromium on a fresh demo    |
+| `pnpm db:reset`    | Drop, re-migrate and re-seed the development database       |
 
 Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database needed),
 `pnpm --filter @tradeflow/api test:integration`.

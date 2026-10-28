@@ -69,17 +69,40 @@ export const linkedRecordStatus = (page: Page) =>
 export async function expectQueuePolled(tab: Tab): Promise<number> {
   const before = tab.network.mark();
   await tab.page.clock.runFor(QUEUE_REFRESH_INTERVAL_MS + 1_000);
-  const read = await tab.network.waitFor(
-    'request',
-    (request) =>
-      request.method === 'GET' && isQueueRead(request.path) && !request.path.includes('cursor='),
-    { after: before, description: "the queue's first page, read again by the page's interval" },
-  );
-  await tab.network.waitFor('finished', (entry) => entry.id === read.id, {
-    after: read.seq,
-    description: 'the answer to that read',
+  return firstPageRead(tab, before, "the queue's first page, read again by the page's interval");
+}
+
+/**
+ * Opens the Action Center from the main navigation and waits until the browser has read the
+ * queue's first page and received all of its answer. The queue keeps nothing once left
+ * (`gcTime: 0`), so what it shows afterwards is what it read now, never an earlier answer.
+ */
+export async function openActionCenterAndRead(tab: Tab): Promise<number> {
+  const before = tab.network.mark();
+  await openActionCenter(tab.page);
+  return firstPageRead(tab, before, "the queue's first page, read on opening it");
+}
+
+/**
+ * Waits until a read of the queue's first page sent after `after` has been answered in full,
+ * and returns that read's position. A read cancelled on the way does not count: a command's
+ * invalidation replaces a read already in flight (ADR 0017), and the replacement is awaited.
+ */
+async function firstPageRead(tab: Tab, after: number, description: string): Promise<number> {
+  const isFirstPageRead = (id: string) => {
+    const request = tab.network.requestOf(id);
+    return (
+      request.seq > after &&
+      request.method === 'GET' &&
+      isQueueRead(request.path) &&
+      !request.path.includes('cursor=')
+    );
+  };
+  const answered = await tab.network.waitFor('finished', (entry) => isFirstPageRead(entry.id), {
+    after,
+    description: `${description}, answered in full`,
   });
-  return read.seq;
+  return tab.network.requestOf(answered.id).seq;
 }
 
 /**

@@ -17,14 +17,110 @@ queue. What is implemented and how it is verified: [MVP status](mvp-status.md).
 > proves the flows, the wording and the live updates, but not the pacing, the native file and
 > download dialogs, or how it reads to an audience.
 >
-> **The fresh-voyage walkthrough (steps F1 to F8) has not been performed**, by a script or a
-> person. Its expectations come from the code at `5baf039`, ADR 0016 and the tests that cover it,
-> not from an observed run. Its [record](#record-of-walkthrough-2) is empty until someone runs
-> it.
+> **The fresh-voyage walkthrough (steps F1 to F8)** is automated: `pnpm demo:verify` drives it
+> through the UI in headless Chromium against a fresh `pnpm demo` instance on the real seed. On
+> 2026-10-28 it passed twice, from two independently fresh runs
+> ([automated runs](#automated-runs-of-walkthrough-2)); its expectations below are what those
+> runs observed. **No person has run it yet**: its [human record](#record-of-walkthrough-2) is
+> empty. Until that date its expectations came from the code and ADR 0016 only.
 >
 > **The Action Center walkthrough (steps A1 to A5)** was driven once by a script on 2026-10-23,
 > setup included, and its expectations are what that run observed
 > ([record](#record-of-walkthrough-3)). No person has run it yet.
+
+## Starting the demo: `pnpm demo`
+
+One command starts a complete, isolated demo, and stopping it throws everything away.
+
+**Prerequisites.** Node.js ≥ 24.11, pnpm 11, `pnpm install` run once, and a running Docker
+daemon (Docker Desktop on Windows). Nothing else: no `.env` file, no `pnpm db:up`, no database.
+The first run pulls the `postgres:18-alpine` image if Docker does not have it yet.
+
+```bash
+pnpm demo
+```
+
+The same command in PowerShell, cmd or a Linux shell. It prints each step, then where to go:
+
+1. Creates a PostgreSQL 18 container of its own, `tradeflow-demo-<random>`, labelled
+   `io.tradeflow.demo.run`. Its data lives on a tmpfs inside the container (no volume). Its port
+   is published on 127.0.0.1 only, at a port Docker picks.
+2. Creates a temporary directory, `tradeflow-demo-<random>` in the system temp directory, for the
+   builds, the uploaded documents and the server logs.
+3. Compiles the API and builds the web app into that directory. `apps/api/dist`, `apps/web/dist`
+   and `.env` files are not written. (Like `pnpm test:e2e`, it first runs `pnpm codegen`.)
+4. Applies every migration with `prisma migrate deploy`, then runs the real demo seed
+   (`apps/api/prisma/seed.ts`).
+5. Starts the API and the web app (`vite preview` of the production build, whose same-origin
+   `/api` proxy forwards to the API), both on 127.0.0.1, on free ports.
+6. Waits until the web app answers through its proxy, then prints the address to open, the
+   accounts, the walkthrough, what it owns, and how to stop.
+
+**Every run starts fresh, and nothing is kept.** The database, the uploaded PDFs, the builds and
+the logs exist only while the demo runs, and are discarded when it stops. The demo never reads
+`DATABASE_URL`, from your environment or from `apps/api/.env`: it removes the app's variables
+from what it passes on and sets each one itself. It never connects to, resets, seeds, stops or
+removes the development (`tradeflow`) or test databases, other containers or volumes, or a
+running `pnpm dev`.
+
+**Configuration.** The API runs with its normal sign-in and sessions, and with sign-in admission
+at its production defaults (20 attempts per client address a minute, 4 at once;
+[ADR 0018](decisions/0018-sign-in-admission.md)). Every browser on the machine reaches the API
+through the one web-server proxy, so they share that budget; a walkthrough needs a handful of
+sign-ins. One setting is explicit for local HTTP: `NODE_ENV=development`, because in production
+the session cookie is `Secure`, under a `__Host-` name, and a browser never sends it back over
+plain HTTP. This is a local demo, not a check of a deployment.
+
+**Accounts.** Every seeded user's password is `tradeflow-demo`. The banner lists the four of
+[walkthrough 2](#walkthrough-2-a-fresh-voyage): Ana Souza (`ana.souza@cerrado-graos.example`,
+seller), Tan Wei Ling (`wei.ling.tan@meridianagri.example`, buyer), Emre Kaya
+(`emre.kaya@anatoliamills.example`, final buyer in F8) and Lucía Ferreyra
+(`lucia.ferreyra@pampalitoral.example`, outsider). The casts below list the others. Use two
+browser profiles (or a normal and a private window), one per signed-in user. The address
+changes with every run: open the one printed, not `localhost:5173`.
+
+**Stopping.** Press **Ctrl+C** in the demo's terminal, or type `q` and press Enter. The demo
+stops the API and the web server, removes its container (`docker rm --force --volumes`) and its
+temporary directory, and says what it removed ("Stopped. Removed container …"). A second Ctrl+C
+while it cleans up changes nothing; every wait is bounded. On Windows, pnpm itself exits at the
+Ctrl+C, so the prompt can come back a few seconds before the demo prints its last lines: the
+cleanup carries on and finishes regardless (observed; see the
+[automated runs](#automated-runs-of-walkthrough-2)). A failed startup, or a server exiting on its own while the demo
+runs, ends the same way: the last lines of the failing step's log are printed first, since the
+logs go with the directory.
+
+**If cleanup fails, or the demo is killed** before it can clean up (Task Manager, `kill -9`, a
+crash): what is left keeps running. The banner printed at startup lists the run's container,
+directory and process ids, with the command that removes each. A cleanup failure prints the same
+commands for what it could not remove. Without the banner:
+
+- **Container.** `docker ps --all --filter label=io.tradeflow.demo.run` lists demo containers.
+  Check the name, then `docker rm --force --volumes tradeflow-demo-<random>`.
+- **Processes.** Two `node` processes, one running `…/tradeflow-demo-<random>/api/dist/main.js`
+  (the API) and one running `vite.js preview` with that directory's `web` folder. Stop those two
+  by process id (`taskkill /PID <id> /F`, or `kill <id>`). Never stop node processes by name: a
+  `pnpm dev` or your editor may be among them.
+- **Directory.** `tradeflow-demo-<random>` in `%TEMP%` (Windows) or `$TMPDIR`, usually `/tmp`
+  (Linux). Remove its link `api/node_modules` first, if it is still there, then the directory.
+  In cmd: `(if exist "<dir>\api\node_modules" rmdir "<dir>\api\node_modules") & rmdir /s /q "<dir>"`.
+  On Linux: `rm -f <dir>/api/node_modules && rm -rf <dir>`. Do not use Windows PowerShell 5.1's
+  `Remove-Item -Recurse` while the link exists: it can follow the link into the repository's
+  `apps/api/node_modules`.
+
+### The automated walkthrough: `pnpm demo:verify`
+
+Starts a demo with the same code as `pnpm demo`, drives
+[walkthrough 2](#walkthrough-2-a-fresh-voyage) through it in headless Chromium, then stops it and
+removes everything, pass or fail. It needs Playwright's Chromium once per machine:
+`pnpm --filter @tradeflow/e2e exec playwright install chromium`. On failure, a screenshot is
+kept in `e2e/.output/demo/` (ignored by Git).
+
+```bash
+pnpm demo:verify
+```
+
+It is a test, not a person: see [what it proves](#automated-runs-of-walkthrough-2), and what it
+does not.
 
 ## Cast
 
@@ -43,6 +139,12 @@ Everything in this demo happens in the block headed
 **Contract 1 · Cerrado Grãos Exportadora S.A. → Lacustra Commodities SA**.
 
 ## Before you start (not part of the ten minutes)
+
+**The simplest setup is [`pnpm demo`](#starting-the-demo-pnpm-demo)**: a fresh, migrated and
+seeded database every time, so items 1 to 3 below are done for you. Open the address it prints
+instead of `localhost:5173` (in item 6, replace `http://localhost:5173` with it). This first
+walkthrough has not yet been run on a `pnpm demo` instance, by a script or a person. Items 1 to 3
+describe the alternative, on your development database:
 
 1. **Database.** `pnpm db:up`, then apply any pending migrations without touching data:
    `pnpm --filter @tradeflow/api db:deploy` (`prisma migrate deploy`, which only applies
@@ -72,6 +174,9 @@ Everything in this demo happens in the block headed
    the voyage.
 
 ### An isolated run
+
+[`pnpm demo`](#starting-the-demo-pnpm-demo) now does all of this, and cleans up after itself. The
+manual steps are kept because the walkthrough records of 2026-10-18 and 2026-10-23 used them.
 
 The API and Prisma read `apps/api/.env`, but variables already set in the environment take
 precedence over it. To run the demo against a database and document directory of its own, as the
@@ -467,17 +572,23 @@ variants above; browsers other than Chromium.
 
 ## Walkthrough 2: a fresh voyage
 
-> **Not yet performed.** Nobody has run these steps, by a script or by hand. The expectations
-> below come from the code at `5baf039`, [ADR 0016](decisions/0016-initial-voyage-setup.md) and
-> its tests, not from an observed run. Fill in the [record](#record-of-walkthrough-2) when you
-> run it.
+> **Automated in Chromium; not yet performed by a person.** `pnpm demo:verify` drives F1 to F8
+> through the UI against a fresh [`pnpm demo`](#starting-the-demo-pnpm-demo) instance and passed
+> twice on 2026-10-28 ([automated runs](#automated-runs-of-walkthrough-2)). Each step's
+> **Automated check** says exactly what that test asserts; the other expectations in a step come
+> from the code and [ADR 0016](decisions/0016-initial-voyage-setup.md), not from an observed
+> run. Steps F4 to F7 were rewritten on that date to follow the verified journey (the seller's
+> Action Center, then a rejection, a replacement and an approval), replacing the earlier
+> unverified order (approval, replacement, rejection). Fill in the
+> [human record](#record-of-walkthrough-2) when a person runs it.
 
 A walkthrough by hand of about fifteen minutes, in two browser profiles, from an empty voyage
 to a reviewed document. The exporter creates a voyage, records whom the cargo is sold through,
-and the buyer it named gains access. Then the bilateral flows of steps 3 and 5 run under the
-contract that setup recorded. Nothing is inserted into the database by hand: the organizations
-and users are the seeded, curated set, and the voyage, its participants and its contracts are
-created through the UI.
+and the buyer it named gains access. Then documentary instructions and a bill of lading run
+under the contract that setup recorded, each handover arriving in the other side's Action
+Center. Nothing is inserted into the database by hand: the organizations and users are the
+seeded, curated set, and the voyage, its participants, its contracts, the instructions, files
+and decisions are created through the UI.
 
 It does not repeat what the first walkthrough already shows (ETA notices, a stale draft,
 revisions): steps 2 to 4 above work the same on this voyage.
@@ -499,8 +610,14 @@ block headed **Contract 1 · Cerrado Grãos Exportadora S.A. → Meridian Agri T
 
 ### Before you start
 
-The same as [for the first walkthrough](#before-you-start-not-part-of-the-ten-minutes), with
-these differences:
+**Simplest: `pnpm demo`** ([details](#starting-the-demo-pnpm-demo)). Every run is a fresh,
+seeded database, so the new voyage is **TF-2026-0008** (in 2026) and nothing is left behind.
+Sign in at the address it prints, followed by `/voyages`, instead of `localhost:5173`. Then
+only the two profiles and the two PDFs below are needed.
+
+On your development database instead, the same as
+[for the first walkthrough](#before-you-start-not-part-of-the-ten-minutes), with these
+differences:
 
 - **Migrations.** All fourteen must be applied; the last two are ADR 0016's.
 - **Data.** No fresh seed and no particular state are needed. Each run creates a voyage of its
@@ -551,6 +668,14 @@ not exist, or you do not have access to it."
 
 **Evidence.** PostgreSQL/HTTP: `voyage-creation.int-spec.ts`. jsdom: `NewVoyagePage.test.tsx`.
 Chromium suite: `trade-string-setup.spec.ts`, through the same form.
+
+**Automated check** (`pnpm demo:verify`). The form's exporter sentence; the values above typed
+into the form; the new URL and a `TF-<year>-<n>` heading that is none of the seeded ones
+(observed: **TF-2026-0008** both times); "Trade string not configured" with **Set up trade
+string**; Cerrado in **Trade parties**; the timeline's one entry with Ana's name and no contract
+label. For Wei Ling: TF-2026-0002 listed and the new reference not; the URL shows "Voyage not
+found" with the sentence above. Not checked: the status chip, the notices and instructions
+wording.
 
 ### F2. Set up the trade string (Ana)
 
@@ -607,8 +732,15 @@ attempt, from this page or any other, gets 409 and changes nothing
 **Evidence.** PostgreSQL/HTTP: `trade-string-setup.int-spec.ts` (60: refusals, two races,
 revalidation after the lock, audit rollback), `organizations.int-spec.ts` (12). jsdom:
 `VoyageTradeStringSetup.test.tsx` (26). Chromium suite: `trade-string-setup.spec.ts`, with a
-two-party chain and generated organizations. Not in any test: this three-party chain on seeded
-organizations through the UI.
+two-party chain and generated organizations. This three-party chain on seeded organizations:
+`pnpm demo:verify` (below).
+
+**Automated check.** Items 1 to 3 (the optional move is not done); both contract sentences and
+"It does not record that any of them agreed to it." in the review; **Trade string set up** and
+"… now take part in this voyage."; no **Set up trade string** button left; three organizations in
+the trade string; one contract block, "You sell: you receive them", with "The buyer has not
+given documentary instructions under this contract yet."; the timeline's two entries in order,
+neither with a contract label.
 
 ### F3. The buyer gains access (Wei Ling)
 
@@ -625,45 +757,72 @@ is needed.
 - **ETA notices**: an **Issue ETA notice** button of her own, for contract 2.
 - **Timeline**: "Set up the trade string" and "Created the voyage", both by Ana Souza.
 
-From here on, **do not reload either page**: the remaining changes arrive by themselves.
+From here on, **do not reload either page**: the remaining changes arrive by themselves, on the
+voyage pages over their event streams, and in the Action Center by its own reads (every 30
+seconds, and at once when its window regains focus: click into the window you switch to).
 
 **Evidence.** PostgreSQL/HTTP: "gives the named organizations the voyage and the existing
 bilateral workflows" in `trade-string-setup.int-spec.ts`. Chromium suite:
 `trade-string-setup.spec.ts` (the buyer's list, string and timeline entry).
 
-### F4. Documentary instructions under the new contract
+**Automated check.** Opened from her list (no reload is needed in the test: her list is read
+when she navigates to it); three organizations in the string, the one marked "Your organization"
+being Meridian; two contract blocks, the first "You buy: you give them" with "Your organization
+has not given documentary instructions under this contract yet.", the second "You sell: you
+receive them"; the timeline's two entries. Not checked: the status chip and the notices button.
+
+### F4. Instructions under the new contract, through Ana's Action Center
+
+**Do (Ana).** Click **Action Center**. Nothing is waiting on the new voyage (an older voyage's
+item may be listed; every item names its voyage).
 
 **Do (Wei Ling).** In the contract 1 block, click **Give documentary instructions**. Consignee
 `To order of Banco Demo`; **Required document 1**: Bill of lading, **Originals** 3, **Copies** 2.
 Click **Send instructions**.
 
 **Expect.** "Revision 1 has been sent to Cerrado Grãos Exportadora S.A. for acknowledgement."
-Without a reload, Ana's page shows revision 1, **Not acknowledged**, with **Acknowledge receipt of
-revision 1**, and a **Documents** section with an upload form for the bill of lading. Both
-timelines gain "Gave documentary instructions", labelled Contract 1.
+
+**Do (Ana).** Click into her window. **Expect** in her queue, for the new voyage, one item:
+**Acknowledge instructions**, "Meridian Agri Trading Pte. Ltd. · Contract 1", record
+**Revision 1**. Click **Open revision 1**.
+
+**Expect.** The voyage page, scrolled to revision 1, which has focus, showing the consignee.
+Above the sections: "Revision 1 is waiting for your organization to acknowledge receipt …".
+Opening it sent nothing.
 
 **Do (Ana).** Click **Acknowledge receipt of revision 1**.
 
-**Expect.** Both pages show **Acknowledged by the seller**. Both timelines gain "Acknowledged
-revision 1 of the documentary instructions".
+**Expect.** Revision 1 shows **Acknowledged by the seller**, on Ana's page and, without a reload,
+on Wei Ling's. Back in **Action Center**, nothing is waiting on the new voyage.
 
 **Engineering guarantee.** Ana's page opened its event stream before Cerrado had any contract on
-this voyage. The stream re-reads her organization's contracts before every delivery, so the
-signal for the new contract reaches it without a reload
-([ADR 0015](decisions/0015-voyage-event-streams.md)).
+this voyage. The stream re-reads her organization's contracts before every delivery, so signals
+for the new contract reach it without a reload
+([ADR 0015](decisions/0015-voyage-event-streams.md)). The queue item is derived from the
+records on each read; there is no task table ([ADR 0017](decisions/0017-action-center.md)).
 
-**Evidence.** Chromium suite: `trade-string-setup.spec.ts`, whose buyer's instructions reach the
-exporter's page that set up the voyage. The acknowledgement on a set-up voyage: over HTTP in
-`trade-string-setup.int-spec.ts`; in Chromium on other voyages only (`live-instructions.spec.ts`).
+**Automated check.** Everything in this step, with Ana's queue reaching the item by its own
+30-second poll (see [automated runs](#automated-runs-of-walkthrough-2)) and the browser's
+network log showing no write sent by opening the link. Wei Ling's page received the
+acknowledgement over its stream while untouched.
 
-### F5. PDF upload and download
+### F5. Ana uploads a PDF; Wei Ling downloads it
 
-**Do (Ana).** At **Bill of lading**, click **Choose a PDF**, pick `bl-v1.pdf`, then **Upload**.
+**Do (Wei Ling).** Click **Action Center**: nothing waiting on the new voyage.
 
-**Expect.** "Version 1 of the bill of lading has been uploaded." Wei Ling's page shows
-"Version 1: bl-v1.pdf (size)", who uploaded it and when, the first 12 characters of its SHA-256,
-**Pending review**, and "Pending review by Meridian Agri Trading Pte. Ltd.". Both timelines gain
-"Uploaded version 1 of the bill of lading (instructions revision 1)".
+**Do (Ana).** Open the new voyage from **Voyages**. At **Bill of lading**, click **Choose a PDF**,
+pick `bl-v1.pdf`, then **Upload**.
+
+**Expect.** "Version 1 of the bill of lading has been uploaded." Ana's queue: nothing waiting on
+the new voyage.
+
+**Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
+document**, "Cerrado Grãos Exportadora S.A. · Contract 1", "Bill of lading, version 1
+(instructions revision 1)". Click **Open version 1**.
+
+**Expect.** "Version 1 of the bill of lading is waiting for your organization’s decision";
+version 1 focused, showing "Version 1: bl-v1.pdf", **Pending review** and the first 12
+characters of its SHA-256; the review form with neither **Approve** nor **Reject** chosen.
 
 **Do (Wei Ling).** Click **Download** next to version 1. Compare the saved file with
 `Get-FileHash bl-v1.pdf` (PowerShell) or `sha256sum bl-v1.pdf`.
@@ -671,86 +830,188 @@ exporter's page that set up the voyage. The acknowledgement on a set-up voyage: 
 **Expect.** The browser saves `bl-v1.pdf`, and its checksum starts with the 12 characters the
 page shows.
 
-### F6. Approval
+**Automated check.** All of it; the PDF is generated (`%PDF-1.7` and random bytes) and the
+download's SHA-256 equals the upload's, byte for byte. The browser's save dialog is bypassed, as
+always under automation.
 
-**Do (Wei Ling).** Under "Your decision on version 1", select **Approve**, then click
-**Approve version 1**.
-
-**Expect.** "Version 1 of the bill of lading has been approved." Ana's page shows "Approved by
-Tan Wei Ling (Meridian Agri Trading Pte. Ltd.) on …". Both timelines gain "Approved version 1 of
-the bill of lading (instructions revision 1)".
-
-### F7. Replacement and rejection
-
-**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it.
-
-**Expect.** Wei Ling's page shows version 2, **Pending review**, and under
-**Earlier versions (1)** version 1 still approved. Ana's emptied form keeps its disabled button
-labelled **Upload as version 2**: the cosmetic defect in the
-[first record](#walkthrough-record), not a new finding.
+### F6. Wei Ling rejects version 1; Ana is asked to replace it
 
 **Do (Wei Ling).** Select **Reject**, type the **Reason for rejecting**
-`Consignee does not match revision 1.`, and click **Reject version 2**.
+`Consignee does not match revision 1.`, and click **Reject version 1**.
 
-**Expect.** Ana's page shows "Rejected by Tan Wei Ling …" with the reason, and version 1 still
-approved under **Earlier versions (1)**.
+**Expect.** "Version 1 of the bill of lading has been rejected." Her **Action Center**: nothing
+waiting on the new voyage.
 
-**Evidence for F5 to F7.** On a voyage set up through the command: one upload and its approval,
-over HTTP only (`trade-string-setup.int-spec.ts`). The full sequence, replacement and rejection
-included, on other voyages: Chromium `live-documents.spec.ts` (download compared by SHA-256),
-PostgreSQL/HTTP `documents.int-spec.ts` and `document-reviews.int-spec.ts`. Nothing about
-documents depends on how the contract was recorded.
+**Do (Ana).** Click into her window (she is on **Action Center**). **Expect** one item for the
+new voyage: **Replace rejected document**, with the reason, "Meridian Agri Trading Pte. Ltd. ·
+Contract 1". Click **Open version 1**, and **wait for** "Version 1 of the bill of lading was
+rejected and is waiting for your organization to replace it" before choosing a file (see
+[A4](#a4-the-rejection-becomes-the-sellers-action-150-to-225)). Version 1 is focused and shows
+"Rejected by Tan Wei Ling".
+
+**Automated check.** All of it, Ana's queue again reaching the item by its own poll; no write
+sent by opening the link.
+
+### F7. The replacement, approved
+
+**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it. Back in
+**Action Center**: nothing waiting on the new voyage.
+
+**Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
+document**, "Bill of lading, version 2 (instructions revision 1)", a new action. Click **Open
+version 2**: "Version 2 of the bill of lading is waiting for your organization’s decision",
+version 2 focused. Select **Approve**, then click **Approve version 2**.
+
+**Expect.** "Version 2 of the bill of lading has been approved", and above the sections "Version
+2 of the bill of lading has already been approved". Both queues: nothing waiting on the new
+voyage (Wei Ling's seeded TF-2026-0002 notice remains).
+
+**Do (both).** Open the new voyage, and at **Bill of lading** click **Earlier versions (1)**.
+
+**Expect.** "Version 2: bl-v2.pdf", **Approved by Tan Wei Ling**; under **Earlier versions**,
+"Version 1: bl-v1.pdf", **Rejected by Tan Wei Ling**, with the reason as typed. The same on both
+sides.
+
+**Business meaning.** The seller presents the document; the buyer decides on that exact file; a
+rejection comes back to the seller as work to do, with the reason; the replacement is reviewed
+afresh, and the history of what was rejected, and why, stays.
+
+**Evidence.** Chromium suite: `live-documents.spec.ts` (download by SHA-256, replacement,
+rejection, history, over the event stream) and `action-center.spec.ts` (this queue journey, on a
+voyage written into the database). PostgreSQL/HTTP: `documents.int-spec.ts`,
+`document-reviews.int-spec.ts`, `action-items.int-spec.ts`; one upload and approval on a set-up
+voyage in `trade-string-setup.int-spec.ts`.
+
+**Automated check.** All of F7, on both sides.
 
 ### F8. Timeline and visibility
 
-**Do (Wei Ling).** Scroll to **Timeline**.
+**Do (both).** Scroll to **Timeline**.
 
-**Expect.** Eight entries, newest first:
+**Expect.** Eight entries, newest first, the same on both sides:
 
-| #   | Entry                                                              | Contract label |
-| --- | ------------------------------------------------------------------ | -------------- |
-| 1   | Rejected version 2 of the bill of lading (instructions revision 1) | Contract 1     |
-| 2   | Uploaded version 2 of the bill of lading (instructions revision 1) | Contract 1     |
-| 3   | Approved version 1 of the bill of lading (instructions revision 1) | Contract 1     |
-| 4   | Uploaded version 1 of the bill of lading (instructions revision 1) | Contract 1     |
-| 5   | Acknowledged revision 1 of the documentary instructions            | Contract 1     |
-| 6   | Gave documentary instructions                                      | Contract 1     |
-| 7   | Set up the trade string                                            | None           |
-| 8   | Created the voyage                                                 | None           |
+| #   | Entry                                                              | By           | Contract label |
+| --- | ------------------------------------------------------------------ | ------------ | -------------- |
+| 1   | Approved version 2 of the bill of lading (instructions revision 1) | Tan Wei Ling | Contract 1     |
+| 2   | Uploaded version 2 of the bill of lading (instructions revision 1) | Ana Souza    | Contract 1     |
+| 3   | Rejected version 1 of the bill of lading (instructions revision 1) | Tan Wei Ling | Contract 1     |
+| 4   | Uploaded version 1 of the bill of lading (instructions revision 1) | Ana Souza    | Contract 1     |
+| 5   | Acknowledged revision 1 of the documentary instructions            | Ana Souza    | Contract 1     |
+| 6   | Gave documentary instructions                                      | Tan Wei Ling | Contract 1     |
+| 7   | Set up the trade string                                            | Ana Souza    | None           |
+| 8   | Created the voyage                                                 | Ana Souza    | None           |
 
 Each shows who, for which organization, and when. No consignee, file name or rejection reason
-appears. Ana's timeline shows the same eight.
+appears.
 
-**Do (profile B).** Click **Sign out**, and sign in as **Emre Kaya**. Open the new voyage from
-his list.
+**Do (a third profile).** Sign in as **Emre Kaya** and open the new voyage from his list.
 
 **Expect.**
 
-- His list shows the new voyage and TF-2026-0003, and any voyage that earlier runs created.
 - The same trade string, with Anatolia marked "Your organization".
 - **Documentary instructions**: only the contract 2 block (Meridian → Anatolia), "You buy: you
-  give them", nothing given yet. Nothing of contract 1: no instructions, documents or decisions.
+  give them". Nothing of contract 1: no consignee, file or reason anywhere on the page.
 - **Timeline**: two entries only, "Set up the trade string" and "Created the voyage".
 
-**Optional (+30 s).** Sign out and sign in as **Lucía Ferreyra**. Pasting the voyage's URL shows
-**Voyage not found**, as for a voyage that does not exist.
+**Do (a fourth profile).** Open the voyage's URL and sign in as **Lucía Ferreyra**.
+
+**Expect.** **Voyage not found**, as for a voyage that does not exist; the reference appears
+nowhere.
 
 **Evidence.** PostgreSQL/HTTP: "shows every participant the setup, without its parties, and
 keeps contract events to their counterparties" in `trade-string-setup.int-spec.ts`;
-`voyage-timeline.int-spec.ts`. Not in the Chromium suite: the final buyer's view and the
-outsider on a set-up voyage.
+`voyage-timeline.int-spec.ts`.
+
+**Automated check.** The eight entries in this order, each with its actor and organization, and
+the contract label exactly where the table says; none of the four contents on either timeline;
+Emre's view as above (one block, its accessible name starting "Contract 2 · ", two timeline
+entries, none of the contents on the page); Lucía's "Voyage not found" without the reference.
+
+### Automated runs of walkthrough 2
+
+**What ran.** `pnpm demo:verify` (`e2e/demo/walkthrough.spec.ts`): Playwright drives headless
+Chromium through F1 to F8, by the UI's accessible names, against a demo started by the same
+code as `pnpm demo`. Ana and Wei Ling each have a browser context of their own, Emre and Lucía
+one each: four sign-ins, under the production admission budget. After the seed, every business
+write is a click or a typed value; nothing is written to the database by the test, and no
+response, session or `EventSource` is faked. Observation is read-only: the page, and the
+browser's network log over the DevTools protocol.
+
+**Stated clock control.** Ana's and Wei Ling's pages have Playwright's clock installed before
+they load. Each time the other side acts, the test moves that page's clock forward 31 seconds,
+which fires the queue's own 30-second refresh, then waits until the browser has sent that read
+and received all of its answer. The queues are never refreshed by the button, and no window
+focus is simulated. Opening the Action Center is followed by a wait for its fresh read (it keeps
+nothing once left). Everything else runs at real time.
+
+| Item     | Value                                                                                              |
+| -------- | -------------------------------------------------------------------------------------------------- |
+| Date     | 2026-10-28, two runs one after the other, each from its own fresh `pnpm demo:verify`               |
+| Code     | `42ee8f2` with this phase's uncommitted changes (the demo, its walkthrough, the API's `HOST`)      |
+| Machine  | Windows 11 Home, Node.js 24.11.1, pnpm 11.9.0, Docker 29.7.2 (Linux engine)                        |
+| Browser  | Playwright 1.63.0, Chromium 153.0.8010.12, headless, contexts in UTC, `en-GB`                      |
+| Database | `postgres:18-alpine` (PostgreSQL 18.6), a new container per run: 14 migrations, then the real seed |
+| Servers  | Built API (`node main.js`) and `vite preview`, on 127.0.0.1, `NODE_ENV=development`                |
+| Voyage   | **TF-2026-0008** in both runs (each a fresh database)                                              |
+
+| Step                              | Run A | Run B | Observed                                                                  |
+| --------------------------------- | ----- | ----- | ------------------------------------------------------------------------- |
+| Sign-in on both Action Centers    | 0.9 s | 0.8 s | Wei Ling's queue showed the seeded TF-2026-0002 notice                    |
+| F1                                | 0.7 s | 0.7 s | As expected; TF-2026-0008; not found for Wei Ling                         |
+| F2                                | 2.4 s | 2.9 s | As expected                                                               |
+| F3                                | 0.3 s | 0.3 s | As expected                                                               |
+| F4                                | 0.9 s | 0.9 s | Item by poll; link sent no write; acknowledgement live on Wei Ling's page |
+| F5                                | 1.1 s | 1.1 s | Item by poll; download byte-identical by SHA-256                          |
+| F6                                | 0.6 s | 0.6 s | Item with the reason by poll; link sent no write                          |
+| F7                                | 0.8 s | 0.8 s | Item for version 2 by poll; approved; no action left on the voyage        |
+| Earlier versions                  | 0.4 s | 0.4 s | Version 1 rejected with its reason, on both sides                         |
+| F8                                | 1.3 s | 1.3 s | Eight entries as in the table; Emre's contract 2 only; Lucía: not found   |
+| Whole command, codegen to cleanup | 31 s  | 32 s  | Container and directory removed after each run                            |
+
+The step times are with a moved clock and no human pauses: they say nothing about how long a
+person needs.
+
+**Deviations.** Two earlier attempts on the same day failed on the test's own code, and no
+application change was needed. The first used an ambiguous locator (Cerrado's trade-string item
+also names Meridian). The second waited for the first queue read after opening the Action
+Center, which the upload's own queue invalidation had cancelled and replaced, as ADR 0017
+specifies; the shared helper now waits for a read that was answered in full. A third attempt
+passed; then the two runs above passed on the final code.
+
+**The demo's lifecycle, checked the same day on Windows 11** (not part of `demo:verify`):
+
+- `pnpm demo` in a console of its own: the banner as described; the database, API and web server
+  listening on 127.0.0.1 only; `/api/health` answered 200 through the web server's proxy.
+- A real Ctrl+C (`CTRL_C_EVENT` sent to that console): "Stopping the demo." then "Stopped.
+  Removed container … and …"; no container, directory or server process left. The console's
+  `cmd` and pnpm exited about 2 s after the Ctrl+C, before the demo printed its last line.
+- `q` and Enter on standard input: the same, with exit status 0.
+- The API killed by its process id while the demo ran: "The API exited on its own (exit code
+  1)", its last log lines, "The demo cannot continue without it. Stopping.", then the same
+  cleanup and exit status 1.
+- Startup interrupted at the web build, at the seed and at the web server's start, and failing
+  at the API's start: each time, its container and directory were removed and no process was
+  left.
+- A directory held by another process at cleanup: "Cleanup was incomplete" naming the directory,
+  the error and the cmd recovery command; following that command removed it, and the
+  repository's `apps/api/node_modules` was intact. The container was removed regardless.
+
+Not checked: Linux or macOS (no such machine was available; the code paths are the same, with
+`kill` instead of `taskkill` in the recovery lines), closing the terminal window, browsers other
+than Chromium, and a person.
 
 ### Record of walkthrough 2
 
-**Status: not yet performed.** Fill in this section when it is run, and keep it as observed.
+**Human run: not yet performed.** Fill in this section when a person runs it, and keep it as
+observed. The automated runs above do not count as one.
 
 | Item     | Value                                               |
 | -------- | --------------------------------------------------- |
-| Date     | _not yet run_                                       |
+| Date     | _not yet run by a person_                           |
 | Run by   |                                                     |
 | Code     | Commit:                                             |
 | Machine  | OS, Node.js version, browser and version, time zone |
-| Database | Development or isolated; seeded when; migrations    |
+| Database | `pnpm demo`, or development / isolated; seeded when |
 | Voyage   | Reference and id created in F1                      |
 
 | Step | Result (as expected / differed: how) | Time taken |

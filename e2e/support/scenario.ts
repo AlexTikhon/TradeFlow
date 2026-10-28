@@ -16,6 +16,8 @@ export interface Party {
   email: string;
   fullName: string;
   organizationName: string;
+  /** Typed into the sign-in form; the E2E password when absent (seeded demo users have theirs). */
+  password?: string;
 }
 
 export interface Scenario {

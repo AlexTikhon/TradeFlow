@@ -51,6 +51,13 @@ describe('loadConfig', () => {
     }
   });
 
+  it('listens on every interface unless HOST names one', () => {
+    const base = { DATABASE_URL: 'postgresql://u:p@db/t' };
+    expect(loadConfig(base).host).toBeUndefined();
+    expect(loadConfig({ ...base, HOST: ' 127.0.0.1 ' }).host).toBe('127.0.0.1');
+    expect(() => loadConfig({ ...base, HOST: ' ' })).toThrow(/HOST/);
+  });
+
   it('rejects a session lifetime outside the allowed range', () => {
     expect(() =>
       loadConfig({ DATABASE_URL: 'postgresql://u:p@db/t', SESSION_TTL_MINUTES: '1' }),

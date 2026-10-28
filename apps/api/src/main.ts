@@ -11,6 +11,9 @@ if (existsSync('.env')) {
 }
 
 const app = configureApp(await NestFactory.create(AppModule));
-const { port } = app.get<AppConfig>(APP_CONFIG);
-await app.listen(port);
-Logger.log(`API listening on http://localhost:${port}/api (docs at /api/docs)`, 'Bootstrap');
+const { port, host } = app.get<AppConfig>(APP_CONFIG);
+await (host === undefined ? app.listen(port) : app.listen(port, host));
+Logger.log(
+  `API listening on http://${host ?? 'localhost'}:${port}/api (docs at /api/docs)`,
+  'Bootstrap',
+);

@@ -9,6 +9,8 @@ const EnvironmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    // Interface to listen on; every interface when unset. The local demo binds to 127.0.0.1.
+    HOST: z.string().trim().min(1).optional(),
     DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
     // Absolute session lifetime: a working day by default, at most a week (ADR 0007).
     SESSION_TTL_MINUTES: z.coerce
@@ -38,6 +40,8 @@ const EnvironmentSchema = z
 export interface AppConfig {
   nodeEnv: 'development' | 'test' | 'production';
   port: number;
+  /** Interface the server listens on; undefined: every interface. */
+  host: string | undefined;
   databaseUrl: string;
   session: {
     ttlMs: number;
@@ -65,6 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   const {
     NODE_ENV,
     PORT,
+    HOST,
     DATABASE_URL,
     SESSION_TTL_MINUTES,
     SIGN_IN_ATTEMPTS_PER_MINUTE,
@@ -73,6 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   return {
     nodeEnv: NODE_ENV,
     port: PORT,
+    host: HOST,
     databaseUrl: DATABASE_URL,
     session: { ttlMs: SESSION_TTL_MINUTES * 60_000, secureCookie: NODE_ENV === 'production' },
     signIn: { attemptsPerMinute: SIGN_IN_ATTEMPTS_PER_MINUTE },

@@ -8,7 +8,7 @@ import type { Party, Scenario } from './scenario.js';
 export async function signIn(page: Page, party: Party): Promise<void> {
   const form = page.getByRole('form', { name: 'Sign in' });
   await form.getByLabel('Email').fill(party.email);
-  await form.getByLabel('Password').fill(E2E_PASSWORD);
+  await form.getByLabel('Password').fill(party.password ?? E2E_PASSWORD);
   await form.getByRole('button', { name: 'Sign in' }).click();
 }
 

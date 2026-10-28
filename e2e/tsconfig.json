@@ -5,5 +5,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["playwright.config.ts", "support", "tests"]
+  "include": ["playwright.config.ts", "support", "tests", "demo"]
 }
