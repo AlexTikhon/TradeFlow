@@ -1,0 +1,14 @@
+{
+	admin off
+	http_port 8080
+	https_port 8443
+	auto_https disable_redirects
+}
+
+http://{$APP_DOMAIN}:8080 {
+	redir https://{$APP_DOMAIN}{uri} 308
+}
+
+https://{$APP_DOMAIN}:8443 {
+	import /etc/caddy/routes.caddy
+}

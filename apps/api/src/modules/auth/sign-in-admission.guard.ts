@@ -26,9 +26,8 @@ export class SignInAdmissionGuard implements CanActivate {
 }
 
 /**
- * The address the connection came from. `trust proxy` is not enabled, so Express derives
- * `request.ip` from the socket and ignores `X-Forwarded-For` and similar headers, which any
- * client can write.
+ * Express ignores forwarded addresses by default. Behind a proxy, only explicitly configured
+ * peers are trusted; the edge must overwrite client-supplied forwarding headers (ADR 0020).
  */
 function clientAddressOf(request: Request): string {
   return request.ip ?? request.socket.remoteAddress ?? 'unknown';

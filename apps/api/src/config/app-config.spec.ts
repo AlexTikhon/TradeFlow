@@ -9,6 +9,7 @@ describe('loadConfig', () => {
     ).toEqual({
       nodeEnv: 'development',
       port: 4000,
+      trustedProxyCidrs: [],
       databaseUrl: 'postgresql://u:p@localhost:5433/tradeflow',
       session: { ttlMs: 8 * 60 * 60_000, secureCookie: false },
       signIn: { attemptsPerMinute: 20 },
@@ -28,6 +29,29 @@ describe('loadConfig', () => {
       driver: 'local',
       directory: resolve('/srv/tradeflow/documents'),
     });
+  });
+
+  it('accepts only explicit trusted proxy addresses and CIDRs', () => {
+    const base = { DATABASE_URL: 'postgresql://u:p@db/t' };
+    expect(
+      loadConfig({ ...base, TRUSTED_PROXY_CIDRS: ' 172.29.0.2/32,::1/128 ' }).trustedProxyCidrs,
+    ).toEqual(['172.29.0.2/32', '::1/128']);
+    for (const value of [
+      'true',
+      '1',
+      'loopback',
+      '0.0.0.0/0',
+      '::/0',
+      '127.0.0.1/33',
+      '::1/129',
+      '127.0.0.1/-1',
+      '127.0.0.1/1/2',
+      '127.0.0.1,',
+    ]) {
+      expect(() => loadConfig({ ...base, TRUSTED_PROXY_CIDRS: value })).toThrow(
+        'TRUSTED_PROXY_CIDRS',
+      );
+    }
   });
 
   it('requires a document storage directory in production', () => {

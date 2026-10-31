@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { Global, Module } from '@nestjs/common';
 import { z } from 'zod';
+import { isProxyAddress } from './trusted-proxies.js';
 
 /** Where uploaded documents are kept outside production, relative to the working directory. */
 const DEFAULT_DOCUMENT_STORAGE_DIR = 'var/documents';
@@ -11,6 +12,19 @@ const EnvironmentSchema = z
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     // Interface to listen on; every interface when unset. The local demo binds to 127.0.0.1.
     HOST: z.string().trim().min(1).optional(),
+    TRUSTED_PROXY_CIDRS: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value.trim() === '' ? [] : value.split(',').map((address) => address.trim()),
+      )
+      .pipe(
+        z.array(
+          z
+            .string()
+            .refine(isProxyAddress, 'Expected a numeric IP address or a non-universal CIDR'),
+        ),
+      ),
     DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
     // Absolute session lifetime: a working day by default, at most a week (ADR 0007).
     SESSION_TTL_MINUTES: z.coerce
@@ -82,6 +96,7 @@ export interface AppConfig {
   port: number;
   /** Interface the server listens on; undefined: every interface. */
   host: string | undefined;
+  trustedProxyCidrs: string[];
   databaseUrl: string;
   session: {
     ttlMs: number;
@@ -122,6 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     NODE_ENV,
     PORT,
     HOST,
+    TRUSTED_PROXY_CIDRS,
     DATABASE_URL,
     SESSION_TTL_MINUTES,
     SIGN_IN_ATTEMPTS_PER_MINUTE,
@@ -137,6 +153,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     nodeEnv: NODE_ENV,
     port: PORT,
     host: HOST,
+    trustedProxyCidrs: TRUSTED_PROXY_CIDRS,
     databaseUrl: DATABASE_URL,
     session: { ttlMs: SESSION_TTL_MINUTES * 60_000, secureCookie: NODE_ENV === 'production' },
     signIn: { attemptsPerMinute: SIGN_IN_ATTEMPTS_PER_MINUTE },

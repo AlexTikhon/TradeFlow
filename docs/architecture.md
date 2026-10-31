@@ -1069,7 +1069,7 @@ above still describe the default adapter.
 
 | Concern      | Today                                                                                        | Planned                                              |
 | ------------ | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Health       | `GET /api/health` checks DB connectivity                                                     | Split liveness and readiness when deployed           |
+| Health       | `GET /api/health` checks DB; `/api/health/live` checks process liveness                      | Hosted readiness/liveness monitoring                 |
 | Logging      | Nest logger; 5xx logged with stack                                                           | Structured JSON logs, request ids, OpenTelemetry     |
 | Config       | Validated env, fail fast                                                                     | Secrets manager in cloud environments                |
 | Shutdown     | `enableShutdownHooks`; open event streams ended; Prisma disconnects on destroy               | —                                                    |
@@ -1096,3 +1096,11 @@ How later requirements land on the current structure:
 | Background jobs / outbox | Outbox table written transactionally; a relay publishes to BullMQ (Redis)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Documents                | **Started (M7)**: PDF versions per required document of an exact revision, counterparty-only, uploaded by the seller with `If-Match`; bytes staged outside the transaction in a private local directory, compensated on failure ([ADR 0013](decisions/0013-documents.md)). Buyer review since M8: one final decision per file version, a rejection with its reason ([ADR 0014](decisions/0014-document-review.md)). Opt-in S3 storage and offline paired recovery ([ADR 0019](decisions/0019-s3-document-storage.md)). Next: hosted-provider rehearsal, pre-signed uploads, amending decisions |
 | AI extraction            | `ai` module that produces _proposals_; a human approves before any business object changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+## Production edge and AWS mock
+
+The next increment adds non-root production containers, a Caddy same-origin HTTPS edge, explicit
+proxy-address trust and separate process liveness. The local AWS mock uses private PostgreSQL
+and an authenticated S3-compatible service, including a private TLS object endpoint.
+[ADR 0020](decisions/0020-production-edge-and-aws-mock.md) records the design and
+[deployment mock](deployment-mock.md) gives commands and limits. No AWS resources are provisioned.

@@ -31,6 +31,11 @@ The next increment adds opt-in private S3-compatible document storage and a pair
 [recovery procedure](docs/storage-recovery.md), including `pnpm test:storage` against isolated
 PostgreSQL and an authenticated S3 server. Local storage remains the default. Hosted CI for
 this increment and an actual cloud-provider recovery rehearsal are pending.
+
+For the next AWS phase, an isolated [deployment mock](docs/deployment-mock.md) is available:
+`pnpm deploy:verify` exercises production containers, HTTPS cookies, proxy trust, SSE and private
+S3 over TLS. `pnpm deploy:mock` keeps that local stack running until stopped. No AWS account or
+domain is needed; no AWS resources are created. Actual AWS deployment remains deferred.
 [Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
 by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
 [handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).

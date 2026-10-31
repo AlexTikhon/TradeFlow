@@ -1,0 +1,22 @@
+{
+	admin off
+	http_port 8080
+	https_port 8443
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+http://localhost:8080 {
+	redir https://localhost:{$MOCK_HTTPS_PORT}{uri} 308
+}
+
+https://localhost:8443 {
+	tls internal
+	import /etc/caddy/routes.caddy
+}
+
+# Mock of a private HTTPS S3 endpoint. This port is never published on the host.
+https://objects:9443 {
+	tls internal
+	reverse_proxy s3:8333
+}

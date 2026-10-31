@@ -18,11 +18,20 @@ succeeded in all three jobs: `verify`, `e2e`, `demo`. This supersedes the 2026-1
 below about unpushed commits, sign-in/demo having no hosted evidence and the demo not running on Linux.
 Both failure-artifact uploads were skipped, so their behavior remains untested.
 
-The current, uncommitted increment adds opt-in S3 storage, read-only reconciliation, paired
+The S3 increment, committed locally as `d5cec43`, adds opt-in S3 storage, read-only reconciliation, paired
 object export/import and an isolated recovery rehearsal ([runbook](storage-recovery.md),
 [ADR 0019](decisions/0019-s3-document-storage.md)). CI's new `storage` job is configured;
 hosted evidence for this increment is pending. There is no deployment, scheduled/offsite backup
 or cloud-provider restore evidence. The following 2026-10-28 verification records are historical.
+
+The next increment is the requested [local AWS deployment mock](deployment-mock.md): production
+containers, HTTPS cookies, explicit proxy trust, SSE and private S3 over TLS. Actual AWS account,
+domain, IAM/RDS setup and hosted verification remain deferred. CI has a new `deploy` job;
+it has no hosted result yet.
+
+The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and builds),
+`pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS
+scenario, seven steps). Details and limits: [deployment verification](deployment-mock.md#local-verification-2026-10-31).
 
 ### Local S3 increment verification, 2026-10-31
 

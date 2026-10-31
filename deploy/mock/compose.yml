@@ -1,0 +1,138 @@
+# Local mock only. All credentials and paths are supplied by e2e/deploy/mock-run.ts.
+services:
+  permissions:
+    image: ${MOCK_API_IMAGE:?}
+    user: '0:0'
+    entrypoint: ['sh', '-c', 'chown -R 1000:1000 /data /config']
+    volumes:
+      - certificates:/data
+      - caddy-config:/config
+    network_mode: none
+
+  edge:
+    image: ${MOCK_WEB_IMAGE:?}
+    environment:
+      MOCK_HTTPS_PORT: ${MOCK_HTTPS_PORT:?}
+    volumes:
+      - certificates:/data
+      - caddy-config:/config
+      - type: bind
+        source: ${MOCK_CADDY_FILE:?}
+        target: /etc/caddy/Caddyfile
+        read_only: true
+    ports:
+      - '127.0.0.1:${MOCK_HTTP_PORT:?}:8080'
+      - '127.0.0.1:${MOCK_HTTPS_PORT:?}:8443'
+    networks:
+      front:
+        aliases: [objects]
+      objects:
+    depends_on:
+      permissions:
+        condition: service_completed_successfully
+      s3:
+        condition: service_started
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '--no-check-certificate', '-q', 'https://localhost:8443/']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    image: ${MOCK_API_IMAGE:?}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: '3000'
+      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/tradeflow_mock
+      TRUSTED_PROXY_CIDRS: ${MOCK_TRUSTED_PROXY:?}
+      DOCUMENT_STORAGE_DRIVER: s3
+      S3_BUCKET: tradeflow-mock
+      S3_REGION: us-east-1
+      S3_ENDPOINT: https://objects:9443
+      S3_FORCE_PATH_STYLE: 'true'
+      S3_PREFIX: tradeflow/
+      AWS_ACCESS_KEY_ID: ${MOCK_ACCESS_KEY:?}
+      AWS_SECRET_ACCESS_KEY: ${MOCK_SECRET_KEY:?}
+      NODE_EXTRA_CA_CERTS: /etc/tradeflow/mock-ca.crt
+    networks: [front, database]
+    volumes:
+      - type: bind
+        source: ${MOCK_CA_FILE:?}
+        target: /etc/tradeflow/mock-ca.crt
+        read_only: true
+    depends_on:
+      edge:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: tradeflow
+      POSTGRES_PASSWORD: ${MOCK_DATABASE_PASSWORD:?}
+      POSTGRES_DB: tradeflow_mock
+    volumes:
+      - database:/var/lib/postgresql
+    networks: [database]
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', 'tradeflow']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  s3:
+    image: chrislusf/seaweedfs:4.17@sha256:186de7ef977a20343ee9a5544073f081976a29e2d29ecf8379891e7bf177fbe9
+    command:
+      [
+        'mini',
+        '-dir=/data',
+        '-ip=127.0.0.1',
+        '-ip.bind=0.0.0.0',
+        '-s3.config=/etc/mock-s3.json',
+        '-admin.ui=false',
+        '-webdav=false',
+      ]
+    volumes:
+      - objects:/data
+      - type: bind
+        source: ${MOCK_S3_AUTH_FILE:?}
+        target: /etc/mock-s3.json
+        read_only: true
+    networks: [objects]
+
+  tools:
+    profiles: [ops]
+    image: ${MOCK_TOOLS_IMAGE:?}
+    environment:
+      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/tradeflow_mock
+      NODE_ENV: development
+      DOCUMENT_STORAGE_DRIVER: local
+      DOCUMENT_STORAGE_DIR: /tmp/seed-documents
+    networks: [database, objects]
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  front:
+  database:
+    internal: true
+  objects:
+    internal: true
+
+volumes:
+  certificates:
+  caddy-config:
+  database:
+  objects:

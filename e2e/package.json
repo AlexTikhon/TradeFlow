@@ -8,10 +8,13 @@
     "test:e2e": "playwright test",
     "demo": "node --import tsx demo/demo.ts",
     "demo:verify": "playwright test --config demo/playwright.config.ts",
+    "deploy:mock": "node --import tsx deploy/mock.ts",
+    "deploy:verify": "playwright test --config deploy/playwright.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
+    "@tradeflow/contracts": "workspace:*",
     "@types/node": "24.19.2",
     "@types/pg": "8.23.1",
     "pg": "8.23.1",

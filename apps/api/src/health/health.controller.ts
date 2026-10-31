@@ -10,6 +10,12 @@ import { Public } from '../modules/auth/auth.decorators.js';
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Process-only liveness: a database outage must not turn into a restart loop. */
+  @Get('live')
+  live(): { status: 'ok' } {
+    return { status: 'ok' };
+  }
+
   @Get()
   async check(): Promise<{ status: 'ok' }> {
     try {

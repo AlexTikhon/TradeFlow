@@ -143,8 +143,10 @@ deleted at any time.
   [Paired backup, restore and reconciliation](storage-recovery.md) are explicit maintenance
   operations; no scheduled/offsite backup or cloud-provider recovery is configured. There is no
   virus scan; the PDF check is a signature check. Orphan removal remains manual.
-- Never deployed. HTTPS, the production cookie (`Secure`, `__Host-`) and any hosting are
-  unverified; the demo runs `NODE_ENV=development` over plain HTTP on loopback.
+- No hosted deployment. The [local AWS mock](deployment-mock.md) exercises production mode,
+  HTTPS and `Secure`/`__Host-` cookies. It uses a private mock CA and local services, so AWS
+  IAM/RDS, public DNS, ACME and cloud backups remain unverified. The regular demo still runs
+  `NODE_ENV=development` over plain HTTP on loopback.
 - Only seeded organizations and users, with a public demo password. No password reset, SSO or
   lockout. Seeded notice times are relative to the seed, so their states drift.
 - Browser coverage is Chromium only, and no person has run any walkthrough
@@ -156,14 +158,15 @@ deleted at any time.
 ## Return-to-work checklist
 
 1. `git status` and `git log --oneline origin/main..main`: note anything uncommitted or unpushed.
-2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e`, `demo` and `storage`
+2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e`, `demo`, `storage` and `deploy`
    all succeeded, then update [at a glance](mvp-status.md#verification-at-a-glance) with the run.
    If a job failed, its diagnostics artifact is kept for seven days.
 3. `node --version`, `pnpm --version`, `docker version`: Node 24.11 or later, pnpm 11.9.0, a
    running daemon.
 4. `pnpm install --frozen-lockfile`.
 5. Run [verification](#verification-against-isolated-postgresql-only) against a throwaway
-   server, then remove it. Also run `pnpm test:storage`, which owns its PostgreSQL and S3 servers.
+   server, then remove it. Also run `pnpm test:storage` and `pnpm deploy:verify`, which own
+   their database/object servers and cleanup.
 6. Before `pnpm db:up`, check who owns port 5433.
 7. Re-read [Limitations](mvp-status.md#limitations) and the directions below before choosing
    work.
