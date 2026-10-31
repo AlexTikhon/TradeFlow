@@ -18,6 +18,7 @@
     "format:check": "prettier --check .",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "test:e2e": "pnpm codegen && pnpm --filter @tradeflow/e2e test:e2e",
+    "test:storage": "pnpm codegen && pnpm --filter @tradeflow/api test:storage",
     "demo": "pnpm codegen && pnpm --filter @tradeflow/e2e demo",
     "demo:verify": "pnpm codegen && pnpm --filter @tradeflow/e2e demo:verify",
     "db:up": "docker compose up -d --wait postgres",

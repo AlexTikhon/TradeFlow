@@ -3,6 +3,7 @@ import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AppModule } from '../../src/app.module.js';
 import { configureApp } from '../../src/app.setup.js';
+import { APP_CONFIG, type AppConfig } from '../../src/config/app-config.js';
 import { PrismaService } from '../../src/infrastructure/prisma/prisma.service.js';
 import { DocumentStorage } from '../../src/infrastructure/storage/document-storage.js';
 import {
@@ -39,6 +40,7 @@ export interface TestApp {
 }
 
 export interface TestAppOptions {
+  config?: AppConfig;
   /** Document storage to use instead of the configured directory (a temporary one, say). */
   storage?: DocumentStorage;
   /** The event bus to use instead of the plain one (one that can be made to fail, say). */
@@ -53,6 +55,7 @@ export interface TestAppOptions {
 
 /** Boots the real application module and HTTP pipeline against the test database. */
 export async function createTestApp({
+  config,
   storage,
   eventBus,
   eventStreams,
@@ -60,6 +63,7 @@ export async function createTestApp({
   signInAdmission = SUITE_SIGN_IN_ADMISSION,
 }: TestAppOptions = {}): Promise<TestApp> {
   const builder = Test.createTestingModule({ imports: [AppModule] });
+  if (config) builder.overrideProvider(APP_CONFIG).useValue(config);
   builder.overrideProvider(SIGN_IN_ADMISSION_OPTIONS).useValue(signInAdmission);
   if (storage) {
     builder.overrideProvider(DocumentStorage).useValue(storage);

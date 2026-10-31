@@ -52,6 +52,21 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  # Real authenticated S3 API + PostgreSQL, failure compensation and paired recovery rehearsal.
+  # The suite owns both loopback-only containers, credentials, databases and cleanup.
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:storage
+
   # Chromium smoke suite on its own runner and Postgres server. Global setup (e2e/support)
   # creates the `_e2e` database, builds and starts the API and web app, and releases all of it
   # at the end, pass or fail. No retries: playwright.config.ts sets `retries: 0`.

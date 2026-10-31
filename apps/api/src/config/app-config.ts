@@ -24,16 +24,56 @@ const EnvironmentSchema = z
     SIGN_IN_ATTEMPTS_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(20),
     // Private directory for uploaded document bytes (ADR 0013). Never served statically.
     DOCUMENT_STORAGE_DIR: z.string().trim().min(1).optional(),
+    DOCUMENT_STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
+    S3_BUCKET: z.string().trim().min(3).optional(),
+    S3_REGION: z.string().trim().min(1).optional(),
+    S3_ENDPOINT: z.url({ protocol: /^https?$/ }).optional(),
+    S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).default('false'),
+    S3_PREFIX: z
+      .string()
+      .regex(/^(?:[a-zA-Z0-9_-]+\/)*$/)
+      .default('tradeflow/'),
   })
   .superRefine((env, context) => {
     // A deployment must say where evidence is kept; a default under the working directory
     // could land on an ephemeral filesystem.
-    if (env.NODE_ENV === 'production' && env.DOCUMENT_STORAGE_DIR === undefined) {
+    if (
+      env.DOCUMENT_STORAGE_DRIVER === 'local' &&
+      env.NODE_ENV === 'production' &&
+      env.DOCUMENT_STORAGE_DIR === undefined
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['DOCUMENT_STORAGE_DIR'],
         message: 'Required in production',
       });
+    }
+    if (env.DOCUMENT_STORAGE_DRIVER === 's3') {
+      for (const name of ['S3_BUCKET', 'S3_REGION'] as const) {
+        if (!env[name])
+          context.addIssue({ code: 'custom', path: [name], message: 'Required for S3 storage' });
+      }
+      if (
+        env.S3_ENDPOINT &&
+        env.NODE_ENV === 'production' &&
+        !env.S3_ENDPOINT.startsWith('https://')
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['S3_ENDPOINT'],
+          message: 'HTTPS is required in production',
+        });
+      }
+      if (env.S3_ENDPOINT) {
+        const endpoint = new URL(env.S3_ENDPOINT);
+        if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+          context.addIssue({
+            code: 'custom',
+            path: ['S3_ENDPOINT'],
+            message: 'Endpoint must not contain credentials, a query or a fragment',
+          });
+        }
+      }
     }
   });
 
@@ -52,10 +92,22 @@ export interface AppConfig {
     /** Attempts one client address may make per one-minute window (ADR 0018). */
     attemptsPerMinute: number;
   };
-  documentStorage: {
-    /** Absolute path of the private directory that holds uploaded document bytes. */
-    directory: string;
-  };
+  documentStorage: LocalStorageConfig | S3StorageConfig;
+}
+
+export interface LocalStorageConfig {
+  driver: 'local';
+  /** Absolute path of the private directory that holds uploaded document bytes. */
+  directory: string;
+}
+
+export interface S3StorageConfig {
+  driver: 's3';
+  bucket: string;
+  region: string;
+  endpoint: string | undefined;
+  forcePathStyle: boolean;
+  prefix: string;
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -74,6 +126,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     SESSION_TTL_MINUTES,
     SIGN_IN_ATTEMPTS_PER_MINUTE,
     DOCUMENT_STORAGE_DIR,
+    DOCUMENT_STORAGE_DRIVER,
+    S3_BUCKET,
+    S3_REGION,
+    S3_ENDPOINT,
+    S3_FORCE_PATH_STYLE,
+    S3_PREFIX,
   } = result.data;
   return {
     nodeEnv: NODE_ENV,
@@ -82,9 +140,20 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     databaseUrl: DATABASE_URL,
     session: { ttlMs: SESSION_TTL_MINUTES * 60_000, secureCookie: NODE_ENV === 'production' },
     signIn: { attemptsPerMinute: SIGN_IN_ATTEMPTS_PER_MINUTE },
-    documentStorage: {
-      directory: resolve(DOCUMENT_STORAGE_DIR ?? DEFAULT_DOCUMENT_STORAGE_DIR),
-    },
+    documentStorage:
+      DOCUMENT_STORAGE_DRIVER === 's3'
+        ? {
+            driver: 's3',
+            bucket: z.string().parse(S3_BUCKET),
+            region: z.string().parse(S3_REGION),
+            endpoint: S3_ENDPOINT,
+            forcePathStyle: S3_FORCE_PATH_STYLE === 'true',
+            prefix: S3_PREFIX,
+          }
+        : {
+            driver: 'local',
+            directory: resolve(DOCUMENT_STORAGE_DIR ?? DEFAULT_DOCUMENT_STORAGE_DIR),
+          },
   };
 }
 

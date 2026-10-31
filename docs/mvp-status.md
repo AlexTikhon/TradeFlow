@@ -6,11 +6,50 @@ under [Limitations](#limitations). The [demo](demo.md) walks through every area.
 on a seeded voyage has been driven end to end once in a real browser by a script, but not yet by
 a person. Its second walkthrough, on a voyage created and set up in the app
 ([ADR 0016](decisions/0016-initial-voyage-setup.md)), is automated: `pnpm demo:verify` drives it in
-Chromium against a fresh one-command demo (`pnpm demo`). It has passed locally, and CI is
-configured to run it, but no hosted run has executed it yet; no person has run it. What was
+Chromium against a fresh one-command demo (`pnpm demo`). It passed locally and in hosted Linux
+CI on `d00635f`; no person has run it. What was
 verified where, and on which code: [at a glance](#verification-at-a-glance).
 
 ## Verification at a glance
+
+**Updated 2026-10-31:** `d00635f6813c4706f3a02e837e2f5cbd47ae457e` is on `origin/main`.
+[Hosted run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)
+succeeded in all three jobs: `verify`, `e2e`, `demo`. This supersedes the 2026-10-28 statements
+below about unpushed commits, sign-in/demo having no hosted evidence and the demo not running on Linux.
+Both failure-artifact uploads were skipped, so their behavior remains untested.
+
+The current, uncommitted increment adds opt-in S3 storage, read-only reconciliation, paired
+object export/import and an isolated recovery rehearsal ([runbook](storage-recovery.md),
+[ADR 0019](decisions/0019-s3-document-storage.md)). CI's new `storage` job is configured;
+hosted evidence for this increment is pending. There is no deployment, scheduled/offsite backup
+or cloud-provider restore evidence. The following 2026-10-28 verification records are historical.
+
+### Local S3 increment verification, 2026-10-31
+
+On the uncommitted working tree above `d00635f`, Windows, Node 24.11.1 and pnpm 11.9.0:
+
+| Check              | Result                                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm check`       | Passed: format, lint, typecheck, 193 contracts + 803 API + 460 web tests (1,456), production builds                |
+| API `test:storage` | Passed: 14 tests against the real S3 adapter, authenticated SeaweedFS 4.17 and PostgreSQL 18                       |
+| `pnpm test:e2e`    | Passed: 14 Chromium tests, no retries                                                                              |
+| `pnpm demo:verify` | Passed: 1 fresh-voyage Chromium walkthrough, F1 to F8 and historical file versions                                 |
+| Other checks       | Frozen-lockfile install, actionlint 1.7.12, `git diff --check`; 245 local Markdown file links checked, none broken |
+
+The S3 suite exercised multipart completion/abort, chunked uploads past the byte limit, lost
+PUT and multipart-completion responses, refused writes/cleanup, competing SQL writes, certain
+rollback and both possible outcomes of a lost COMMIT acknowledgement, private access, corruption
+and missing bytes. Its recovery rehearsal exported two immutable file versions with a database
+dump, restored into an empty database and a new bucket, downloaded both through the real API
+with matching SHA-256, and found no discrepancies or unexplained orphans. Overwriting an existing
+backup/target and importing a tampered backup were refused.
+
+Regular checks and E2E used explicit URLs on a separate disposable PostgreSQL server; S3 and demo
+owned their own servers. Test containers and temporary backup/demo directories were removed.
+The existing injected-failure log lines, node-postgres deprecation and Vite chunk-size warnings
+did not fail these runs. This is local evidence, not hosted CI or cloud-provider verification.
+
+### Historical snapshot, 2026-10-28
 
 As of 2026-10-28. Local `main` is ahead of `origin/main` by `42ee8f2`, `b91f477` and the commit
 that adds the `demo` job with this record; none of them has been pushed.
@@ -246,8 +285,7 @@ other listeners" in `voyage-event-bus.spec.ts` makes a listener throw on purpose
   seeded organizations, then instructions, a rejected, replaced and approved bill of lading
   (download compared by SHA-256), both Action Center queues (reached by their own 30-second
   polling on a moved page clock), earlier versions, the timeline, the final buyer's view and an
-  outsider. CI is configured to run it as the `demo` job, which has not run on a hosted runner
-  yet. It is not a human run.
+  outsider. The `demo` job passed in hosted Linux CI on `d00635f`. It is not a human run.
 - **Fresh-voyage walkthrough, by a person** ([demo, steps F1 to F8](demo.md#walkthrough-2-a-fresh-voyage)):
   **not yet performed.** The automated test proves the flow and the wording, not the pacing, real
   window focus, the native file and download dialogs, or how it reads to an audience. Its
@@ -292,8 +330,10 @@ extraction ([README](../README.md#roadmap)).
 - **Best-effort live updates.** Signals are not stored, carry no ids and cannot be replayed. A
   signal lost while a stream is down is made up for by the refetch on every (re)connection and by
   30-second polling while disconnected. REST stays the source of truth.
-- **Local document storage.** Bytes live in a private local directory (`DOCUMENT_STORAGE_DIR`).
-  There are no backups, no object store and no virus scanning. The PDF check is a signature
+- **Document storage.** The default is a private local directory (`DOCUMENT_STORAGE_DIR`);
+  opt-in S3-compatible storage and an offline paired backup/restore are now available
+  ([runbook](storage-recovery.md)). No scheduled/offsite backup or cloud-provider restore has
+  been verified. There is no virus scanning. The PDF check is a signature
   check: a file that starts with `%PDF-` but is otherwise broken is accepted. Orphaned bytes (a
   crash between keeping a file and committing it, a failed removal, an unknown commit outcome)
   are logged and removed by a manual procedure
@@ -306,17 +346,16 @@ extraction ([README](../README.md#roadmap)).
   `e2e/.output/` as `e2e-diagnostics` when the e2e suite fails, and `e2e/.output/demo/` as
   `demo-diagnostics` when the demo walkthrough fails (hidden files included, cookie- and
   trace-bearing paths excluded, a missing upload failing the step). Every hosted run so far
-  passed, so the e2e upload was skipped, and the demo job has not run at all. A green run says
+  passed, so both uploads were skipped. A green run says
   nothing about whether either upload works; only a failing run will.
 - **The demo has not been run by a person.** The [walkthrough record](demo.md#walkthrough-record)
   is of a scripted Chromium session on the seeded voyage. It found one cosmetic defect: after an
   upload, the emptied upload form's disabled button shows a stale version number. A bounded fix
   is proposed there. The [fresh-voyage walkthrough](demo.md#walkthrough-2-a-fresh-voyage) is
   automated (`pnpm demo:verify`, passed locally on 2026-10-28) but has not been run by a person.
-  CI is configured to run it; no hosted run has yet.
+  The hosted `demo` job passed on `d00635f`.
 - **The one-command demo is local only.** `pnpm demo` needs a running Docker daemon and was
-  checked on Windows 11 only; Linux and macOS were not available. CI's `demo` job will be its
-  first Linux run, once the workflow change is pushed. It runs `NODE_ENV=development`
+  checked on Windows 11 and subsequently by CI on Linux (`d00635f`); macOS remains unchecked. It runs `NODE_ENV=development`
   over plain HTTP, so it says nothing about a deployment. Its state is discarded on every stop; a
   demo killed before it can clean up leaves its container, directory and two processes running,
   to be removed by hand as [described](demo.md#starting-the-demo-pnpm-demo).

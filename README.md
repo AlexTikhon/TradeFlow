@@ -22,12 +22,15 @@ Next come further notices, deadlines and workflow.
 
 ## Status: original MVP complete
 
-The eight original MVP areas are implemented and verified in Linux CI. The latest hosted run
-passed on `2ad0cd1`, the Action Center included. As of 2026-10-28, two later commits have passed
-locally but have no hosted run yet: sign-in admission (`42ee8f2`) and the one-command demo
-(`b91f477`). `pnpm demo` starts a fresh, isolated demo with one command. `pnpm demo:verify`
-drives its fresh-voyage walkthrough in Chromium; CI is configured to run it as the `demo` job,
-which has not run on a hosted runner yet. No person has run a walkthrough.
+The eight original MVP areas are implemented. The latest hosted run on `d00635f` passed
+`verify`, `e2e` and `demo` ([run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)),
+including sign-in admission and the fresh-voyage walkthrough on Linux. `pnpm demo` starts a
+fresh, isolated demo; `pnpm demo:verify` drives it in Chromium. No person has run a walkthrough.
+
+The next increment adds opt-in private S3-compatible document storage and a paired database/object
+[recovery procedure](docs/storage-recovery.md), including `pnpm test:storage` against isolated
+PostgreSQL and an authenticated S3 server. Local storage remains the default. Hosted CI for
+this increment and an actual cloud-provider recovery rehearsal are pending.
 [Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
 by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
 [handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).
@@ -47,14 +50,14 @@ by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthr
 | API          | `GET`/`POST /api/voyages`, `GET /api/voyages/:voyageId`, `GET .../trade-string`, `POST .../trade-string` (one-time setup of a new voyage, [ADR 0016](docs/decisions/0016-initial-voyage-setup.md), proposed), `GET /api/organizations?search=` (operators), `.../my-contracts`, `.../timeline`, `.../events` (SSE), `GET`/`POST .../notices`, `GET .../notices/:noticeId`, `POST .../notices/:noticeId/acknowledgement`, `GET .../documentary-instructions`, `GET`/`PUT .../contracts/:contractId/documentary-instructions`, `POST .../revisions/:n/acknowledgement`, `GET .../documents`, `POST .../revisions/:n/documents/:type/versions`, `GET .../versions/:v/content`, `POST .../versions/:v/review`, `GET /api/action-items` (the organization's open actions across voyages, [ADR 0017](docs/decisions/0017-action-center.md), proposed), `GET /api/vessels`, `/commodities`, `/ports`, `/api/auth/*`, `GET /api/health`, OpenAPI at `/api/docs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Web          | Sign-in, protected routes, user menu; voyage list (status filter in the URL), details with the trade string drawn in contract order (and, for operators of the exporter of a new voyage, a form to set it up once: search, order, review), an ETA notice panel (list, issue, acknowledge), a documentary-instruction panel (revisions, form, acknowledgement; a draft survives a conflict and is re-sent only after the user reviews the newer version), documents under each revision (upload, version history with every decision, authenticated download, approve or reject; a chosen file or a decision being made survives every failure, and a conflict says whether a new file or a decision caused it), a timeline of who did what (older pages on request), notices, instructions, documents and timeline kept current from the voyage's event stream (polling while it is down; a chosen file or a decision being made is never re-based, re-sent or re-targeted by a push), an Action Center (`/actions`: the organization's open actions across voyages, filters in the URL, a page at a time, refreshed on its own) whose items open the exact notice, revision or file version on its voyage's page (history when superseded or replaced, never a command), and a creation form for operators; cache partitioned by identity and purged on every change; writes never retried and dropped if the identity changed |
 | Data         | PostgreSQL 18 schema with DB-enforced invariants (immutable issued notices, instruction revisions, document versions and decisions, versioned instructions and documents, append-only audit events), and an idempotent demo seed (7 voyages, 6 of them with a trade string, 4 ETA notices, 12 organizations, 14 users)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 1,447 Vitest tests (authorization, transactions, races and constraints tested against real PostgreSQL), 14 Chromium end-to-end tests run separately (`pnpm test:e2e`) and the one-test demo walkthrough (`pnpm demo:verify`), as counted locally on `b91f477` on 2026-10-28 ([MVP status](docs/mvp-status.md#local-verification-of-b91f477-2026-10-28)); GitHub Actions CI runs the checks, the smoke suite and the demo walkthrough as three jobs (the third configured, not yet run)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Quality      | Strict TypeScript, type-aware ESLint, Prettier, 1,447 Vitest tests (authorization, transactions, races and constraints tested against real PostgreSQL), 14 Chromium end-to-end tests run separately (`pnpm test:e2e`) and the one-test demo walkthrough (`pnpm demo:verify`), as counted locally on `b91f477` on 2026-10-28 ([MVP status](docs/mvp-status.md#local-verification-of-b91f477-2026-10-28)); GitHub Actions CI runs the checks, the smoke suite and the demo walkthrough as three jobs, all passed on `d00635f`; the new `storage` job covers the S3 increment                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 Voyage creation, the one-time setup of a new voyage's trade string, ETA notices, documentary instructions,
 documents and their review write data. Seeded trade strings are read-only; an exporter's operator sets up a
 new voyage's chain once, on its page, which adds the named organizations as participants.
 Editing or correcting a trade string, editing voyages, adding participants any other way or inviting
-organizations, other notice types, editing notices, amending or reopening document decisions, object storage
-(S3), notifications, live updates of the voyage itself and its trade string, delivery across several API instances and AI features are
+organizations, other notice types, editing notices, amending or reopening document decisions,
+notifications, live updates of the voyage itself and its trade string, delivery across several API instances and AI features are
 **intentionally not built yet**. See
 [Roadmap](#roadmap) and the [domain model](docs/domain-model.md#eta-notices).
 
@@ -196,7 +199,8 @@ and approve or reject the latest one (a rejection needs a reason). Ana sees each
 version it was made on, and a replacement goes back to Claire as pending. Decide as Claire while
 Ana replaces the file in another tab to see a conflict: each side is told whether a new file or a
 decision came first, and keeps what it had chosen or typed.
-Uploaded bytes are kept in `apps/api/var/documents` (`DOCUMENT_STORAGE_DIR`). Re-seeding removes
+By default, uploaded bytes are kept in `apps/api/var/documents` (`DOCUMENT_STORAGE_DIR`); opt-in
+S3 storage and paired recovery are described in the [runbook](docs/storage-recovery.md). Re-seeding removes
 instructions and documents on the seeded voyages, and the documents' stored bytes.
 
 API docs are at <http://localhost:3000/api/docs>.
@@ -255,8 +259,7 @@ screenshots, the HTML report; nothing there records headers or cookies) as the
 A third job, `demo`, runs `pnpm demo:verify` on its own runner. It has no database service: the
 demo starts its own PostgreSQL 18 container on the runner's Docker daemon and removes it
 afterwards. It installs Chromium the same way, has no retries, and on a failing walkthrough
-uploads `e2e/.output/demo/` as `demo-diagnostics`, with the same exclusions. The job is configured
-but has not run on a hosted runner yet ([MVP status](docs/mvp-status.md#verification-at-a-glance)).
+uploads `e2e/.output/demo/` as `demo-diagnostics`, with the same exclusions. The job passed on `d00635f` in hosted Linux CI ([MVP status](docs/mvp-status.md#verification-at-a-glance)).
 
 ### How tests work
 

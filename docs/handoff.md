@@ -1,7 +1,7 @@
 # Handoff: picking TradeFlow up again
 
 A practical note for whoever restarts work, written at the end of the planned implementation
-(2026-10-28). What was verified, where and on which commit is kept in one place:
+(2026-10-28), updated for S3 storage on 2026-10-31. What was verified, where and on which commit is kept in one place:
 [MVP status, at a glance](mvp-status.md#verification-at-a-glance). Read that first; this page
 does not repeat its numbers.
 
@@ -139,29 +139,31 @@ deleted at any time.
 ## Known operational limitations
 
 - One API instance: the event bus and the sign-in admission limits are in process.
-- Document bytes are on a local disk with no backup, object store or virus scan. The PDF check
-  is a signature check. Orphaned bytes are removed by a
-  [manual procedure](architecture.md#operational-concerns-current-state).
+- Document bytes use the local disk by default, or opt-in private S3-compatible storage.
+  [Paired backup, restore and reconciliation](storage-recovery.md) are explicit maintenance
+  operations; no scheduled/offsite backup or cloud-provider recovery is configured. There is no
+  virus scan; the PDF check is a signature check. Orphan removal remains manual.
 - Never deployed. HTTPS, the production cookie (`Secure`, `__Host-`) and any hosting are
   unverified; the demo runs `NODE_ENV=development` over plain HTTP on loopback.
 - Only seeded organizations and users, with a public demo password. No password reset, SSO or
   lockout. Seeded notice times are relative to the seed, so their states drift.
 - Browser coverage is Chromium only, and no person has run any walkthrough
   ([records](demo.md#record-of-walkthrough-2)).
-- CI's `demo` job and both failure-artifact uploads have never run on a hosted runner; the demo
-  has run on Windows only.
+- CI's `verify`, `e2e` and `demo` jobs passed on `d00635f` on Linux
+  ([run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)). Both
+  failure-artifact uploads were skipped. The new `storage` job has no hosted result yet.
 
 ## Return-to-work checklist
 
 1. `git status` and `git log --oneline origin/main..main`: note anything uncommitted or unpushed.
-2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e` and `demo`
+2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e`, `demo` and `storage`
    all succeeded, then update [at a glance](mvp-status.md#verification-at-a-glance) with the run.
    If a job failed, its diagnostics artifact is kept for seven days.
 3. `node --version`, `pnpm --version`, `docker version`: Node 24.11 or later, pnpm 11.9.0, a
    running daemon.
 4. `pnpm install --frozen-lockfile`.
 5. Run [verification](#verification-against-isolated-postgresql-only) against a throwaway
-   server, then remove it.
+   server, then remove it. Also run `pnpm test:storage`, which owns its PostgreSQL and S3 servers.
 6. Before `pnpm db:up`, check who owns port 5433.
 7. Re-read [Limitations](mvp-status.md#limitations) and the directions below before choosing
    work.
@@ -170,7 +172,9 @@ deleted at any time.
 
 Not release blockers for the local demo. In order, each only when its trigger occurs.
 
-1. **Durable document storage, with a tested recovery procedure.** _Trigger:_ before the first
+1. **Durable document storage, with a tested recovery procedure.** The adapter, maintenance tools
+   and isolated rehearsal are implemented in [ADR 0019](decisions/0019-s3-document-storage.md);
+   hosted-provider verification remains. _Trigger:_ before the first
    hosted environment that holds data anyone would miss. _Done when:_ document bytes live in an
    S3-compatible object store behind the existing storage interface, with the private-access and
    compensation guarantees of [ADR 0013](decisions/0013-documents.md) unchanged; and a written

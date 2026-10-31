@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config/app-config.js';
 import { DocumentStorage } from './document-storage.js';
-import { LocalDocumentStorage } from './local-document-storage.js';
+import { createDocumentStorage } from './create-document-storage.js';
 
-/** Provides `DocumentStorage`: the local filesystem, under the configured private directory. */
+/** Provides the explicitly configured private storage adapter. */
 @Module({
   providers: [
     {
       provide: DocumentStorage,
-      useFactory: (config: AppConfig) => new LocalDocumentStorage(config.documentStorage.directory),
+      useFactory: (config: AppConfig) => createDocumentStorage(config),
       inject: [APP_CONFIG],
     },
   ],

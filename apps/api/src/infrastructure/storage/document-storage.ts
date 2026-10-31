@@ -3,8 +3,7 @@ import type { Readable } from 'node:stream';
 /*
  * Private storage for document bytes (ADR 0013). Small on purpose: what the documents module
  * needs to receive an upload outside any database transaction, keep it under a key of the
- * server's choosing, read it back, and undo it. The local filesystem implements it today; an
- * object store can later, behind the same interface.
+ * server's choosing, read it back, and undo it. Implemented by the local filesystem and S3.
  *
  * Bytes move through two places: a **staging** area while they are being received, and their
  * final place under a **key**. Neither is ever derived from anything the client sends.
@@ -35,6 +34,8 @@ export abstract class DocumentStorage {
   /**
    * Moves staged bytes to their final place under a new key, generated here, and returns it. The
    * staged object is used up. If this rejects, the staged bytes are still there to discard.
+   * This may be a logical promotion: S3 already has the bytes under their final private key;
+   * only recording that key in the database publishes them to authorized readers.
    */
   abstract promote(staged: StagedObject): Promise<string>;
 

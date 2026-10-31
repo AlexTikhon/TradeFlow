@@ -12,7 +12,8 @@ import {
 } from '../src/generated/prisma/client.js';
 import { loadConfig } from '../src/config/app-config.js';
 import type { DocumentStorage } from '../src/infrastructure/storage/document-storage.js';
-import { LocalDocumentStorage } from '../src/infrastructure/storage/local-document-storage.js';
+import { createDocumentStorage } from '../src/infrastructure/storage/create-document-storage.js';
+import { S3DocumentStorage } from '../src/infrastructure/storage/s3-document-storage.js';
 import { hashPassword } from '../src/modules/auth/password.js';
 import { deadlineViolations } from '../src/modules/notices/notice-rules.js';
 import { toLinearTradeString } from '../src/modules/voyages/trade-string.js';
@@ -574,8 +575,8 @@ if (!connectionString) {
 }
 
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
-// The same directory the API keeps document bytes in.
-const storage = new LocalDocumentStorage(loadConfig(process.env).documentStorage.directory);
+// The same storage adapter and namespace the API keeps document bytes in.
+const storage = createDocumentStorage(loadConfig(process.env));
 try {
   await seed(prisma, storage);
   console.log(
@@ -586,5 +587,6 @@ try {
       `Every user's password is "${DEMO_PASSWORD}".`,
   );
 } finally {
+  if (storage instanceof S3DocumentStorage) storage.onModuleDestroy();
   await prisma.$disconnect();
 }
