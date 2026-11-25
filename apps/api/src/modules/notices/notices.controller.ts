@@ -35,6 +35,7 @@ import { schemaRef } from '../../common/http/openapi.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
+import { ApiDemoWriteBudgetResponse } from '../demo-write-budget/demo-write-budget.js';
 import { NoticesService } from './notices.service.js';
 
 const voyageIdPipe = () => new ZodValidationPipe(VoyageIdParamSchema);
@@ -78,6 +79,7 @@ export class NoticesController {
   }
 
   @Post()
+  @ApiDemoWriteBudgetResponse()
   @ApiOperation({
     summary: 'Issue an ETA notice to the buyer under one of your contracts',
     description:
@@ -135,6 +137,7 @@ export class NoticesController {
   }
 
   @Post(':noticeId/acknowledgement')
+  @ApiDemoWriteBudgetResponse()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Acknowledge receipt of a notice under one of your contracts',

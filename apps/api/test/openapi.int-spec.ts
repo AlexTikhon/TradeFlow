@@ -165,6 +165,42 @@ describe('OpenAPI document', () => {
     }
   });
 
+  it('documents the demo write budget on every business command, and only there', async () => {
+    const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
+    type Operation = {
+      responses: Record<string, { description?: string; headers?: Record<string, unknown> }>;
+    };
+    const document = response.body as { paths: Record<string, Record<string, Operation>> };
+
+    // Every operation that changes anything. A new one must be added here, and to the budget
+    // (ADR 0021) unless, like signing in and out, it is not a business command.
+    const changing = Object.entries(document.paths).flatMap(([path, operations]) =>
+      Object.keys(operations)
+        .filter((method) => ['post', 'put', 'patch', 'delete'].includes(method))
+        .map((method) => `${method.toUpperCase()} ${path}`),
+    );
+    const business = [
+      'POST /api/voyages',
+      'POST /api/voyages/{voyageId}/trade-string',
+      'POST /api/voyages/{voyageId}/notices',
+      'POST /api/voyages/{voyageId}/notices/{noticeId}/acknowledgement',
+      'PUT /api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions',
+      'POST /api/voyages/{voyageId}/contracts/{contractId}/documentary-instructions/revisions/{revisionNumber}/acknowledgement',
+      `POST ${DOCUMENT}/versions`,
+      `POST ${DOCUMENT}/versions/{versionNumber}/review`,
+    ];
+    expect(changing.sort()).toEqual(
+      [...business, 'POST /api/auth/sign-in', 'POST /api/auth/sign-out'].sort(),
+    );
+
+    for (const entry of business) {
+      const [method = '', path = ''] = entry.split(' ');
+      const refused = document.paths[path]?.[method.toLowerCase()]?.responses['429'];
+      expect(refused?.description, entry).toMatch(/operator resetting the demo/);
+      expect(refused?.headers, entry).toBeUndefined();
+    }
+  });
+
   it('documents voyage creation with a closed request schema and its failure responses', async () => {
     const response = await request(ctx.server).get('/api/docs/openapi.json').expect(200);
     type Operation = {
@@ -213,7 +249,7 @@ describe('OpenAPI document', () => {
       $ref: '#/components/schemas/ConfigureTradeStringRequest',
     });
     expect(Object.keys(setup?.responses ?? {}).sort()).toEqual(
-      ['200', '400', '401', '403', '404', '409', '412'].sort(),
+      ['200', '400', '401', '403', '404', '409', '412', '429'].sort(),
     );
     expect(setup?.responses['200']?.content?.['application/json']).toEqual({
       schema: { $ref: '#/components/schemas/TradeString' },

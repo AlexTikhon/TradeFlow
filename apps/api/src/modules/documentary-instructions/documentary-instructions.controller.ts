@@ -48,6 +48,7 @@ import {
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
+import { ApiDemoWriteBudgetResponse } from '../demo-write-budget/demo-write-budget.js';
 import { DocumentaryInstructionsService } from './documentary-instructions.service.js';
 
 const voyageIdPipe = () => new ZodValidationPipe(VoyageIdParamSchema);
@@ -138,6 +139,7 @@ export class DocumentaryInstructionsController {
   }
 
   @Put(INSTRUCTION_PATH)
+  @ApiDemoWriteBudgetResponse()
   @ApiOperation({
     summary: 'Give or revise the documentary instructions under one of your contracts',
     description:
@@ -214,6 +216,7 @@ export class DocumentaryInstructionsController {
   }
 
   @Post(`${INSTRUCTION_PATH}/revisions/:revisionNumber/acknowledgement`)
+  @ApiDemoWriteBudgetResponse()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Acknowledge receipt of one revision of the documentary instructions',

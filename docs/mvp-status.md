@@ -42,6 +42,36 @@ The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and b
 `pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS
 scenario, seven steps). Details and limits: [deployment verification](deployment-mock.md#local-verification-2026-10-31).
 
+### Portfolio write budget, local verification, 2026-11-25
+
+The portfolio demo now admits at most 200 business commands per run's database, then answers
+429 to changes while reads, downloads, live updates and sign-in/out keep working; the reset is
+stopping the run and starting a new one ([ADR 0021](decisions/0021-portfolio-demo-write-budget.md),
+[demo](demo.md#the-portfolio-write-budget)). On the working tree above `b8dd0e6` (whose mock-CA
+fix is unchanged), Windows 11, Docker Desktop 29.9.3:
+
+| Check                                | Result                                                                                                                                                                                                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm check`                         | Passed with `npm_config_workspace_concurrency=1`: format, lint, typecheck, 193 contracts + 823 API + 520 web tests (1,536), builds. Three plain runs each failed 2–3 API tests with 5 s timeouts only (below).                                                |
+| Budget suite                         | `demo-write-budget.int-spec.ts`, 10 tests on PostgreSQL 18: disabled mode, exhaustion of all eight commands with no rows/audit/files/events, concurrent final and first admissions, restart, ordering, no refunds, fail-closed. Mutation-checked (see below). |
+| `pnpm demo:portfolio:verify`         | Passed: 3 Chromium tests; the new one confirms 11 + 189 commands, then refusals in the browser with the explanation, reads, downloads and sign-out.                                                                                                           |
+| `pnpm demo:portfolio:rehearse-reset` | Passed: two runs, each removed (container, directory, both servers); the fresh run had the showcase and a whole allowance ([record](demo.md#resetting-the-portfolio-demo)).                                                                                   |
+| `pnpm demo:verify`                   | Passed with `PORTFOLIO_DEMO_WRITE_PROTECTION=enabled` and an allowance of 1 in the caller's shell: the plain demo does not inherit them.                                                                                                                      |
+| `pnpm deploy:verify`                 | Passed: one production HTTPS scenario (10.3 min).                                                                                                                                                                                                             |
+| API `test:storage`                   | Passed: 14 tests.                                                                                                                                                                                                                                             |
+| Other                                | `git diff --check`; `prisma migrate diff` from the migrated test database to the schema is empty; `pnpm demo:portfolio` started and stopped with `q`, its banner stating the allowance.                                                                       |
+
+The plain `pnpm check` runs failed only on 5-second timeouts in early, argon2-heavy tests of
+`documentary-instructions.int-spec.ts` and `documents.int-spec.ts` (5.4–6.8 s) while the web
+suite ran in parallel; every other test passed. Alone, those tests took 1.5–2.4 s both with this
+change and with the services of `b8dd0e6`, so the margin was already thin on this machine;
+the change adds one indexed read to some commands and nothing when protection is off. Removing
+the upload's admission made four budget tests fail, as intended. Checks ran against a disposable
+PostgreSQL container (`127.0.0.1`, `tradeflow_test`, role `tradeflow`, verified before use),
+removed afterwards; the demo, deploy and storage commands owned their own servers. This is local
+evidence: no hosted CI run includes this change, and the hosted `deploy` pass for `b8dd0e6` is
+still pending.
+
 ### Local S3 increment verification, 2026-10-31
 
 On the uncommitted working tree above `d00635f`, Windows, Node 24.11.1 and pnpm 11.9.0:
@@ -378,6 +408,12 @@ extraction ([README](../README.md#roadmap)).
   over plain HTTP, so it says nothing about a deployment. Its state is discarded on every stop; a
   demo killed before it can clean up leaves its container, directory and two processes running,
   to be removed by hand as [described](demo.md#starting-the-demo-pnpm-demo).
+- **The portfolio write budget is a showcase bound, not hosting readiness.** It caps one run's
+  business commands (200, shared by every visitor), counts admitted attempts without refunds,
+  and is reset only by an operator recreating the run. There is no scheduled or hosted reset, no
+  per-visitor fairness, and no limit on reads, streams or bandwidth
+  ([ADR 0021](decisions/0021-portfolio-demo-write-budget.md)); the demo is not ready for
+  unrestricted public hosting.
 - **Other known gaps:** sign-in is limited only in process, per client address (no lockout, no
   limit shared between instances, [ADR 0018](decisions/0018-sign-in-admission.md)), no SSO, no password reset
   ([ADR 0007](decisions/0007-cookie-sessions.md)). Seeded notice times are relative to when the

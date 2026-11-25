@@ -9,6 +9,7 @@ import { RequestValidationException } from '../../common/http/request-validation
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
+import { DemoWriteBudget } from '../demo-write-budget/demo-write-budget.js';
 import { requireOperator } from '../auth/user-permissions.js';
 import {
   type ReferenceIds,
@@ -57,6 +58,7 @@ export class VoyagesService {
     private readonly prisma: PrismaService,
     private readonly referenceData: ReferenceDataService,
     private readonly audit: AuditTrail,
+    private readonly writeBudget: DemoWriteBudget,
   ) {}
 
   /**
@@ -65,7 +67,8 @@ export class VoyagesService {
    * reference, status, participant and audit actor all come from the server.
    *
    * The voyage, its participation and its VOYAGE_CREATED audit event are written in one
-   * transaction: if any of them fails, none exists.
+   * transaction: if any of them fails, none exists. On a write-protected demo the command is
+   * admitted once it is known to be valid, before that transaction starts (ADR 0021).
    */
   async create(principal: Principal, request: CreateVoyageRequest): Promise<VoyageDetail> {
     requireOperator(principal, 'create voyages');
@@ -76,6 +79,7 @@ export class VoyagesService {
         unknown.map((field) => ({ path: `body.${field}`, message: UNKNOWN_REFERENCE[field] })),
       );
     }
+    await this.writeBudget.admit();
 
     const voyage = await this.prisma.$transaction(async (tx) => {
       const created = await tx.voyage.create({

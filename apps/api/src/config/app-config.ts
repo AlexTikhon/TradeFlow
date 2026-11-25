@@ -6,6 +6,11 @@ import { isProxyAddress } from './trusted-proxies.js';
 /** Where uploaded documents are kept outside production, relative to the working directory. */
 const DEFAULT_DOCUMENT_STORAGE_DIR = 'var/documents';
 
+/** Business commands one dataset admits with portfolio-demo write protection on (ADR 0021). */
+export const DEFAULT_DEMO_WRITE_ALLOWANCE = 200;
+/** The largest allowance accepted: far above any demo's need, well inside the counter's range. */
+export const MAX_DEMO_WRITE_ALLOWANCE = 1_000_000;
+
 const EnvironmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -47,8 +52,28 @@ const EnvironmentSchema = z
       .string()
       .regex(/^(?:[a-zA-Z0-9_-]+\/)*$/)
       .default('tradeflow/'),
+    // Opt-in for the portfolio demo only (ADR 0021): caps the business commands one database
+    // admits, so a public showcase cannot grow without bound. Off unless explicitly enabled.
+    PORTFOLIO_DEMO_WRITE_PROTECTION: z.enum(['enabled', 'disabled']).default('disabled'),
+    PORTFOLIO_DEMO_WRITE_ALLOWANCE: z
+      .string()
+      .regex(/^[1-9][0-9]{0,6}$/, 'Expected a positive whole number')
+      .transform(Number)
+      .pipe(z.number().int().min(1).max(MAX_DEMO_WRITE_ALLOWANCE))
+      .optional(),
   })
   .superRefine((env, context) => {
+    // An allowance without protection would look like a limit while nothing is limited.
+    if (
+      env.PORTFOLIO_DEMO_WRITE_ALLOWANCE !== undefined &&
+      env.PORTFOLIO_DEMO_WRITE_PROTECTION !== 'enabled'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['PORTFOLIO_DEMO_WRITE_ALLOWANCE'],
+        message: 'Only valid with PORTFOLIO_DEMO_WRITE_PROTECTION=enabled',
+      });
+    }
     // A deployment must say where evidence is kept; a default under the working directory
     // could land on an ephemeral filesystem.
     if (
@@ -108,7 +133,17 @@ export interface AppConfig {
     attemptsPerMinute: number;
   };
   documentStorage: LocalStorageConfig | S3StorageConfig;
+  /** Portfolio-demo write protection (ADR 0021). Disabled everywhere unless opted in. */
+  demoWriteBudget: DemoWriteBudgetConfig;
 }
+
+export type DemoWriteBudgetConfig =
+  | { enabled: false }
+  | {
+      enabled: true;
+      /** Business commands this database admits in all, counted durably in PostgreSQL. */
+      allowance: number;
+    };
 
 export interface LocalStorageConfig {
   driver: 'local';
@@ -148,6 +183,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     S3_ENDPOINT,
     S3_FORCE_PATH_STYLE,
     S3_PREFIX,
+    PORTFOLIO_DEMO_WRITE_PROTECTION,
+    PORTFOLIO_DEMO_WRITE_ALLOWANCE,
   } = result.data;
   return {
     nodeEnv: NODE_ENV,
@@ -171,6 +208,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
             driver: 'local',
             directory: resolve(DOCUMENT_STORAGE_DIR ?? DEFAULT_DOCUMENT_STORAGE_DIR),
           },
+    demoWriteBudget:
+      PORTFOLIO_DEMO_WRITE_PROTECTION === 'enabled'
+        ? {
+            enabled: true,
+            allowance: PORTFOLIO_DEMO_WRITE_ALLOWANCE ?? DEFAULT_DEMO_WRITE_ALLOWANCE,
+          }
+        : { enabled: false },
   };
 }
 

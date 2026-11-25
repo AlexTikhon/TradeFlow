@@ -25,6 +25,7 @@ import { schemaRef } from '../../common/http/openapi.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
+import { ApiDemoWriteBudgetResponse } from '../demo-write-budget/demo-write-budget.js';
 import { VoyagesService } from './voyages.service.js';
 
 @ApiTags('voyages')
@@ -46,6 +47,7 @@ export class VoyagesController {
   }
 
   @Post()
+  @ApiDemoWriteBudgetResponse()
   @ApiOperation({
     summary: 'Create a voyage; your organization becomes its exporter',
     description:

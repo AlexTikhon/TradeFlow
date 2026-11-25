@@ -34,6 +34,7 @@ import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { SessionPrincipals } from '../auth/session-principals.js';
 import { requireOperator } from '../auth/user-permissions.js';
+import { DemoWriteBudget } from '../demo-write-budget/demo-write-budget.js';
 import {
   InstructionRevisions,
   type RevisionForDocuments,
@@ -98,6 +99,8 @@ export const CONTRACT_NOT_FOUND = 'Contract was not found.';
  *
  * 1. **Check** everything that can be checked before the bytes arrive (role, contract, side,
  *    revision, document type, precondition), so a refused upload is refused before it is read.
+ *    On a write-protected demo the upload is then admitted (ADR 0021), once and only here: an
+ *    upload refused by its budget is never staged, and one admitted stays counted if it fails.
  * 2. **Receive** the bytes into storage's staging area, outside any database transaction,
  *    measuring and hashing them on the way, then check that they are a PDF.
  * 3. **Keep** them under a new server-generated key.
@@ -125,6 +128,7 @@ export class DocumentsService {
     private readonly storage: DocumentStorage,
     private readonly audit: AuditTrail,
     private readonly events: VoyageEventBus,
+    private readonly writeBudget: DemoWriteBudget,
   ) {}
 
   /**
@@ -187,6 +191,7 @@ export class DocumentsService {
     requireSeller(contract);
     checkOpen(await this.revisions.find(contract.id, target.revisionNumber), target);
     await this.checkPrecondition(key(contract, target), precondition);
+    await this.writeBudget.admit();
 
     const received = await incoming.receive<ReceivedPdf>({
       accept: (part) => this.receivePdf(part),
@@ -249,8 +254,21 @@ export class DocumentsService {
         REVIEWED_UNDER_CURRENT,
       );
 
-      const at = new Date();
       const documentKey = key(contract, target);
+      // Judged on the document as read, so a review that cannot succeed is refused without
+      // being admitted (ADR 0021). The conditional write below still decides a race.
+      const state = await reviewStateOf(tx, documentKey, versionNumber);
+      if (
+        !state ||
+        state.currentVersionNumber !== versionNumber ||
+        !expectedVersions.includes(state.version) ||
+        state.decision !== null
+      ) {
+        throw whyNotReviewed(state, versionNumber, expectedVersions);
+      }
+      await this.writeBudget.admit();
+
+      const at = new Date();
       const document = await advanceForReview(tx, {
         ...documentKey,
         versionNumber,

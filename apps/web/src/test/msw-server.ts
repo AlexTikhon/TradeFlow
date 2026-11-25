@@ -1,4 +1,9 @@
-import type { CurrentUser, ProblemDetails, SignInRequest } from '@tradeflow/contracts';
+import {
+  type CurrentUser,
+  type ProblemDetails,
+  ProblemTypes,
+  type SignInRequest,
+} from '@tradeflow/contracts';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { TEST_PASSWORD } from './fixtures/auth';
@@ -23,6 +28,27 @@ export function problemResponse(status: number, detail: string) {
   };
   return HttpResponse.json(problem, {
     status,
+    headers: { 'Content-Type': 'application/problem+json' },
+  });
+}
+
+/** What the API says once a portfolio demo's write budget is used up (ADR 0021). */
+export const DEMO_CHANGE_LIMIT_DETAIL =
+  'This demo has used up the changes it allows. You can still browse, download documents and ' +
+  'sign in or out, but nothing more can be changed until an operator resets the demo, which ' +
+  'restores the showcase and discards every change made since it started.';
+
+/** The API's answer to a business command on a demo whose write budget is used up. */
+export function demoChangeLimitResponse() {
+  const problem: ProblemDetails = {
+    type: ProblemTypes.DemoWriteBudgetExhausted,
+    title: 'Demo change limit reached',
+    status: 429,
+    detail: DEMO_CHANGE_LIMIT_DETAIL,
+  };
+  // No Retry-After: waiting does not help.
+  return HttpResponse.json(problem, {
+    status: 429,
     headers: { 'Content-Type': 'application/problem+json' },
   });
 }

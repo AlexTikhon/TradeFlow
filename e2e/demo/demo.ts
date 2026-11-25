@@ -1,7 +1,12 @@
 import { createInterface } from 'node:readline';
 import { ANA, DEMO_PASSWORD, EMRE, LUCIA, RAFAEL, WEI_LING } from './accounts.js';
 import { type DemoRun, startDemo } from './demo-run.js';
-import { PORTFOLIO_PROFILE, SHOWCASE_REASONS, type Showcase } from './portfolio.js';
+import {
+  PORTFOLIO_PROFILE,
+  PORTFOLIO_WRITE_ALLOWANCE,
+  SHOWCASE_REASONS,
+  type Showcase,
+} from './portfolio.js';
 
 /*
  * `pnpm demo`: starts a fresh, isolated demo (demo-run.ts), prints where to open it and who to
@@ -76,6 +81,13 @@ function printShowcase(webUrl: string, showcase: Showcase): void {
   say('    Bill of lading         version 1 rejected, version 2 approved; both kept, with');
   say('                           their decisions, under "Earlier versions"');
   say("  Rafael (Ana's colleague) reads it all without write controls; Lucía cannot open it.");
+  const left = PORTFOLIO_WRITE_ALLOWANCE - showcase.commands;
+  say(
+    `  Changes     ${PORTFOLIO_WRITE_ALLOWANCE} per run, shared by every account (the showcase used ${showcase.commands}; ${left} left).`,
+  );
+  say('              Once used up, changes are refused until the demo is reset; reading,');
+  say('              downloads and signing in and out still work.');
+  say('              Reset: stop this run (Ctrl+C or q), then start pnpm demo:portfolio again.');
   say('  The sign-in page offers these accounts; the in-app Demo guide links here.');
   say('  More: docs/demo.md, "The portfolio showcase". Use one browser profile per account.');
 }
@@ -121,7 +133,10 @@ async function main(): Promise<number> {
   say('  databases, containers and running servers are not used or touched.');
   if (portfolio) {
     say('  Portfolio profile: after seeding, one more voyage is prepared through the API, with');
-    say('  its document workflow under way.');
+    say(
+      `  its document workflow under way, and the API admits at most ${PORTFOLIO_WRITE_ALLOWANCE}`,
+    );
+    say('  business commands in this run.');
   }
   say();
 

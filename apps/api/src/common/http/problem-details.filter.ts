@@ -9,6 +9,10 @@ import {
 } from '@nestjs/common';
 import { PROBLEM_CONTENT_TYPE, type ProblemDetails, ProblemTypes } from '@tradeflow/contracts';
 import type { Request, Response } from 'express';
+import {
+  DEMO_WRITE_BUDGET_EXHAUSTED_TITLE,
+  DemoWriteBudgetExhaustedException,
+} from './demo-write-budget-exhausted.exception.js';
 import { RequestValidationException } from './request-validation.exception.js';
 import { TooManyRequestsException } from './too-many-requests.exception.js';
 import { discardUnreadBody } from './unread-body.js';
@@ -55,6 +59,16 @@ export function toProblemDetails(exception: unknown, instance: string): ProblemD
       detail: exception.message,
       instance,
       errors: exception.fieldErrors,
+    };
+  }
+
+  if (exception instanceof DemoWriteBudgetExhaustedException) {
+    return {
+      type: ProblemTypes.DemoWriteBudgetExhausted,
+      title: DEMO_WRITE_BUDGET_EXHAUSTED_TITLE,
+      status: exception.getStatus(),
+      detail: exception.message,
+      instance,
     };
   }
 

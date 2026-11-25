@@ -221,20 +221,21 @@ API docs are at <http://localhost:3000/api/docs>.
 
 ### Everyday commands
 
-| Command                      | What it does                                                |
-| ---------------------------- | ----------------------------------------------------------- |
-| `pnpm dev`                   | Contracts watcher, API (watch mode) and Vite dev server     |
-| `pnpm test`                  | All tests. API integration tests need `pnpm db:up`          |
-| `pnpm lint`                  | ESLint with type-aware rules across the monorepo            |
-| `pnpm typecheck`             | `tsc --noEmit` in every package                             |
-| `pnpm build`                 | Production builds of contracts, API and web                 |
-| `pnpm check`                 | CI's verify job: format, lint, typecheck, test, build       |
-| `pnpm test:e2e`              | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
-| `pnpm demo`                  | A fresh, isolated demo until Ctrl+C; nothing is kept        |
-| `pnpm demo:verify`           | Walkthrough 2 in Chromium on a fresh demo (CI's demo job)   |
-| `pnpm demo:portfolio`        | The demo plus a guided sign-in and a showcase voyage        |
-| `pnpm demo:portfolio:verify` | The showcase checked in Chromium (CI's demo job, too)       |
-| `pnpm db:reset`              | Drop, re-migrate and re-seed the development database       |
+| Command                              | What it does                                                       |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `pnpm dev`                           | Contracts watcher, API (watch mode) and Vite dev server            |
+| `pnpm test`                          | All tests. API integration tests need `pnpm db:up`                 |
+| `pnpm lint`                          | ESLint with type-aware rules across the monorepo                   |
+| `pnpm typecheck`                     | `tsc --noEmit` in every package                                    |
+| `pnpm build`                         | Production builds of contracts, API and web                        |
+| `pnpm check`                         | CI's verify job: format, lint, typecheck, test, build              |
+| `pnpm test:e2e`                      | Browser smoke tests in Chromium (CI's e2e job, not `check`)        |
+| `pnpm demo`                          | A fresh, isolated demo until Ctrl+C; nothing is kept               |
+| `pnpm demo:verify`                   | Walkthrough 2 in Chromium on a fresh demo (CI's demo job)          |
+| `pnpm demo:portfolio`                | The demo plus a guided sign-in and a showcase voyage               |
+| `pnpm demo:portfolio:verify`         | The showcase checked in Chromium (CI's demo job, too)              |
+| `pnpm demo:portfolio:rehearse-reset` | Two portfolio runs: write budget used up, stopped, recreated fresh |
+| `pnpm db:reset`                      | Drop, re-migrate and re-seed the development database              |
 
 Package-scoped variants: `pnpm --filter @tradeflow/api test:unit` (no database needed),
 `pnpm --filter @tradeflow/api test:integration`.

@@ -7,6 +7,12 @@ export const ProblemTypes = {
   /** RFC 9457: no additional semantics beyond the HTTP status code. */
   Generic: 'about:blank',
   ValidationFailed: '/problems/validation-failed',
+  /**
+   * 429 from a business command on a portfolio demo whose write budget is used up (ADR 0021).
+   * Waiting does not help: only an operator resetting the demo allows changes again, so the
+   * answer carries no `Retry-After`. Reads, downloads and signing in and out still work.
+   */
+  DemoWriteBudgetExhausted: '/problems/demo-write-budget-exhausted',
 } as const;
 
 export const ProblemFieldErrorSchema = z.object({

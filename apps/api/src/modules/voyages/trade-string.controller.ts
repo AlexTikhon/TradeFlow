@@ -33,6 +33,7 @@ import { entityTagCondition } from '../../common/http/preconditions.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
+import { ApiDemoWriteBudgetResponse } from '../demo-write-budget/demo-write-budget.js';
 import { TradeStringService } from './trade-string.service.js';
 
 const NOT_VISIBLE = 'No such voyage, or your organization does not participate in it';
@@ -69,6 +70,7 @@ export class TradeStringController {
   }
 
   @Post()
+  @ApiDemoWriteBudgetResponse()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: "Set up a new voyage's trade string, once",

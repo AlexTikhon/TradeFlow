@@ -20,7 +20,12 @@ import {
 import { cachedActionQueue } from '../../../test/action-queue';
 import { aTradeString, aVoyageDetail, tradeParties } from '../../../test/fixtures/voyages';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
-import { problemResponse, server } from '../../../test/msw-server';
+import {
+  DEMO_CHANGE_LIMIT_DETAIL,
+  demoChangeLimitResponse,
+  problemResponse,
+  server,
+} from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { sessionChangedElsewhere } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
@@ -685,6 +690,7 @@ describe('ETA notices on the voyage page', () => {
         () => problemResponse(404, 'Contract was not found.'),
         'Contract was not found.',
       ],
+      ["the demo's used-up change allowance", demoChangeLimitResponse, DEMO_CHANGE_LIMIT_DETAIL],
       ['a network failure', () => HttpResponse.error(), 'The notice could not be issued.'],
       [
         'a server failure',

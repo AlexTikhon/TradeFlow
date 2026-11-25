@@ -35,8 +35,9 @@ import { freePort, OwnedProcess, runScript, waitUntilServing } from '../support/
  *   the same-origin `/api` proxy), both on loopback ports of their own.
  *
  * A profile may also build the web app in a mode of its own, and add one small JSON file to that
- * build once its data exists (the portfolio onboarding's showcase metadata). The plain run passes
- * no mode and writes no file.
+ * build once its data exists (the portfolio onboarding's showcase metadata), and start the API
+ * with its write protection on (an allowance of business commands for the run's database). The
+ * plain run passes no mode, writes no file and leaves protection off.
  *
  * The caller's DATABASE_URL, apps/api/.env and the development or test databases are never used:
  * the app's variables are removed from the inherited environment and set explicitly, and the API
@@ -81,6 +82,9 @@ const APP_VARIABLES = new Set([
   'S3_PREFIX',
   'S3_FORCE_PATH_STYLE',
   'API_PROXY_TARGET',
+  // Portfolio-demo write protection (ADR 0021): set only by a profile that asks for it.
+  'PORTFOLIO_DEMO_WRITE_PROTECTION',
+  'PORTFOLIO_DEMO_WRITE_ALLOWANCE',
 ]);
 
 function inheritedEnvironment(): NodeJS.ProcessEnv {
@@ -379,6 +383,13 @@ export interface Preparation<Prepared> {
    */
   webMode?: string;
   /**
+   * Turns on the API's portfolio-demo write protection with this allowance (ADR 0021): the
+   * business commands this run's database admits in all, the profile's own preparation
+   * included. Like `webMode`, an explicit switch: a run without it starts the API with protection
+   * off, whatever the caller's environment holds.
+   */
+  writeAllowance?: number;
+  /**
    * Runs once the app answers through the web server, before the run is handed over: an opt-in
    * profile's data, written through the API (the portfolio showcase). It is part of startup: if
    * it fails or is interrupted, everything created so far is removed, as after any other step.
@@ -399,6 +410,8 @@ export interface WebMetadata {
 }
 
 const WEB_MODE = /^[a-z][a-z0-9-]{0,39}$/;
+/** The API accepts 1 to 1,000,000 (apps/api/src/config/app-config.ts). */
+const MAX_WRITE_ALLOWANCE = 1_000_000;
 const WEB_METADATA_FILE = /^[a-z][a-z0-9-]{0,39}\.json$/;
 const MAX_WEB_METADATA_BYTES = 1_024;
 
@@ -424,6 +437,18 @@ export async function startDemo<Prepared = undefined>({
   // Set before servers are stopped on purpose, so their exit is not reported as a failure.
   let stopping = false;
   try {
+    const writeAllowance = prepare?.writeAllowance;
+    if (
+      writeAllowance !== undefined &&
+      !(
+        Number.isInteger(writeAllowance) &&
+        writeAllowance >= 1 &&
+        writeAllowance <= MAX_WRITE_ALLOWANCE
+      )
+    ) {
+      throw new Error(`Unexpected write allowance ${String(writeAllowance)}`);
+    }
+
     onStep('Checking that the Docker daemon is running');
     await docker(['version', '--format', '{{.Server.Version}}'], {
       timeoutMs: 30_000,
@@ -626,10 +651,20 @@ export async function startDemo<Prepared = undefined>({
     onStep('Starting the API');
     const apiPort = await freePort();
     stepLog = join(logsDir, 'api.log');
+    // Only the API needs these; protection stays off (the API's default) without a profile's
+    // allowance, since the caller's values were removed from `appEnv` with the other app
+    // variables.
+    const writeProtection =
+      writeAllowance === undefined
+        ? {}
+        : {
+            PORTFOLIO_DEMO_WRITE_PROTECTION: 'enabled',
+            PORTFOLIO_DEMO_WRITE_ALLOWANCE: String(writeAllowance),
+          };
     const api = own(
       OwnedProcess.start('API', join(apiBuild, 'dist', 'main.js'), [], {
         cwd: apiBuild,
-        env: { ...appEnv, HOST: '127.0.0.1', PORT: String(apiPort) },
+        env: { ...appEnv, ...writeProtection, HOST: '127.0.0.1', PORT: String(apiPort) },
         logFile: stepLog,
         detached: true,
       }),

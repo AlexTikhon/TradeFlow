@@ -12,8 +12,9 @@ import {
 import type { Party } from '../support/scenario.js';
 import { ANA, DEMO_PASSWORD, LUCIA, RAFAEL, WEI_LING } from './accounts.js';
 import { expect, type Tab, test } from './fixtures.js';
-import { SHOWCASE_REASONS } from './portfolio.js';
+import { PORTFOLIO_WRITE_ALLOWANCE, SHOWCASE_REASONS } from './portfolio.js';
 import { SHOWCASE_FILES, sha256, type ShowcaseFile } from './portfolio-files.js';
+import { DemoClient, useUpWriteBudget } from './write-budget.js';
 
 /*
  * The portfolio showcase (portfolio.ts) as people see it, in Chromium, on a demo started by
@@ -474,4 +475,100 @@ test('the portfolio showcase: four document states, both queues, history and dow
   });
 
   console.log(`Portfolio showcase verified on ${reference} (${voyageId}).`);
+});
+
+/*
+ * Last, because it uses up this run's write budget: the tests above send no business command,
+ * and nothing runs after this one but the teardown.
+ */
+test('the write budget: once used up, changes are refused with the reset explanation; reading, downloads and sign-out still work', async ({
+  baseURL,
+  newContext,
+  newTab,
+  showcase,
+}) => {
+  const { reference } = showcase;
+  const remaining = PORTFOLIO_WRITE_ALLOWANCE - showcase.commands;
+  let explanation = '';
+
+  await test.step(`The showcase's preparation used ${showcase.commands} of ${PORTFOLIO_WRITE_ALLOWANCE} commands; exactly the other ${remaining} are admitted, then the demo's 429`, async () => {
+    // Voyage, trade string, instructions, their acknowledgement, four uploads, three reviews.
+    expect(showcase.commands).toBe(11);
+    const client = await DemoClient.signIn(baseURL ?? '', LUCIA);
+    // Lucía takes no part in the showcase: the budget is the run's, shared by every account.
+    const { admitted, refusal } = await useUpWriteBudget(client, PORTFOLIO_WRITE_ALLOWANCE);
+    expect(admitted).toBe(remaining);
+    expect(refusal.problem).toMatchObject({
+      type: '/problems/demo-write-budget-exhausted',
+      title: 'Demo change limit reached',
+      status: 429,
+    });
+    // Waiting does not help, so no retry time is given.
+    expect(refusal.retryAfter).toBeNull();
+    explanation = refusal.problem?.detail ?? '';
+    expect(explanation).toContain('until an operator resets the demo');
+    // Refused again, later: nothing replenishes it.
+    expect((await client.createVoyage()).status).toBe(429);
+    expect(await client.read('/api/voyages')).toBe(200);
+    expect(await client.signOut()).toBe(204);
+  });
+
+  const seller = await newTab(await newContext());
+  const buyer = await newTab(await newContext());
+
+  await test.step('Ana uploads the missing invoice in the browser: refused with the explanation, nothing stored', async () => {
+    const { page } = seller;
+    await page.goto('/sign-in');
+    await signIn(page, ANA);
+    await closeGuide(page, addressed(ANA));
+    await openVoyage(page, reference);
+    const invoice = documentItem(page, 'Commercial invoice');
+    await invoice.getByLabel('PDF file for the commercial invoice').setInputFiles({
+      name: 'commercial-invoice.pdf',
+      mimeType: 'application/pdf',
+      buffer: SHOWCASE_FILES.certificateOfOrigin.bytes,
+    });
+    const answered = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && /\/versions$/.test(response.url()),
+    );
+    await invoice.getByRole('button', { name: 'Upload', exact: true }).click();
+    expect((await answered).status()).toBe(429);
+    await expect(invoice.getByRole('alert')).toHaveText(explanation);
+    await expect(invoice).toContainText('Not uploaded yet');
+  });
+
+  await test.step('Wei Ling approves the certificate of origin in the browser: refused with the explanation, still pending', async () => {
+    const { page } = buyer;
+    await page.goto('/sign-in');
+    await signIn(page, WEI_LING);
+    await closeGuide(page, addressed(WEI_LING));
+    await openVoyage(page, reference);
+    const origin = documentItem(page, 'Certificate of origin');
+    await origin.getByLabel('Approve', { exact: true }).check();
+    const answered = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && /\/review$/.test(response.url()),
+    );
+    await origin.getByRole('button', { name: 'Approve version 1' }).click();
+    expect((await answered).status()).toBe(429);
+    await expect(origin.getByRole('alert')).toHaveText(explanation);
+    await expect(origin).toContainText(`Pending review by ${WEI_LING.organizationName}`);
+  });
+
+  await test.step('Both still read every record and download both bill-of-lading versions', async () => {
+    for (const page of [seller.page, buyer.page]) {
+      await page.reload();
+      await expect(page.getByRole('heading', { level: 1, name: reference })).toBeVisible();
+      await expectDocumentStates(page);
+      await expectBillOfLadingDownloads(page);
+    }
+  });
+
+  await test.step('Signing out and in again still works', async () => {
+    const { page } = seller;
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('form', { name: 'Sign in' })).toBeVisible();
+    await signIn(page, ANA);
+    await closeGuide(page, addressed(ANA));
+    await expect(page.getByText(ANA.fullName, { exact: true })).toBeVisible();
+  });
 });

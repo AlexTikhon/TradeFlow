@@ -11,10 +11,13 @@ import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { requireOperator } from '../auth/user-permissions.js';
+import { DemoWriteBudget } from '../demo-write-budget/demo-write-budget.js';
 import { CounterpartyContracts } from '../voyages/counterparty-contracts.js';
 import { type VoyageChange, VoyageEventBus } from '../voyages/voyage-event-bus.js';
 import { deadlineViolations, isLate } from './notice-rules.js';
 import { noticeOrder, type NoticeRow, noticeSelect, toNotice } from './notice.read-model.js';
+
+const NOTICE_ALREADY_ACKNOWLEDGED = 'This notice has already been acknowledged.';
 
 /** A notice the principal may read, with its contract as the principal sees it. */
 interface VisibleNotice {
@@ -27,8 +30,9 @@ interface VisibleNotice {
  * database: notices are loaded only under contracts the voyages module resolved for the
  * principal's organization as a counterparty, so another participant's request finds nothing.
  * Commands check the user's role and the organization's side of the contract here, in the
- * service, and write the change and its audit event in one transaction. Once that transaction
- * has committed, and only then, they announce the change to open voyage streams.
+ * service, and write the change and its audit event in one transaction; on a write-protected
+ * demo they are admitted once those checks pass, before the first write (ADR 0021). Once that
+ * transaction has committed, and only then, they announce the change to open voyage streams.
  */
 @Injectable()
 export class NoticesService {
@@ -39,6 +43,7 @@ export class NoticesService {
     private readonly contracts: CounterpartyContracts,
     private readonly audit: AuditTrail,
     private readonly events: VoyageEventBus,
+    private readonly writeBudget: DemoWriteBudget,
   ) {}
 
   /**
@@ -113,6 +118,7 @@ export class NoticesService {
           violations.map(({ field, message }) => ({ path: `body.${field}`, message })),
         );
       }
+      await this.writeBudget.admit();
 
       const row = await tx.notice.create({
         data: {
@@ -165,6 +171,11 @@ export class NoticesService {
           'Only the buyer under a contract may acknowledge its notices.',
         );
       }
+      // Refused early, so it is not admitted; the conditional update below still decides a race.
+      if (visible.row.status !== 'ISSUED') {
+        throw new ConflictException(NOTICE_ALREADY_ACKNOWLEDGED);
+      }
+      await this.writeBudget.admit();
 
       const acknowledgedAt = new Date();
       const { count } = await tx.notice.updateMany({
@@ -177,7 +188,7 @@ export class NoticesService {
         },
       });
       if (count === 0) {
-        throw new ConflictException('This notice has already been acknowledged.');
+        throw new ConflictException(NOTICE_ALREADY_ACKNOWLEDGED);
       }
       await this.audit.record(tx, {
         action: 'NOTICE_ACKNOWLEDGED',

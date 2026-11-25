@@ -19,6 +19,7 @@ import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { requireOperator } from '../auth/user-permissions.js';
+import { DemoWriteBudget } from '../demo-write-budget/demo-write-budget.js';
 import { CounterpartyContracts } from '../voyages/counterparty-contracts.js';
 import { type VoyageChange, VoyageEventBus } from '../voyages/voyage-event-bus.js';
 import { sameContent, toStoredContent } from './instruction-rules.js';
@@ -45,8 +46,10 @@ export interface PutResult {
  * Each read takes the contracts and the instructions from one snapshot (`readSnapshot`).
  * Commands check the user's role and the organization's side of the contract here, then make
  * one conditional write (`instruction.writes.ts`) and record its audit event in the same
- * transaction. A failed precondition changes nothing and records nothing. Once that transaction
- * has committed, and only then, they announce the change to open voyage streams.
+ * transaction. A failed precondition changes nothing and records nothing. On a write-protected
+ * demo, a command is admitted (ADR 0021) after its role, side and precondition have been checked
+ * against the instruction as read, and before that write, which still decides any race. Once
+ * that transaction has committed, and only then, they announce the change to open voyage streams.
  */
 @Injectable()
 export class DocumentaryInstructionsService {
@@ -57,6 +60,7 @@ export class DocumentaryInstructionsService {
     private readonly contracts: CounterpartyContracts,
     private readonly audit: AuditTrail,
     private readonly events: VoyageEventBus,
+    private readonly writeBudget: DemoWriteBudget,
   ) {}
 
   /**
@@ -152,6 +156,22 @@ export class DocumentaryInstructionsService {
           'Only the buyer under a contract may give its documentary instructions.',
         );
       }
+      // The precondition judged on the instruction as read, so a stale request is refused
+      // without being admitted. The conditional write below still decides a race.
+      const existing = await tx.documentaryInstruction.findUnique({
+        where: { tradeContractId: contract.id },
+        select: { version: true },
+      });
+      const holds =
+        precondition.kind === 'absent'
+          ? existing === null
+          : existing !== null && precondition.versions.includes(existing.version);
+      if (!holds) {
+        throw new PreconditionFailedException(
+          precondition.kind === 'absent' ? INSTRUCTIONS_ALREADY_EXIST : staleOrMissing(existing),
+        );
+      }
+      await this.writeBudget.admit();
 
       const at = new Date();
       const instruction =
@@ -163,9 +183,7 @@ export class DocumentaryInstructionsService {
               at,
             });
       if (!instruction && precondition.kind === 'absent') {
-        throw new PreconditionFailedException(
-          'Documentary instructions already exist for this contract. Review them, then revise them with If-Match.',
-        );
+        throw new PreconditionFailedException(INSTRUCTIONS_ALREADY_EXIST);
       }
       if (!instruction) {
         // Read only to explain the refusal; the conditional write already decided it.
@@ -273,6 +291,27 @@ export class DocumentaryInstructionsService {
           'Only the seller under a contract may acknowledge its documentary instructions.',
         );
       }
+      // Judged on the instruction as read, so a request that cannot succeed is refused without
+      // being admitted. The conditional write below still decides a race.
+      const current = await tx.documentaryInstruction.findUnique({
+        where: { tradeContractId: contract.id },
+        select: {
+          version: true,
+          currentRevisionNumber: true,
+          acknowledgements: { where: { revisionNumber }, select: { id: true } },
+        },
+      });
+      if (!current) {
+        return null;
+      }
+      if (
+        !expectedVersions.includes(current.version) ||
+        current.currentRevisionNumber !== revisionNumber ||
+        current.acknowledgements.length > 0
+      ) {
+        throw whyNotAcknowledged(current, revisionNumber, expectedVersions);
+      }
+      await this.writeBudget.admit();
 
       const at = new Date();
       const instruction = await advanceForAcknowledgement(tx, {
@@ -359,6 +398,9 @@ async function readWritten(
   });
   return toInstruction(row, contract);
 }
+
+const INSTRUCTIONS_ALREADY_EXIST =
+  'Documentary instructions already exist for this contract. Review them, then revise them with If-Match.';
 
 function staleOrMissing(existing: { version: number } | null): string {
   return existing

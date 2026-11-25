@@ -134,11 +134,13 @@ only when this profile is asked for.
 ```bash
 pnpm demo:portfolio          # the demo, plus the showcase voyage; Ctrl+C or q to stop
 pnpm demo:portfolio:verify   # the showcase checked in Chromium, on a fresh environment of its own
+pnpm demo:portfolio:rehearse-reset   # stop/start rehearsed: fresh showcase and budget, old run gone
 ```
 
 **What it starts.** Exactly what `pnpm demo` starts (its own container, temporary directory,
 built apps, all migrations, the unchanged seed, production sign-in admission), except that the
-web app is built in the `portfolio-demo` mode, then one more startup step: _Preparing the
+web app is built in the `portfolio-demo` mode, the API admits at most 200 business commands
+([the write budget](#the-portfolio-write-budget)), then one more startup step: _Preparing the
 portfolio showcase voyage through the API_. When the step is done, the banner prints the
 showcase's reference (the next free one, `TF-2026-0008` on a fresh run), its address, the
 accounts and what each document shows. It prints no session token.
@@ -207,7 +209,8 @@ Wei Ling reads each document and rejects or approves it on the version she read;
 bill of lading again before uploading version 2. Every answer is checked against the shared
 contracts (`@tradeflow/contracts`), and every write's `ETag` against the version in its body;
 both sessions are signed out at the end. Nothing is inserted into the database, no trigger is
-disabled, and there is no fixture or reset endpoint. The API assigns every id, reference,
+disabled, and there is no fixture or reset endpoint. Its 11 commands are admitted against the
+run's write budget like a visitor's. The API assigns every id, reference,
 version and timestamp, so a second run has the same states and files under other ids.
 
 **The files.** Four small, valid single-page PDFs built by `e2e/demo/portfolio-files.ts`, byte
@@ -256,7 +259,83 @@ checked to say what their access allows. Queue checks are scoped to the showcase
 `pnpm demo:verify` checks the other way round that the plain demo shows no account list, demo
 bar or guide. No retries, no mocked answers; it stops and removes everything, pass or fail,
 and keeps a failure screenshot in `e2e/.output/demo/portfolio-results/`. CI runs it in the
-`demo` job, after `pnpm demo:verify`, in a second fresh environment.
+`demo` job, after `pnpm demo:verify`, in a second fresh environment. A third test, last because
+it uses up the run's [write budget](#the-portfolio-write-budget), checks that the preparation
+used 11 commands and exactly the other 189 are admitted (as Lucía, who takes no part in the
+showcase: the budget is the run's, not an account's), that the next one gets the demo's 429
+without `Retry-After`, that Ana's upload of the invoice and Wei Ling's approval of the
+certificate of origin are then refused in the browser with the API's explanation and change
+nothing, and that both still read every record, download both bill-of-lading versions, and
+sign out and in again.
+
+#### The portfolio write budget
+
+Visitors can explore and change the showcase, but one run cannot grow without bound. The
+portfolio profile starts the API with `PORTFOLIO_DEMO_WRITE_PROTECTION=enabled` and
+`PORTFOLIO_DEMO_WRITE_ALLOWANCE=200` ([ADR 0021](decisions/0021-portfolio-demo-write-budget.md)):
+the run's database admits at most 200 business commands in all, counted durably in PostgreSQL.
+The showcase's own preparation goes through the same API and uses 11 (creating the voyage,
+setting up its trade string, the instructions and their acknowledgement, four uploads, three
+reviews), so a fresh run has **189 left**; the banner says so. `pnpm demo` and
+`pnpm demo:verify` run with protection off, and neither inherits these variables from your shell.
+
+- **What counts.** Creating a voyage, setting up a trade string, issuing or acknowledging an ETA
+  notice, giving, revising or acknowledging instructions, uploading a document version and
+  reviewing one: each admitted attempt once. Signing in and out, reading, downloads and live
+  updates never count and keep working when the budget is used up.
+- **Shared.** The accounts are shared and so is the budget: every visitor of a run spends the
+  same 189. One visitor can use it all.
+- **Conservative.** A request refused before anything could be written (signed out, a viewer, a
+  voyage you take no part in, an invalid body, a stale `If-Match`, a notice already acknowledged)
+  costs nothing. An admitted attempt is not refunded if it then fails (a lost race, a storage
+  failure), so a run may end with fewer than 189 successful changes.
+- **Used up.** Every further change is answered `429`, problem type
+  `/problems/demo-write-budget-exhausted`, and the page shows: _"This demo has used up the changes
+  it allows. You can still browse, download documents and sign in or out, but nothing more can be
+  changed until an operator resets the demo, which restores the showcase and discards every change
+  made since it started."_ There is no retry time, because waiting does not help. Nothing is
+  written, stored or announced.
+- **Durable.** Restarting the API against the same database does not replenish it; only a new
+  database does.
+- **Fails closed.** If the count cannot be checked, the change is refused (a generic error)
+  before anything is written.
+
+#### Resetting the portfolio demo
+
+To restore the showcase and a whole budget, recreate the run. Nothing else is reset, and there
+is no endpoint for it:
+
+1. In the terminal running `pnpm demo:portfolio`, press Ctrl+C (or type `q` and Enter). It stops
+   the API and web server and removes this run's container (with its database and the budget's
+   count) and its temporary directory (with every uploaded file), then prints
+   `Stopped. Removed container tradeflow-demo-… and …`. If it reports a cleanup failure, finish
+   with the recovery commands its banner printed.
+2. Run `pnpm demo:portfolio` again. It starts a new container and directory, seeds, prepares the
+   showcase again through the API (same states, files and reference, new ids) and prints a new
+   address, the accounts and "189 left".
+
+What a reset discards: every session (everyone must sign in again, at the new address), every
+voyage, notice, instruction, decision and upload made in the old run, and the old address
+itself. It touches only what that run created: never `DATABASE_URL`, `apps/api/.env`, the
+development or test databases, another container, or an S3 bucket (the demo stores documents
+in its own temporary directory). There is no scheduled or automatic reset; this is an operator's
+step, for a local or otherwise supervised demo.
+
+`pnpm demo:portfolio:rehearse-reset` rehearses exactly this with the launcher's own code: it
+starts run A, uses up its budget through the web origin and checks reads and sign-out still
+work, stops A and checks that its container, directory and both servers are gone, starts run B
+and checks that A's changes are gone, the showcase is prepared again and B admits exactly 189
+before refusing, then stops B and checks the same. It removes both runs, pass or fail.
+
+**Rehearsed on 2026-11-25** (Windows 11, Docker Desktop 29.9.3): run A
+(`tradeflow-demo-9e6b05e2`) admitted 189 commands after the showcase's 11, then refused with the
+demo's 429 and no `Retry-After`; signing out still worked; after its stop the container, the
+temporary directory, the API and the web server were gone. Run B (`tradeflow-demo-d75fd52a`,
+its own directory) listed none of A's 189 voyages, had prepared `TF-2026-0008` again with three
+documents for Wei Ling, and admitted 189 commands before refusing; after its stop the same
+checks passed. Exit code 0. The interactive `pnpm demo:portfolio` was also started and stopped
+with `q`: its banner showed "200 per run … (the showcase used 11; 189 left)" and it removed its
+container and directory.
 
 ## Cast
 

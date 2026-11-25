@@ -68,6 +68,7 @@ import { toProblemDetails } from '../../common/http/problem-details.filter.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
+import { ApiDemoWriteBudgetResponse } from '../demo-write-budget/demo-write-budget.js';
 import { DOCUMENT_TOO_LARGE, MAX_UPLOAD_REQUEST_BYTES } from './document-rules.js';
 import { CONTRACT_NOT_FOUND, type DocumentTarget, DocumentsService } from './documents.service.js';
 
@@ -151,6 +152,7 @@ export class DocumentsController {
   }
 
   @Post(`${DOCUMENT_PATH}/versions`)
+  @ApiDemoWriteBudgetResponse()
   @ApiOperation({
     summary: 'Upload a version of a document required by the current instructions',
     description:
@@ -265,6 +267,7 @@ export class DocumentsController {
   }
 
   @Post(`${DOCUMENT_PATH}/versions/:versionNumber/review`)
+  @ApiDemoWriteBudgetResponse()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve or reject one version of a document',

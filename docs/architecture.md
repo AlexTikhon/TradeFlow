@@ -585,6 +585,13 @@ one setup event per voyage. Nothing is published to event streams.
 once. Configuration is injected via the `APP_CONFIG` token; nothing else reads `process.env`.
 `DOCUMENT_STORAGE_DIR` (where document bytes are kept) defaults to `var/documents` under the
 working directory outside production and is required in production.
+`PORTFOLIO_DEMO_WRITE_PROTECTION` (`disabled` by default) and `PORTFOLIO_DEMO_WRITE_ALLOWANCE`
+(default 200, only valid when enabled) turn on the portfolio demo's write budget
+([ADR 0021](decisions/0021-portfolio-demo-write-budget.md)): every business command's service
+calls `DemoWriteBudget.admit()` once, after its access and precondition checks and before its
+first write or storage staging; one conditional upsert on `demo_write_budget`, on a pool of its
+own, admits it or answers 429 (`/problems/demo-write-budget-exhausted`). Only the portfolio
+launcher sets them.
 
 ## Frontend (apps/web)
 

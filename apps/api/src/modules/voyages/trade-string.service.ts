@@ -17,6 +17,7 @@ import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuditTrail } from '../audit/audit-trail.js';
 import type { Principal } from '../auth/principal.js';
 import { SessionPrincipals } from '../auth/session-principals.js';
+import { DemoWriteBudget } from '../demo-write-budget/demo-write-budget.js';
 import { requireOperator } from '../auth/user-permissions.js';
 import { accessibleVoyages } from './voyage-access.js';
 import { validateTradeString } from './trade-string.js';
@@ -41,6 +42,7 @@ export class TradeStringService {
     private readonly prisma: PrismaService,
     private readonly sessions: SessionPrincipals,
     private readonly audit: AuditTrail,
+    private readonly writeBudget: DemoWriteBudget,
   ) {}
 
   /**
@@ -62,6 +64,8 @@ export class TradeStringService {
    * is PLANNED, has no contracts and no participant but its exporter. Every check after the
    * role is made under the voyage's lock, in the order the ADR fixes: who is asking (as the
    * session is now), then the voyage's state, then the request's preconditions, then the chain.
+   * Only then, before the first write, is the command admitted on a write-protected demo
+   * (ADR 0021), on the budget's own connection: a later rollback does not refund it.
    */
   async configure(
     principal: Principal,
@@ -158,6 +162,7 @@ export class TradeStringService {
       if (violations.length > 0) {
         throw new RequestValidationException(tradeStringFieldErrors(violations));
       }
+      await this.writeBudget.admit();
 
       const created = await tx.voyageParticipant.createManyAndReturn({
         data: candidate.parties

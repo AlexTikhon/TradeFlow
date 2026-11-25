@@ -596,3 +596,20 @@ model AuditEvent {
   @@index([actorOrganizationId])
   @@map("audit_events")
 }
+
+// ---------------------------------------------------------------------------
+// Portfolio-demo write budget
+// ---------------------------------------------------------------------------
+
+/// How many business commands this database has admitted while portfolio-demo write protection
+/// was enabled (ADR 0021): at most one row, written only by `DemoWriteBudget.admit`, one atomic
+/// conditional upsert per command, on a connection of its own so it commits whatever the command
+/// does next. Empty wherever protection is off. A fresh database starts a fresh allowance; an API
+/// restart against the same database does not. The single-row and positive-count rules are
+/// CHECK constraints (see the migration SQL).
+model DemoWriteBudget {
+  id       Int @id @default(1) @db.SmallInt
+  admitted Int
+
+  @@map("demo_write_budget")
+}

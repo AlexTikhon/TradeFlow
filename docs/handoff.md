@@ -62,11 +62,19 @@ pnpm demo           # fresh PostgreSQL container, migrations, seed, built apps o
 pnpm demo:verify    # the same demo, driven through walkthrough 2 (F1 to F8) in Chromium
 pnpm demo:portfolio          # the demo plus the portfolio showcase voyage (docs/demo.md)
 pnpm demo:portfolio:verify   # the showcase checked in Chromium on its own fresh demo
+pnpm demo:portfolio:rehearse-reset   # two portfolio runs: budget used up, stopped, fresh again
 ```
 
 `pnpm demo` prints the address (a new port every run), the accounts (password `tradeflow-demo`)
 and what it owns. It ignores `DATABASE_URL` and `.env` files. Details:
 [Starting the demo](demo.md#starting-the-demo-pnpm-demo).
+
+The portfolio run admits at most 200 business commands, shared by every visitor (its own
+showcase uses 11), then answers 429 to changes while reads, downloads and sign-in/out keep
+working ([ADR 0021](decisions/0021-portfolio-demo-write-budget.md)). **To reset it:** Ctrl+C
+(or `q`) in its terminal, then `pnpm demo:portfolio` again. That discards every session, edit
+and upload of the old run and prepares the showcase afresh; it touches nothing but the run's own
+container and directory ([details](demo.md#resetting-the-portfolio-demo)).
 
 ### Development: persistent
 
@@ -141,6 +149,10 @@ deleted at any time.
 ## Known operational limitations
 
 - One API instance: the event bus and the sign-in admission limits are in process.
+- The portfolio write budget ([ADR 0021](decisions/0021-portfolio-demo-write-budget.md)) bounds
+  one run's business writes, nothing else: one visitor can use it all up, failed admitted
+  attempts are not refunded, and the reset is a manual stop/start. There is no scheduled reset
+  or hosted showcase, and the demo is not ready for unrestricted public hosting.
 - Document bytes use the local disk by default, or opt-in private S3-compatible storage.
   [Paired backup, restore and reconciliation](storage-recovery.md) are explicit maintenance
   operations; no scheduled/offsite backup or cloud-provider recovery is configured. There is no

@@ -53,7 +53,16 @@ import { SHOWCASE_FILES, type ShowcaseFile } from './portfolio-files.js';
 export interface Showcase {
   voyageId: string;
   reference: string;
+  /** Business commands the preparation sent, all admitted against the run's write budget. */
+  commands: number;
 }
+
+/**
+ * Business commands a portfolio run's database admits in all (ADR 0021), the preparation's own
+ * included: the API's default allowance, passed explicitly so the launcher, its banner and the
+ * verification state the same number. Every visitor shares it; it is new only on a new run.
+ */
+export const PORTFOLIO_WRITE_ALLOWANCE = 200;
 
 export const SHOWCASE_CONSIGNEE = 'To order of Banco Austral Demo S.A.';
 export const SHOWCASE_NOTIFY_PARTY = 'Meridian Agri Trading Pte. Ltd., Singapore';
@@ -127,6 +136,11 @@ interface RequestOptions {
   expected: number;
 }
 
+/** Business commands sent, across sessions: every write but signing in and out. */
+interface CommandCount {
+  sent: number;
+}
+
 /** One signed-in user's session. Its cookie never leaves this class. */
 class Session {
   private cookie: string | undefined;
@@ -134,12 +148,17 @@ class Session {
   private constructor(
     private readonly apiUrl: string,
     private readonly signal: AbortSignal | undefined,
+    private readonly commands: CommandCount,
     readonly party: Party,
   ) {}
 
   /** Signs `party` in with their published demo password, as the sign-in form does. */
-  static async signIn(context: PreparedApp, party: Party): Promise<[Session, CurrentUser]> {
-    const session = new Session(context.apiUrl, context.signal, party);
+  static async signIn(
+    context: PreparedApp,
+    party: Party,
+    commands: CommandCount,
+  ): Promise<[Session, CurrentUser]> {
+    const session = new Session(context.apiUrl, context.signal, commands, party);
     const { headers, body } = await session.send('POST', '/api/auth/sign-in', {
       json: { email: party.email, password: party.password },
       expected: 200,
@@ -161,6 +180,8 @@ class Session {
   }
 
   async send(method: string, path: string, options: RequestOptions): Promise<Answer> {
+    // Counted when sent: an admitted command stays counted even if it then fails.
+    if (method !== 'GET' && !path.startsWith('/api/auth/')) this.commands.sent += 1;
     const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const response = await fetch(new URL(path, this.apiUrl), {
       method,
@@ -223,10 +244,11 @@ const isoDay = (daysFromNow: number) =>
  */
 export async function preparePortfolioShowcase(context: PreparedApp): Promise<Showcase> {
   const sessions: Session[] = [];
+  const commands: CommandCount = { sent: 0 };
   try {
-    const [ana, anaIdentity] = await Session.signIn(context, ANA);
+    const [ana, anaIdentity] = await Session.signIn(context, ANA, commands);
     sessions.push(ana);
-    const [wei] = await Session.signIn(context, WEI_LING);
+    const [wei] = await Session.signIn(context, WEI_LING, commands);
     sessions.push(wei);
 
     // ── Ana creates the voyage from the seeded reference data, and sets up its trade string.
@@ -464,7 +486,7 @@ export async function preparePortfolioShowcase(context: PreparedApp): Promise<Sh
     );
     expectShowcaseDocuments(final.items);
 
-    return { voyageId: voyage.id, reference: voyage.reference };
+    return { voyageId: voyage.id, reference: voyage.reference, commands: commands.sent };
   } finally {
     // Best effort: the environment is discarded with its sessions anyway.
     for (const session of sessions) await session.signOut().catch(() => undefined);
@@ -487,12 +509,14 @@ export const showcaseMetadata = (showcase: Showcase) => ({
 });
 
 /**
- * The portfolio profile: the web app built with its onboarding, and the showcase as the demo's
- * last startup step (demo-run.ts), published to the web app as metadata.
+ * The portfolio profile: the web app built with its onboarding, the API with its write budget,
+ * and the showcase as the demo's last startup step (demo-run.ts), published to the web app as
+ * metadata.
  */
 export const PORTFOLIO_PROFILE: Preparation<Showcase> = {
   step: 'Preparing the portfolio showcase voyage through the API, as Ana Souza and Tan Wei Ling',
   webMode: PORTFOLIO_WEB_MODE,
+  writeAllowance: PORTFOLIO_WRITE_ALLOWANCE,
   run: preparePortfolioShowcase,
   webMetadata: (showcase) => ({
     fileName: SHOWCASE_METADATA_FILE,

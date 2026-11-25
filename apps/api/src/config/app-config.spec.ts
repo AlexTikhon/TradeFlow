@@ -14,6 +14,69 @@ describe('loadConfig', () => {
       session: { ttlMs: 8 * 60 * 60_000, secureCookie: false },
       signIn: { attemptsPerMinute: 20 },
       documentStorage: { driver: 'local', directory: resolve('var/documents') },
+      demoWriteBudget: { enabled: false },
+    });
+  });
+
+  describe('portfolio-demo write protection', () => {
+    const base = { DATABASE_URL: 'postgresql://u:p@db/t' };
+
+    it('is disabled unless explicitly enabled', () => {
+      expect(loadConfig(base).demoWriteBudget).toEqual({ enabled: false });
+      expect(
+        loadConfig({ ...base, PORTFOLIO_DEMO_WRITE_PROTECTION: 'disabled' }).demoWriteBudget,
+      ).toEqual({ enabled: false });
+    });
+
+    it('admits 200 business commands per dataset by default once enabled', () => {
+      expect(
+        loadConfig({ ...base, PORTFOLIO_DEMO_WRITE_PROTECTION: 'enabled' }).demoWriteBudget,
+      ).toEqual({ enabled: true, allowance: 200 });
+    });
+
+    it('accepts a positive whole allowance up to one million', () => {
+      for (const [value, allowance] of [
+        ['1', 1],
+        ['37', 37],
+        ['1000000', 1_000_000],
+      ] as const) {
+        expect(
+          loadConfig({
+            ...base,
+            PORTFOLIO_DEMO_WRITE_PROTECTION: 'enabled',
+            PORTFOLIO_DEMO_WRITE_ALLOWANCE: value,
+          }).demoWriteBudget,
+        ).toEqual({ enabled: true, allowance });
+      }
+    });
+
+    it('refuses any other allowance, and any other switch value', () => {
+      for (const value of ['0', '-1', '1.5', '1e3', '0x10', ' 5', '007', '', 'abc', '1000001']) {
+        expect(() =>
+          loadConfig({
+            ...base,
+            PORTFOLIO_DEMO_WRITE_PROTECTION: 'enabled',
+            PORTFOLIO_DEMO_WRITE_ALLOWANCE: value,
+          }),
+        ).toThrow('PORTFOLIO_DEMO_WRITE_ALLOWANCE');
+      }
+      for (const value of ['true', '1', 'on', 'ENABLED', '']) {
+        expect(() => loadConfig({ ...base, PORTFOLIO_DEMO_WRITE_PROTECTION: value })).toThrow(
+          'PORTFOLIO_DEMO_WRITE_PROTECTION',
+        );
+      }
+    });
+
+    it('refuses an allowance while protection is off, so no limit only looks configured', () => {
+      for (const protection of [undefined, 'disabled']) {
+        expect(() =>
+          loadConfig({
+            ...base,
+            ...(protection && { PORTFOLIO_DEMO_WRITE_PROTECTION: protection }),
+            PORTFOLIO_DEMO_WRITE_ALLOWANCE: '50',
+          }),
+        ).toThrow(/Only valid with PORTFOLIO_DEMO_WRITE_PROTECTION=enabled/);
+      }
     });
   });
 

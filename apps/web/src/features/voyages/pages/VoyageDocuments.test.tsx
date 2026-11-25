@@ -24,7 +24,12 @@ import {
 import { aCounterpartyContract, contractList } from '../../../test/fixtures/notices';
 import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
 import { emptyTimeline } from '../../../test/fixtures/timeline';
-import { problemResponse, server } from '../../../test/msw-server';
+import {
+  DEMO_CHANGE_LIMIT_DETAIL,
+  demoChangeLimitResponse,
+  problemResponse,
+  server,
+} from '../../../test/msw-server';
 import { renderRoute } from '../../../test/render-route';
 import { checkSession, sessionChangedElsewhere, StaleSessionCheckError } from '../../auth/session';
 import { SESSION_CHANGED, SESSION_CHANNEL_NAME, startSessionSync } from '../../auth/session-sync';
@@ -543,6 +548,11 @@ describe('Documents on the voyage page', () => {
         'finds it too large',
         () => problem(413, 'Payload Too Large', 'The file is larger than 10 MiB.'),
         'The file is larger than 10 MiB.',
+      ],
+      [
+        "has used up the demo's change allowance",
+        demoChangeLimitResponse,
+        DEMO_CHANGE_LIMIT_DETAIL,
       ],
       [
         'fails',
