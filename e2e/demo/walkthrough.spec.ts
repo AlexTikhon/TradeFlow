@@ -21,6 +21,7 @@ import {
   signIn,
   uploadBillOfLading,
 } from '../support/app.js';
+import { armFileChooser } from '../support/file-chooser.js';
 import type { Scenario } from '../support/scenario.js';
 import { ANA, EMRE, LUCIA, WEI_LING } from './accounts.js';
 import { expect, type Tab, test } from './fixtures.js';
@@ -356,10 +357,11 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await sellerPage.keyboard.press('Tab');
     const input = item.getByLabel('PDF file for the bill of lading');
     await expect(input).toBeFocused();
-    const choosing = sellerPage.waitForEvent('filechooser');
+    // Armed, and known to be intercepted, before Enter (support/file-chooser.ts).
+    const picker = await armFileChooser(sellerPage, input);
     await sellerPage.keyboard.press('Enter');
     await (
-      await choosing
+      await picker.chosen()
     ).setFiles({ name: second.name, mimeType: 'application/pdf', buffer: second.buffer });
     await expect(item.getByText(/^bl-v2\.pdf \(/)).toBeVisible();
     await expect(uploadButton(sellerPage)).toHaveText('Upload as version 2');

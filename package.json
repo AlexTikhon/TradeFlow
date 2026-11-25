@@ -13,7 +13,7 @@
     "build": "pnpm --filter @tradeflow/api db:generate && pnpm -r build",
     "typecheck": "pnpm codegen && pnpm -r typecheck",
     "lint": "pnpm codegen && eslint .",
-    "test": "pnpm codegen && pnpm -r test",
+    "test": "pnpm codegen && pnpm -r --workspace-concurrency=1 test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",

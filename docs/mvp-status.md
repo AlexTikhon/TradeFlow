@@ -42,6 +42,87 @@ The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and b
 `pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS
 scenario, seven steps). Details and limits: [deployment verification](deployment-mock.md#local-verification-2026-10-31).
 
+### Intermittent verification failures, local investigation, 2026-11-25
+
+Reviewing `35beb18` turned up two intermittent failures. Both were reproduced and explained
+before anything was changed. This is local evidence (Windows 11, 16 logical CPUs, Docker Desktop
+29.9.3, Node 24.11.1, pnpm 11.9.0, Playwright 1.63.0). No hosted CI run includes these changes.
+
+**API: "lets an operator of the contract's buyer give them, with server-derived author and time"
+timed out (5.97 s) in `pnpm check`.**
+
+- _Scheduling:_ `pnpm test` ran `pnpm -r test` at pnpm's default concurrency, so the API and web
+  suites ran at the same time. pnpm 11 ignores `npm_config_workspace_concurrency`: a timestamped
+  `pnpm -r exec` probe overlapped API and web with and without it, and serialized them only with
+  `--workspace-concurrency=1` (or `pnpm_config_workspace_concurrency=1`). So the record below,
+  "passed with `npm_config_workspace_concurrency=1`", was not a serialized run.
+- _Where the time goes:_ temporary timing marks went into the test, its sign-in helper and
+  argon2 derivation (all removed since). Most integration tests sign 10–13 users in through the
+  real endpoint. A full run makes 5,040 sign-ins at about 84 ms each (argon2id verify about
+  39 ms), roughly 7 of the API suite's 9.7 minutes. For tests that sign in, that is a median 79%
+  of their duration. The command under test takes 60–190 ms.
+- _Contention:_ the web suite takes about 71 s, so it overlaps only the start of the API run.
+  That is where the failing file is, and it also pays first-use costs. API run alone: all 823
+  passed, slowest 2.99 s. API and web started together, as `pnpm -r test` does: this test took
+  12.1 s and its neighbour 4.3 s. While web ran, sign-ins took a p95 of 164 ms against 106 ms
+  afterwards.
+- _Phases of the first test:_ measured with web, the API unit project and this file running
+  together, against the same selection alone:
+
+  | Phase                                        | Alone  | Contended   |
+  | -------------------------------------------- | ------ | ----------- |
+  | `beforeEach` reset (a hook, not the timeout) | 0.19 s | 0.98–2.86 s |
+  | 12 real sign-ins                             | 0.98 s | 2.38–2.47 s |
+  | Fixtures, first password hash, the request   | 0.30 s | about 1.4 s |
+  | Test as reported                             | 1.47 s | 4.81–6.69 s |
+
+  Database waits fall mostly in the hook; the test body is dominated by sign-ins.
+
+- _Fix:_ the root `test` script now runs `pnpm -r --workspace-concurrency=1 test` (contracts, then
+  API, then web; checked with the probe). That adds about 70 s to `pnpm test`, and it applies to
+  CI's `verify` job, which runs the same script. Production password hashing, the real sign-in
+  endpoint in fixtures and the 5 s timeout are unchanged.
+- _Remaining:_ the redundant sign-ins are still there. Signing users in only when a test uses
+  their cookie would remove most of the API suite's time, but it touches every suite's fixtures
+  and was left out of this fix. The API's unit and integration projects still share one Vitest
+  run; alone, that peaked at 2.99 s against the 5 s timeout.
+
+**Walkthrough F7: Enter on the focused file input produced no `filechooser`, and the wait ran out
+the 300 s test timeout.**
+
+- _Mechanism:_ Playwright switches Chromium's file-chooser interception on when the first
+  `filechooser` listener is added, and does not wait for Chromium to apply it. Chromium may handle
+  a key press sent right afterwards first, and headless Chromium then dismisses the picker on
+  its own.
+- _Reproduction, outside the app:_ a static page with the same label and visually hidden input
+  failed 4/150 plain, 15/150 with a fake clock and 31/150 with a second context, under load.
+  In-page listeners showed the cause in all 21 failures they recorded: the focused input got
+  `keydown`, `keypress`, a trusted `click` with active user activation, then `cancel`.
+  The protocol log never had `Page.fileChooserOpened`, although
+  `Page.setInterceptFileChooserDialog` had been sent before the key. In 22 of 24 failures Chromium
+  acknowledged the key first; the other two were near-ties.
+- _Ruled out:_ focus moves, input replacement, other pages and the fake clock. The input was
+  verified focused at the press. The voyage page re-focuses only for a new link request, and the
+  form replaces its input only after a successful upload. A second page and the fake clock only
+  made the race more frequent, through load.
+- _Fix:_ `e2e/support/file-chooser.ts` adds the listener, then evaluates in the page over the same
+  DevTools session, so interception is applied before Enter. Under 16 threads of CPU load, the
+  old order failed 10/200 and 9/200 and the new one 0/200 twice; the helper itself went 300/300.
+  The wait is bounded at 15 s. Its error names the page path, the focused element (tag, type,
+  accessible label), whether the input saw `cancel` or was replaced, and the page count. It
+  never reports cookies, storage, headers or file contents. Tab navigation, Enter opening the
+  picker and Enter submitting are unchanged.
+
+Results on the working tree above `35beb18`:
+
+| Check                                      | Result                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm demo:verify`, three consecutive runs | Passed 3/3, no retries, F7 by keyboard each time (2.6 min, 31 s, 33.9 s)                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm check`                               | Passed in its normal, now serial, scheduling (11.3 min): format, lint, typecheck, 193 contracts + 823 API + 520 web tests (1,536), builds. API ran 20:17:01–20:26:20; web (59.9 s) started after it                                                                                                                                                                                                                        |
+| `pnpm demo:portfolio:verify`               | Passed: 3 Chromium tests                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Plain demo with caller-supplied protection | `pnpm demo:verify` passed with `PORTFOLIO_DEMO_WRITE_PROTECTION=enabled` and an allowance of 1 in the caller's shell: no 429, so the plain demo did not inherit them                                                                                                                                                                                                                                                       |
+| Other                                      | `pnpm format:check` and `git diff --check` on the final tree. Database tests used a disposable PostgreSQL 18 container on `127.0.0.1:5544`. Before use, its database (`tradeflow_test`), role (`tradeflow`) and postmaster start time were checked over TCP, and the start time was unchanged at the end. It was then removed. Port 5433, the default test URL, belonged to another project's server here and was not used |
+
 ### Portfolio write budget, local verification, 2026-11-25
 
 The portfolio demo now admits at most 200 business commands per run's database, then answers
@@ -50,16 +131,16 @@ stopping the run and starting a new one ([ADR 0021](decisions/0021-portfolio-dem
 [demo](demo.md#the-portfolio-write-budget)). On the working tree above `b8dd0e6` (whose mock-CA
 fix is unchanged), Windows 11, Docker Desktop 29.9.3:
 
-| Check                                | Result                                                                                                                                                                                                                                                        |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm check`                         | Passed with `npm_config_workspace_concurrency=1`: format, lint, typecheck, 193 contracts + 823 API + 520 web tests (1,536), builds. Three plain runs each failed 2–3 API tests with 5 s timeouts only (below).                                                |
-| Budget suite                         | `demo-write-budget.int-spec.ts`, 10 tests on PostgreSQL 18: disabled mode, exhaustion of all eight commands with no rows/audit/files/events, concurrent final and first admissions, restart, ordering, no refunds, fail-closed. Mutation-checked (see below). |
-| `pnpm demo:portfolio:verify`         | Passed: 3 Chromium tests; the new one confirms 11 + 189 commands, then refusals in the browser with the explanation, reads, downloads and sign-out.                                                                                                           |
-| `pnpm demo:portfolio:rehearse-reset` | Passed: two runs, each removed (container, directory, both servers); the fresh run had the showcase and a whole allowance ([record](demo.md#resetting-the-portfolio-demo)).                                                                                   |
-| `pnpm demo:verify`                   | Passed with `PORTFOLIO_DEMO_WRITE_PROTECTION=enabled` and an allowance of 1 in the caller's shell: the plain demo does not inherit them.                                                                                                                      |
-| `pnpm deploy:verify`                 | Passed: one production HTTPS scenario (10.3 min).                                                                                                                                                                                                             |
-| API `test:storage`                   | Passed: 14 tests.                                                                                                                                                                                                                                             |
-| Other                                | `git diff --check`; `prisma migrate diff` from the migrated test database to the schema is empty; `pnpm demo:portfolio` started and stopped with `q`, its banner stating the allowance.                                                                       |
+| Check                                | Result                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm check`                         | Passed with `npm_config_workspace_concurrency=1` (which pnpm 11 ignores: not serialized, [see above](#intermittent-verification-failures-local-investigation-2026-11-25)): format, lint, typecheck, 193 contracts + 823 API + 520 web tests (1,536), builds. Three plain runs each failed 2–3 API tests with 5 s timeouts only (below). |
+| Budget suite                         | `demo-write-budget.int-spec.ts`, 10 tests on PostgreSQL 18: disabled mode, exhaustion of all eight commands with no rows/audit/files/events, concurrent final and first admissions, restart, ordering, no refunds, fail-closed. Mutation-checked (see below).                                                                           |
+| `pnpm demo:portfolio:verify`         | Passed: 3 Chromium tests; the new one confirms 11 + 189 commands, then refusals in the browser with the explanation, reads, downloads and sign-out.                                                                                                                                                                                     |
+| `pnpm demo:portfolio:rehearse-reset` | Passed: two runs, each removed (container, directory, both servers); the fresh run had the showcase and a whole allowance ([record](demo.md#resetting-the-portfolio-demo)).                                                                                                                                                             |
+| `pnpm demo:verify`                   | Passed with `PORTFOLIO_DEMO_WRITE_PROTECTION=enabled` and an allowance of 1 in the caller's shell: the plain demo does not inherit them.                                                                                                                                                                                                |
+| `pnpm deploy:verify`                 | Passed: one production HTTPS scenario (10.3 min).                                                                                                                                                                                                                                                                                       |
+| API `test:storage`                   | Passed: 14 tests.                                                                                                                                                                                                                                                                                                                       |
+| Other                                | `git diff --check`; `prisma migrate diff` from the migrated test database to the schema is empty; `pnpm demo:portfolio` started and stopped with `q`, its banner stating the allowance.                                                                                                                                                 |
 
 The plain `pnpm check` runs failed only on 5-second timeouts in early, argon2-heavy tests of
 `documentary-instructions.int-spec.ts` and `documents.int-spec.ts` (5.4–6.8 s) while the web
