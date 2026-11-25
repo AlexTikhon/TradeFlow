@@ -19,6 +19,7 @@ import {
   aDocumentVersion,
   brunoUploads,
   replacedBy,
+  reviewedAs,
 } from '../../../test/fixtures/documents';
 import { aCounterpartyContract, contractList } from '../../../test/fixtures/notices';
 import { aTradeString, aVoyageDetail } from '../../../test/fixtures/voyages';
@@ -418,6 +419,23 @@ describe('Documents on the voyage page', () => {
   });
 
   describe('uploading, as the seller', () => {
+    it('makes choosing a file one keyboard stop, on the file input itself', async () => {
+      servePage({ documents: [aDocument()] });
+      const { user } = renderRoute(page);
+      const item = await billOfLading();
+      const download = item.getByRole('button', {
+        name: 'Download version 1 of the bill of lading',
+      });
+      download.focus();
+
+      await user.tab();
+
+      // Straight from the download to the input: the label that looks like a button is not a
+      // stop (nor a button) of its own.
+      expect(item.getByLabelText('PDF file for the bill of lading')).toHaveFocus();
+      expect(item.queryByRole('button', { name: 'Choose a PDF' })).toBeNull();
+    });
+
     it('uploads the first version only if there is none (If-None-Match: *)', async () => {
       const state = servePage();
       const uploaded = aDocument({
@@ -643,6 +661,124 @@ describe('Documents on the voyage page', () => {
       ).toBeVisible();
       await waitFor(() => {
         expect(state.instructionRequests).toBeGreaterThan(instructionRequests);
+      });
+    });
+  });
+
+  describe("the upload button's label", () => {
+    /**
+     * Version 1 rejected: the document's version (2) counts the decision too, so it is not the
+     * number of the next file (2 as well, by coincidence) once that file is uploaded (3 and 2).
+     */
+    const rejected = reviewedAs(aDocument(), { decision: 'REJECTED', reason: 'Wrong consignee.' });
+    const anyVersionLabel = /^Upload as version/;
+
+    it('says "Upload" for a first version, before and after it is uploaded', async () => {
+      const state = servePage();
+      const uploaded = aDocument({
+        currentVersion: aDocumentVersion({ fileName: 'bl-signed.pdf' }),
+      });
+      serveUpload(() => {
+        state.documents = [uploaded];
+        return HttpResponse.json(uploaded, { status: 201 });
+      });
+      const { user } = renderRoute(page);
+      const item = await billOfLading();
+      expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+
+      await chooseFile(user, item, aPdf('bl-signed.pdf'));
+      expect(item.getByRole('button', { name: 'Upload' })).toBeEnabled();
+      await user.click(item.getByRole('button', { name: 'Upload' }));
+
+      expect(
+        await item.findByText('Version 1 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+      expect(item.getByText('No file chosen')).toBeVisible();
+      expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+      expect(item.queryByRole('button', { name: anyVersionLabel })).toBeNull();
+    });
+
+    it('names the version a replacement creates, and says "Upload" again once it exists', async () => {
+      const state = servePage({ documents: [rejected] });
+      const upload = serveUpload(() => {
+        state.documents = [replacedBy(rejected)];
+        return HttpResponse.json(replacedBy(rejected), { status: 201 });
+      });
+      const { user } = renderRoute(page);
+      const item = await billOfLading();
+      // Nothing chosen: no version is promised yet.
+      expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+
+      await chooseFile(user, item, aPdf());
+      await user.click(item.getByRole('button', { name: 'Upload as version 2' }));
+
+      expect(
+        await item.findByText('Version 2 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+      expect(upload.sent.map(({ ifMatch }) => ifMatch)).toEqual(['"2"']);
+      expect(item.getByText('No file chosen')).toBeVisible();
+      // Version 2 exists now: the empty form must not offer to upload it again.
+      expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+      expect(item.queryByRole('button', { name: anyVersionLabel })).toBeNull();
+    });
+
+    it('takes the document as it is now when another file is chosen after an upload', async () => {
+      const second = replacedBy(rejected);
+      const third = replacedBy(second, { fileName: 'bl-corrected.pdf' });
+      const state = servePage({ documents: [rejected] });
+      const upload = serveUpload(() => {
+        const next = upload.sent.length === 1 ? second : third;
+        state.documents = [next];
+        return HttpResponse.json(next, { status: 201 });
+      });
+      const { user } = renderRoute(page);
+      const item = await billOfLading();
+      await chooseFile(user, item, aPdf());
+      await user.click(item.getByRole('button', { name: 'Upload as version 2' }));
+      expect(
+        await item.findByText('Version 2 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+
+      await chooseFile(user, item, aPdf('bl-corrected.pdf'));
+      await user.click(item.getByRole('button', { name: 'Upload as version 3' }));
+
+      expect(
+        await item.findByText('Version 3 of the bill of lading has been uploaded.'),
+      ).toBeVisible();
+      // Each file named the document's version as it was chosen: 2 (one upload, one
+      // decision), then 3; not the file numbers 1 and 2.
+      expect(upload.sent.map(({ ifMatch }) => ifMatch)).toEqual(['"2"', '"3"']);
+      expect(item.getByRole('button', { name: 'Upload' })).toBeDisabled();
+    });
+
+    it("keeps a chosen file's version through a refresh, until the user adopts the newer one", async () => {
+      const theirs = replacedBy(rejected, { uploadedBy: brunoUploads });
+      const state = servePage({ documents: [rejected] });
+      const upload = serveUpload(() =>
+        HttpResponse.json(replacedBy(theirs, { fileName: 'bl-signed.pdf' }), { status: 201 }),
+      );
+      const { user, queryClient } = renderRoute(page);
+      const item = await billOfLading();
+      await chooseFile(user, item, aPdf('bl-signed.pdf'));
+      expect(item.getByRole('button', { name: 'Upload as version 2' })).toBeEnabled();
+
+      // Bruno uploads version 2 meanwhile, and a refresh shows it.
+      state.documents = [theirs];
+      await queryClient.invalidateQueries({ queryKey: ['protected'] });
+
+      const latest = within(
+        await item.findByRole('region', { name: 'Latest version of Bill of lading' }),
+      );
+      expect(item.getByText(/^bl-signed\.pdf/)).toBeVisible();
+      // The chosen file still answers to what Ana chose it against, and waits for her.
+      expect(item.getByRole('button', { name: 'Upload as version 2' })).toBeDisabled();
+      expect(upload.sent).toEqual([]);
+
+      await user.click(latest.getByRole('button', { name: 'Replace version 2 with my file' }));
+      await user.click(item.getByRole('button', { name: 'Upload as version 3' }));
+
+      await waitFor(() => {
+        expect(upload.sent.map(({ ifMatch }) => ifMatch)).toEqual(['"3"']);
       });
     });
   });

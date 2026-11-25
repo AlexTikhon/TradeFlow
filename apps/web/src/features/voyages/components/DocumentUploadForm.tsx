@@ -156,7 +156,9 @@ export function DocumentUploadForm({
     event.preventDefault();
     if (!file || stale) return;
     upload({ target, file, basedOnVersion: basis?.version ?? null }, (document) => {
+      // The basis belongs to the file it was captured with: both go once the file is uploaded.
       setFile(null);
+      setBasis(null);
       setInputKey((key) => key + 1);
       setUploaded(document.currentVersion.number);
     });
@@ -230,8 +232,15 @@ export function DocumentUploadForm({
         spacing={1.5}
         sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
       >
+        {/*
+         * The file input inside is the one keyboard stop, and it opens the picker with Enter or
+         * Space. The label only looks like a button (and shows the input's focus): as a focusable
+         * "button" of its own it was a second stop that ignored Enter.
+         */}
         <Button
           component="label"
+          role={undefined}
+          tabIndex={-1}
           htmlFor={inputId}
           variant="outlined"
           startIcon={<UploadFileIcon />}
@@ -263,7 +272,9 @@ export function DocumentUploadForm({
           disabled={!file || isPending || stale}
           startIcon={isPending ? <CircularProgress size={18} color="inherit" /> : null}
         >
-          {basis === null ? 'Upload' : `Upload as version ${basis.fileVersion + 1}`}
+          {file === null || basis === null
+            ? 'Upload'
+            : `Upload as version ${basis.fileVersion + 1}`}
         </Button>
       </Stack>
       {fileError && (

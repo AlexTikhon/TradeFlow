@@ -246,7 +246,10 @@ its reason under "Earlier versions"; the current and the earlier bill of lading 
 matching its SHA-256 above; Wei Ling's queue holding exactly one showcase action (review the
 certificate of origin) and Ana's exactly one (replace the weight certificate, with the reason),
 read from the API's answer as the browser received it and checked against the shared contract,
-so the missing invoice and the approved bill of lading create none; Rafael reading every record
+so the missing invoice and the approved bill of lading create none; Wei Ling's queue link opening
+version 1 of the certificate of origin focused, entirely in view and below the sticky header as
+rendered (navigation plus demo bar, measured rather than assumed), at desktop width and at
+390 px, without sending a command; Rafael reading every record
 and downloading both bill-of-lading versions with no write control and without sending a single
 command; Lucía unable to open the voyage or see it listed. Rafael's and Lucía's guides are
 checked to say what their access allows. Queue checks are scoped to the showcase voyage.
@@ -537,9 +540,14 @@ match revision 3.`, and click **Reject version 2**.
 versions (1)**, version 1 is still approved. Both timelines list the upload, approval, second
 upload and rejection.
 
-A known cosmetic flaw: after the replacement succeeds, Ana's emptied upload form keeps its
-disabled button labelled **Upload as version 2**, although version 2 now exists. Choosing a file
-corrects it to **Upload as version 3**. See [Walkthrough record](#walkthrough-record).
+After the replacement succeeds, Ana's emptied upload form says **Upload** again, disabled: with
+no file chosen it names no version. Choosing another file names the next one, **Upload as version
+3**, from the document as it is at that moment. (Until 2026-11-25 the emptied form kept the stale
+**Upload as version 2**; see [Walkthrough record](#walkthrough-record).)
+
+**With the keyboard.** **Choose a PDF** is one Tab stop, the file input itself (announced as
+"PDF file for the bill of lading"); Enter or Space opens the file dialog. Tab then reaches
+**Upload as version …**.
 
 **Business meaning.** The seller presents the documents the buyer asked for, against an exact
 revision of the instructions. The buyer decides on each exact file. A replacement is reviewed
@@ -697,6 +705,16 @@ a replacement as the seller and look at the emptied form. Bounded fix: in
 `apps/web/src/features/voyages/components/DocumentUploadForm.tsx`, label the button from the
 latest document when no file is chosen (`basisOf(latest)` rather than the remembered basis), with
 one jsdom assertion in `VoyageDocuments.test.tsx`. Not implemented here.
+
+> **Resolved on 2026-11-25** (added later; the record above is kept as observed). The fix differs
+> from the one proposed: with no file chosen the button now reads a neutral **Upload**, and the
+> basis is cleared together with the uploaded file, so the emptied form promises no version at
+> all. A chosen file still keeps the basis it was chosen against, through refreshes, failures and
+> conflicts, until the user explicitly adopts a newer version. Evidence: jsdom regressions in
+> `VoyageDocuments.test.tsx` ("the upload button's label": first upload, replacement, a further
+> file after an upload, a refresh while a file is chosen), and `pnpm demo:verify`, which now
+> asserts the neutral label before and after both uploads of F5 and F7 in Chromium
+> ([automated runs](#automated-runs-of-walkthrough-2)).
 
 **Not exercised.** A person running the demo with real windows and the native file and download
 dialogs; the ten-minute timing; `pnpm dev` as one command (the two servers were started with the
@@ -945,10 +963,12 @@ acknowledgement over its stream while untouched.
 
 **Do (Wei Ling).** Click **Action Center**: nothing waiting on the new voyage.
 
-**Do (Ana).** Open the new voyage from **Voyages**. At **Bill of lading**, click **Choose a PDF**,
-pick `bl-v1.pdf`, then **Upload**.
+**Do (Ana).** Open the new voyage from **Voyages**. At **Bill of lading**, the button reads
+**Upload**, disabled, until a file is chosen. Click **Choose a PDF**, pick `bl-v1.pdf`, then
+**Upload**.
 
-**Expect.** "Version 1 of the bill of lading has been uploaded." The summary: **Pending review:
+**Expect.** "Version 1 of the bill of lading has been uploaded." The emptied form's button reads
+**Upload** again, disabled. The summary: **Pending review:
 1**, still 0 of 1 approved. Ana's queue: nothing waiting on the new voyage.
 
 **Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
@@ -989,9 +1009,13 @@ sent by opening the link.
 
 ### F7. The replacement, approved
 
-**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it. The
+**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it. Once
+version 2 is uploaded, the emptied form's button reads **Upload** again, disabled. The
 summary: **Pending review: 1**, **Rejected: 0**, because only the latest file counts. Back in
 **Action Center**: nothing waiting on the new voyage.
+
+With the keyboard only, from version 1 focused by the link: Tab to **Download**, Tab to the file
+input, Enter to open the file dialog, Tab to **Upload as version 2**, Enter.
 
 **Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
 document**, "Bill of lading, version 2 (instructions revision 1)", a new action. Click **Open
@@ -1020,7 +1044,9 @@ voyage written into the database). PostgreSQL/HTTP: `documents.int-spec.ts`,
 `document-reviews.int-spec.ts`, `action-items.int-spec.ts`; one upload and approval on a set-up
 voyage in `trade-string-setup.int-spec.ts`.
 
-**Automated check.** All of F7, on both sides.
+**Automated check.** All of F7, on both sides. Ana's replacement is made with real key presses
+only, as in the keyboard sequence above (the test answers the browser's file-chooser event in
+place of the native dialog), and the neutral **Upload** label is asserted before and after it.
 
 ### F8. Timeline and visibility
 
@@ -1137,6 +1163,31 @@ passed; then the two runs above passed on the final code.
 Not checked: Linux or macOS (no such machine was available; the code paths are the same, with
 `kill` instead of `taskkill` in the recovery lines), closing the terminal window, browsers other
 than Chromium, and a person.
+
+**2026-11-25: the upload label and the keyboard path, automated.** On top of `fc62608`, the
+stale upload label was fixed and the inert **Choose a PDF** stop removed (see
+[the resolved defect](#walkthrough-record)). `pnpm demo:verify` now asserts the neutral
+**Upload** before and after each upload, and drives F7's replacement with key presses only; it
+passed once (1 of 1, 35.6 s in Playwright), voyage TF-2026-0008, container and directory removed.
+`pnpm demo:portfolio:verify` gained the linked-record check described
+[above](#the-portfolio-showcase-pnpm-demoportfolio) and passed (2 of 2, 34.2 s), after one failed
+attempt caused by the new step itself (it left Wei Ling's page off the Action Center before a
+step that reads her queue; moved after that step). Same machine as above except Docker 29.9.3,
+same Playwright and Chromium.
+
+Before those changes, an agent drove the portfolio demo in headless Chromium at 1280 px and
+390 px (a script, not a person, and not a physical phone): sign-in and account picker, the guide
+(opening, Tab trapped inside, Escape, focus back on **Demo guide** when reopened from the bar),
+the voyage list and its status filter by keyboard, **New voyage**, voyage creation, trade-string
+setup, the showcase's instructions, document summary, upload and review controls and history, a
+120-character file name, and every showcase link in both queues plus an instructions link. It
+found two defects, both fixed: the stale label, and **Choose a PDF** being a focusable "button"
+that ignored Enter, followed by a second stop on the hidden file input. Nothing overflowed
+sideways at either width (the voyages table scrolls inside its own frame at 390 px); long file
+and organization names wrapped; every linked record landed fully below the sticky header, which
+is 101 px tall at 1280 px and 93 px at 390 px with the demo bar. Observed and left as is: after
+the guide that opens by itself on sign-in is closed with Escape, focus goes to the page itself,
+since the **Sign in** button that preceded it no longer exists; the next Tab starts at the top.
 
 ### Record of walkthrough 2
 

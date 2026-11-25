@@ -72,6 +72,16 @@ async function openVoyage(page: Page, reference: string) {
   await expect(page.getByRole('heading', { level: 1, name: reference })).toBeVisible();
 }
 
+/** The bill of lading's upload button, whatever version it names. */
+const uploadButton = (page: Page) =>
+  billOfLading(page).getByRole('button', { name: /^Upload( as version \d+)?$/ });
+
+/** With no file chosen, the upload button is neutral and disabled: it promises no version. */
+async function expectNeutralUpload(page: Page) {
+  await expect(uploadButton(page)).toHaveText('Upload');
+  await expect(uploadButton(page)).toBeDisabled();
+}
+
 /** The timeline shows exactly these entries, newest first: description, actor, contract label. */
 async function expectTimeline(page: Page, entries: [string, string, boolean][]) {
   const items = timeline(page).getByRole('listitem');
@@ -269,7 +279,9 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await expect(actionsOn(buyerPage, reference)).toHaveCount(0);
 
     await openVoyage(sellerPage, reference);
+    await expectNeutralUpload(sellerPage);
     await uploadBillOfLading(sellerPage, first, 1);
+    await expectNeutralUpload(sellerPage);
     await expectDocumentSet(sellerPage, 'Documents approved: 0 of 1', [0, 1, 0, 0]);
     await openActionCenterAndRead(seller);
     await expect(actionsOn(sellerPage, reference)).toHaveCount(0);
@@ -332,8 +344,33 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     expect(commandsSent(seller.network, opened)).toEqual([]);
   });
 
-  await test.step('F7: Ana uploads the replacement; Wei Ling approves version 2; no action is left on the voyage', async () => {
-    await uploadBillOfLading(sellerPage, second, 2);
+  await test.step('F7: Ana uploads the replacement by keyboard; Wei Ling approves version 2; no action is left on the voyage', async () => {
+    // From where the Action Center link left focus (version 1), with the keyboard only: the
+    // download, then the file input, which is the picker's one stop and opens it with Enter.
+    const item = billOfLading(sellerPage);
+    await expectNeutralUpload(sellerPage);
+    await sellerPage.keyboard.press('Tab');
+    await expect(
+      item.getByRole('button', { name: 'Download version 1 of the bill of lading' }),
+    ).toBeFocused();
+    await sellerPage.keyboard.press('Tab');
+    const input = item.getByLabel('PDF file for the bill of lading');
+    await expect(input).toBeFocused();
+    const choosing = sellerPage.waitForEvent('filechooser');
+    await sellerPage.keyboard.press('Enter');
+    await (
+      await choosing
+    ).setFiles({ name: second.name, mimeType: 'application/pdf', buffer: second.buffer });
+    await expect(item.getByText(/^bl-v2\.pdf \(/)).toBeVisible();
+    await expect(uploadButton(sellerPage)).toHaveText('Upload as version 2');
+    await sellerPage.keyboard.press('Tab');
+    await expect(uploadButton(sellerPage)).toBeFocused();
+    await sellerPage.keyboard.press('Enter');
+    await expect(
+      item.getByText('Version 2 of the bill of lading has been uploaded.'),
+    ).toBeVisible();
+    // Version 2 exists now: the empty form no longer says "Upload as version 2".
+    await expectNeutralUpload(sellerPage);
     // The replacement is pending: the rejection of version 1 no longer counts.
     await expectDocumentSet(sellerPage, 'Documents approved: 0 of 1', [0, 1, 0, 0]);
     await openActionCenterAndRead(seller);

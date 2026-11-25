@@ -363,8 +363,9 @@ extraction ([README](../README.md#roadmap)).
   nothing about whether either upload works; only a failing run will.
 - **The demo has not been run by a person.** The [walkthrough record](demo.md#walkthrough-record)
   is of a scripted Chromium session on the seeded voyage. It found one cosmetic defect: after an
-  upload, the emptied upload form's disabled button shows a stale version number. A bounded fix
-  is proposed there. The [fresh-voyage walkthrough](demo.md#walkthrough-2-a-fresh-voyage) is
+  upload, the emptied upload form's disabled button showed a stale version number. Resolved on
+  2026-11-25: with no file chosen the button reads a neutral **Upload** (jsdom regressions, and
+  asserted by `pnpm demo:verify`). The [fresh-voyage walkthrough](demo.md#walkthrough-2-a-fresh-voyage) is
   automated (`pnpm demo:verify`, passed locally on 2026-10-28) but has not been run by a person.
   The hosted `demo` job passed on `d00635f`.
 - **The one-command demo is local only.** `pnpm demo` needs a running Docker daemon and was

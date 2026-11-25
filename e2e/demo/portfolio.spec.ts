@@ -76,6 +76,24 @@ async function expectFitsWidth(page: Page, locator: Locator) {
 }
 
 /**
+ * `record` is in view below the sticky header as rendered (the navigation and, in this build, the
+ * demo bar under it), not under it: measured, since the bar's height is not a constant.
+ */
+async function expectBelowStickyHeader(page: Page, record: Locator) {
+  const header = await page.getByRole('banner').boundingBox();
+  const box = await record.boundingBox();
+  const height = page.viewportSize()?.height ?? 0;
+  expect(header).not.toBeNull();
+  expect(box).not.toBeNull();
+  expect(box?.y ?? -1, 'record top below the sticky header').toBeGreaterThanOrEqual(
+    (header?.y ?? 0) + (header?.height ?? Infinity),
+  );
+  expect((box?.y ?? 0) + (box?.height ?? Infinity), 'record bottom in view').toBeLessThanOrEqual(
+    height,
+  );
+}
+
+/**
  * Signs `party` in on the Action Center and answers the queue's first page as the browser
  * received it from the API, checked against the shared contract.
  */
@@ -341,6 +359,34 @@ test('the portfolio showcase: four document states, both queues, history and dow
       await expect(actionsOn(page, reference)).not.toContainText('Commercial invoice');
       await expect(actionsOn(page, reference)).not.toContainText('Bill of lading');
     }
+  });
+
+  await test.step("Wei Ling's queue link opens the certificate of origin below the sticky header, at desktop width and at 390 px", async () => {
+    const { page } = buyer;
+    const reading = buyer.network.mark();
+    const record = documentItem(page, 'Certificate of origin').getByRole('group', {
+      name: 'Version 1 of the certificate of origin',
+    });
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });
+      await page
+        .getByRole('navigation', { name: 'Main' })
+        .getByRole('link', { name: 'Action Center' })
+        .click();
+      await actionsOn(page, reference)
+        .getByRole('link', { name: `Open version 1 on ${reference}, contract 1` })
+        .click();
+      await expect(page.getByRole('status', { name: 'Linked record' })).toContainText(
+        'Version 1 of the certificate of origin is waiting for your organization’s decision',
+      );
+      await expect(record).toBeFocused();
+      await expectBelowStickyHeader(page, record);
+      await expectNoHorizontalOverflow(page);
+    }
+    // Back to the configured viewport (Desktop Chrome) for the steps below.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    // Following the link only reads: nothing of the showcase changes for the steps below.
+    expect(commandsSent(buyer.network, reading)).toEqual([]);
   });
 
   await test.step('Both sides see the four document states; the bill of lading keeps rejected version 1', async () => {
