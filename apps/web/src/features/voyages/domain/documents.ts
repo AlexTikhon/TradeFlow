@@ -2,6 +2,7 @@ import type {
   ContractDocument,
   CounterpartyContract,
   CurrentUser,
+  DocumentaryInstructionRevision,
   DocumentReview,
   DocumentVersion,
   RequiredDocumentType,
@@ -89,6 +90,58 @@ export const findDocument = (
       document.revisionNumber === revisionNumber &&
       document.documentType === type,
   ) ?? null;
+
+/** Where one document a revision requires stands, as its latest file decides. */
+export type RequiredDocumentState = 'MISSING' | 'PENDING' | 'REJECTED' | 'APPROVED';
+
+/** How many of a revision's required documents are in each state. */
+export interface DocumentSetSummary {
+  /** Each document type the revision requires, counted once. */
+  required: number;
+  missing: number;
+  pending: number;
+  rejected: number;
+  approved: number;
+  /** Every required document's latest file is approved, and at least one is required. */
+  allApproved: boolean;
+}
+
+/**
+ * The state of the document set that revision `revisionNumber` of `contractId`'s instructions
+ * requires. Each required type counts once, however many originals and copies it asks for:
+ * missing until a file is presented against this contract and this exact revision, then as its
+ * latest file stands (pending without a decision, or the decision on it). Earlier files, other
+ * contracts, other revisions and types the revision does not require play no part. A pure
+ * projection of what the API returned: nothing here is stored or sent.
+ */
+export function summarizeDocumentSet(
+  documents: readonly ContractDocument[],
+  contractId: string,
+  revision: Pick<DocumentaryInstructionRevision, 'number' | 'requirements'>,
+): DocumentSetSummary {
+  const types = new Set(revision.requirements.map(({ document }) => document));
+  const counts: Record<RequiredDocumentState, number> = {
+    MISSING: 0,
+    PENDING: 0,
+    REJECTED: 0,
+    APPROVED: 0,
+  };
+  for (const type of types) {
+    const document = findDocument(documents, contractId, revision.number, type);
+    const state: RequiredDocumentState = document
+      ? (document.currentVersion.review?.decision ?? 'PENDING')
+      : 'MISSING';
+    counts[state] += 1;
+  }
+  return {
+    required: types.size,
+    missing: counts.MISSING,
+    pending: counts.PENDING,
+    rejected: counts.REJECTED,
+    approved: counts.APPROVED,
+    allApproved: types.size > 0 && counts.APPROVED === types.size,
+  };
+}
 
 const sizeFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 

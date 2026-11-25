@@ -53,6 +53,8 @@ interface ContractInstructionsProps {
   contract: CounterpartyContract;
   instruction: DocumentaryInstruction | null;
   documents: UseQueryResult<DocumentListResponse>;
+  /** The last read of the contracts or the instructions failed: what is shown may be outdated. */
+  instructionsStale: boolean;
   onReviewLatest: () => Promise<unknown>;
 }
 
@@ -62,6 +64,7 @@ function ContractInstructions({
   contract,
   instruction,
   documents,
+  instructionsStale,
   onReviewLatest,
 }: ContractInstructionsProps) {
   const identity = useIdentity();
@@ -176,6 +179,7 @@ function ContractInstructions({
           revision={currentRevision}
           current
           documents={documents}
+          instructionsStale={instructionsStale}
         />
 
         {previousRevisions.length > 0 && (
@@ -328,6 +332,7 @@ export function DocumentaryInstructionsCard({
               contract={contract}
               instruction={loaded.find((item) => item.contract.id === contract.id) ?? null}
               documents={documents}
+              instructionsStale={Boolean(error)}
               onReviewLatest={() => instructions.refetch()}
             />
           ))}

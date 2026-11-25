@@ -38,6 +38,7 @@ import {
   type ReviewStatus,
   reviewStatusOf,
   shortChecksum,
+  summarizeDocumentSet,
 } from '../domain/documents';
 import { useDownloadDocument } from '../hooks/use-document-commands';
 import {
@@ -47,6 +48,7 @@ import {
   useLinkedRecord,
 } from '../navigation/linked-record';
 import { DocumentReviewForm } from './DocumentReviewForm';
+import { DocumentSetStatus } from './DocumentSetStatus';
 import { DocumentUploadForm } from './DocumentUploadForm';
 
 const STATUS_COLORS = {
@@ -352,6 +354,8 @@ interface RevisionDocumentsProps {
   /** Whether this is the revision in force: only it takes uploads. */
   current: boolean;
   documents: UseQueryResult<DocumentListResponse>;
+  /** The last read of the instructions failed, so the revision shown may be out of date. */
+  instructionsStale?: boolean;
 }
 
 /**
@@ -359,6 +363,9 @@ interface RevisionDocumentsProps {
  * revision every required document is listed, presented or not, and the seller's operators can
  * upload; for an earlier one only what was presented against it, read-only. Degrades on its own:
  * the revision above it stays readable when documents cannot be loaded.
+ *
+ * The current revision's list opens with the state of its document set, once documents have been
+ * read: never while loading or after a first read failed, when nothing is known.
  */
 export function RevisionDocuments({
   voyageId,
@@ -366,6 +373,7 @@ export function RevisionDocuments({
   revision,
   current,
   documents,
+  instructionsStale = false,
 }: RevisionDocumentsProps) {
   const identity = useIdentity();
   const loaded = documents.data?.items;
@@ -393,6 +401,7 @@ export function RevisionDocuments({
 
   const uploads = current && canUploadDocuments(identity, contract);
   const reviews = current && canReviewDocuments(identity, contract);
+  const documentSet = current ? summarizeDocumentSet(loaded, contract.id, revision) : null;
   return (
     <Box component="section" aria-labelledby={headingId}>
       <Typography variant="subtitle2" component="h4" id={headingId} sx={{ mb: 1 }}>
@@ -413,6 +422,14 @@ export function RevisionDocuments({
             onRetry={retry}
           />
         </Box>
+      )}
+      {documentSet && documentSet.required > 0 && (
+        <DocumentSetStatus
+          idPrefix={`${contract.id}-${revision.number}`}
+          revisionNumber={revision.number}
+          summary={documentSet}
+          lastKnown={Boolean(documents.error) || instructionsStale}
+        />
       )}
       <Stack
         component="ul"

@@ -103,6 +103,32 @@ export async function expectInstructionsSent(page: Page, scenario: Scenario, rev
   ).toBeVisible();
 }
 
+/** The summary of the current revision's document set, above its documents. */
+export const documentSet = (page: Page) =>
+  instructionPanel(page).getByRole('group', { name: /^Documents approved: / });
+
+/**
+ * The summary reads `headline` ("Documents approved: X of Y") and these counts, in words:
+ * missing, pending review, rejected, approved. `complete`: it says every one is approved.
+ */
+export async function expectDocumentSet(
+  page: Page,
+  headline: string,
+  [missing, pending, rejected, approved]: [number, number, number, number],
+  { complete = false } = {},
+) {
+  const summary = documentSet(page);
+  await expect(summary).toHaveAccessibleName(headline);
+  await expect(summary.getByRole('listitem')).toHaveText([
+    `Missing: ${missing}`,
+    `Pending review: ${pending}`,
+    `Rejected: ${rejected}`,
+    `Approved: ${approved}`,
+  ]);
+  const completion = summary.getByText('All required documents approved.', { exact: true });
+  await expect(completion).toHaveCount(complete ? 1 : 0);
+}
+
 /** The bill of lading the current revision requires, with its versions and its form. */
 export const billOfLading = (page: Page) =>
   instructionPanel(page).getByRole('listitem', { name: 'Bill of lading', exact: true });

@@ -182,6 +182,16 @@ them. Revision 1 requires four documents:
 | Weight certificate    | Version 1 rejected: "Net weight of 44,850.000 MT does not match the contract quantity of 45,000.000 MT. …" | Ana: _Replace rejected document_             |
 | Bill of lading        | Version 1 rejected (wrong consignee), version 2 approved; both kept with their decisions                   | Nobody: approved                             |
 
+Above the documents, every side sees the same summary of revision 1's document set: **Documents
+approved: 1 of 4**, then **Missing: 1**, **Pending review: 1**, **Rejected: 1**, **Approved: 1**.
+Neither queue mentions the missing invoice, which is why the summary is there: an empty Action
+Center does not mean every document has been presented. The summary is computed in the browser
+from the instructions and documents the page already reads; nothing about it is stored. Only
+when the latest version of every required document is approved does it say **All required
+documents approved.**, and that is all it means: not that the voyage is complete, payment
+settled or any other obligation met. If a refresh fails, the counts are marked **(last known)**
+and the completion message is withheld until a read succeeds.
+
 Two more accounts show access: **Rafael Lima** (`rafael.lima@cerrado-graos.example`, a viewer at
 Cerrado) reads every record and download but has no upload, review or acknowledgement control;
 **Lucía Ferreyra** (Pampa Litoral, no part in the voyage) gets "Voyage not found". The password
@@ -230,7 +240,8 @@ to the showcase voyage by its actual id, its Action Center link to the queue, an
 the demo bar and closes with Escape, all without a command; nothing overflows sideways at desktop
 width or at 390 px, signed in or not. Then the showcase, with Ana and Wei Ling in browser
 contexts of their own, each closing the guide that addresses them after signing in: all four
-document states on both sides; the approved bill of lading with rejected version 1 and
+document states on both sides, with the summary "Documents approved: 1 of 4" and one document in
+each state, the same for Rafael, and fitting at 390 px; the approved bill of lading with rejected version 1 and
 its reason under "Earlier versions"; the current and the earlier bill of lading downloaded, each
 matching its SHA-256 above; Wei Ling's queue holding exactly one showcase action (review the
 certificate of origin) and Ana's exactly one (replace the weight certificate, with the reason),
@@ -915,7 +926,9 @@ Opening it sent nothing.
 **Do (Ana).** Click **Acknowledge receipt of revision 1**.
 
 **Expect.** Revision 1 shows **Acknowledged by the seller**, on Ana's page and, without a reload,
-on Wei Ling's. Back in **Action Center**, nothing is waiting on the new voyage.
+on Wei Ling's. Above the documents, both pages show **Documents approved: 0 of 1** and
+**Missing: 1**. Back in **Action Center**, nothing is waiting on the new voyage, although the
+bill of lading is still missing: the summary, not the queue, says what has been presented.
 
 **Engineering guarantee.** Ana's page opened its event stream before Cerrado had any contract on
 this voyage. The stream re-reads her organization's contracts before every delivery, so signals
@@ -935,8 +948,8 @@ acknowledgement over its stream while untouched.
 **Do (Ana).** Open the new voyage from **Voyages**. At **Bill of lading**, click **Choose a PDF**,
 pick `bl-v1.pdf`, then **Upload**.
 
-**Expect.** "Version 1 of the bill of lading has been uploaded." Ana's queue: nothing waiting on
-the new voyage.
+**Expect.** "Version 1 of the bill of lading has been uploaded." The summary: **Pending review:
+1**, still 0 of 1 approved. Ana's queue: nothing waiting on the new voyage.
 
 **Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
 document**, "Cerrado Grãos Exportadora S.A. · Contract 1", "Bill of lading, version 1
@@ -961,8 +974,8 @@ always under automation.
 **Do (Wei Ling).** Select **Reject**, type the **Reason for rejecting**
 `Consignee does not match revision 1.`, and click **Reject version 1**.
 
-**Expect.** "Version 1 of the bill of lading has been rejected." Her **Action Center**: nothing
-waiting on the new voyage.
+**Expect.** "Version 1 of the bill of lading has been rejected." The summary: **Rejected: 1**.
+Her **Action Center**: nothing waiting on the new voyage.
 
 **Do (Ana).** Click into her window (she is on **Action Center**). **Expect** one item for the
 new voyage: **Replace rejected document**, with the reason, "Meridian Agri Trading Pte. Ltd. ·
@@ -976,7 +989,8 @@ sent by opening the link.
 
 ### F7. The replacement, approved
 
-**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it. Back in
+**Do (Ana).** Choose `bl-v2.pdf`; the button reads **Upload as version 2**. Click it. The
+summary: **Pending review: 1**, **Rejected: 0**, because only the latest file counts. Back in
 **Action Center**: nothing waiting on the new voyage.
 
 **Do (Wei Ling).** Click into her window. **Expect** one item for the new voyage: **Review
@@ -985,12 +999,14 @@ version 2**: "Version 2 of the bill of lading is waiting for your organization�
 version 2 focused. Select **Approve**, then click **Approve version 2**.
 
 **Expect.** "Version 2 of the bill of lading has been approved", and above the sections "Version
-2 of the bill of lading has already been approved". Both queues: nothing waiting on the new
+2 of the bill of lading has already been approved". The summary: **Documents approved: 1 of 1**
+and **All required documents approved.** (the documents only, not the voyage). Both queues: nothing waiting on the new
 voyage (Wei Ling's seeded TF-2026-0002 notice remains).
 
 **Do (both).** Open the new voyage, and at **Bill of lading** click **Earlier versions (1)**.
 
-**Expect.** "Version 2: bl-v2.pdf", **Approved by Tan Wei Ling**; under **Earlier versions**,
+**Expect.** **All required documents approved.** above the documents; "Version 2: bl-v2.pdf",
+**Approved by Tan Wei Ling**; under **Earlier versions**,
 "Version 1: bl-v1.pdf", **Rejected by Tan Wei Ling**, with the reason as typed. The same on both
 sides.
 

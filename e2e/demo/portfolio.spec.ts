@@ -2,7 +2,13 @@ import { readFile } from 'node:fs/promises';
 import type { Locator, Page } from '@playwright/test';
 import { type ActionItem, type ActionItemPage, ActionItemPageSchema } from '@tradeflow/contracts';
 import { actionCenterTab, actionItems, commandsSent } from '../support/action-center.js';
-import { instructionPanel, instructionRevision, signIn } from '../support/app.js';
+import {
+  documentSet,
+  expectDocumentSet,
+  instructionPanel,
+  instructionRevision,
+  signIn,
+} from '../support/app.js';
 import type { Party } from '../support/scenario.js';
 import { ANA, DEMO_PASSWORD, LUCIA, RAFAEL, WEI_LING } from './accounts.js';
 import { expect, type Tab, test } from './fixtures.js';
@@ -116,6 +122,8 @@ async function downloaded(page: Page, button: Locator, file: ShowcaseFile): Prom
 /** The four document states, as every reader on the seller's or the buyer's side sees them. */
 async function expectDocumentStates(page: Page) {
   await expect(instructionRevision(page, 1)).toContainText('Acknowledged by the seller');
+  // The same counts on every side: one document in each state, one of four approved.
+  await expectDocumentSet(page, 'Documents approved: 1 of 4', [1, 1, 1, 1]);
 
   const invoice = documentItem(page, 'Commercial invoice');
   await expect(invoice).toContainText('Not uploaded yet');
@@ -387,6 +395,16 @@ test('the portfolio showcase: four document states, both queues, history and dow
       'Set up trade string',
     ]) {
       await expect(viewer.page.getByRole('button', { name })).toHaveCount(0);
+    }
+
+    // At 390 px the summary still fits, every count still says what it counts in words.
+    await viewer.page.setViewportSize({ width: 390, height: 844 });
+    const summary = documentSet(viewer.page);
+    await summary.scrollIntoViewIfNeeded();
+    await expectDocumentSet(viewer.page, 'Documents approved: 1 of 4', [1, 1, 1, 1]);
+    await expectFitsWidth(viewer.page, summary);
+    for (const count of await summary.getByRole('listitem').all()) {
+      await expectFitsWidth(viewer.page, count);
     }
     expect(commandsSent(viewer.network, reading)).toEqual([]);
   });

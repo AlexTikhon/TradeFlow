@@ -12,6 +12,7 @@ import {
 } from '../support/action-center.js';
 import {
   billOfLading,
+  expectDocumentSet,
   giveInstructions,
   instructionPanel,
   instructionRevision,
@@ -254,6 +255,11 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await expect(instructionRevision(sellerPage, 1)).toContainText('Acknowledged by the seller');
     // Wei Ling's voyage page, untouched, learns of it over its event stream.
     await expect(instructionRevision(buyerPage, 1)).toContainText('Acknowledged by the seller');
+    // The bill of lading is required and missing, on both sides, although Ana's queue is
+    // about to be empty: an empty Action Center says nothing about missing documents.
+    for (const page of [sellerPage, buyerPage]) {
+      await expectDocumentSet(page, 'Documents approved: 0 of 1', [1, 0, 0, 0]);
+    }
     await openActionCenterAndRead(seller);
     await expect(actionsOn(sellerPage, reference)).toHaveCount(0);
   });
@@ -264,6 +270,7 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
 
     await openVoyage(sellerPage, reference);
     await uploadBillOfLading(sellerPage, first, 1);
+    await expectDocumentSet(sellerPage, 'Documents approved: 0 of 1', [0, 1, 0, 0]);
     await openActionCenterAndRead(seller);
     await expect(actionsOn(sellerPage, reference)).toHaveCount(0);
 
@@ -284,6 +291,7 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await expect(version1).toBeFocused();
     await expect(billOfLading(buyerPage)).toContainText(`Version 1: ${first.name}`);
     await expect(billOfLading(buyerPage)).toContainText('Pending review');
+    await expectDocumentSet(buyerPage, 'Documents approved: 0 of 1', [0, 1, 0, 0]);
     const review = buyerPage.getByRole('form', { name: 'Review version 1 of the bill of lading' });
     await expect(review.getByLabel('Approve', { exact: true })).not.toBeChecked();
     await expect(review.getByLabel('Reject', { exact: true })).not.toBeChecked();
@@ -301,6 +309,7 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
 
   await test.step('F6: Wei Ling rejects version 1; Ana’s queue asks her to replace it, with the reason', async () => {
     await reviewBillOfLading(buyerPage, 1, reason);
+    await expectDocumentSet(buyerPage, 'Documents approved: 0 of 1', [0, 0, 1, 0]);
     await openActionCenterAndRead(buyer);
     await expect(actionsOn(buyerPage, reference)).toHaveCount(0);
 
@@ -325,6 +334,8 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
 
   await test.step('F7: Ana uploads the replacement; Wei Ling approves version 2; no action is left on the voyage', async () => {
     await uploadBillOfLading(sellerPage, second, 2);
+    // The replacement is pending: the rejection of version 1 no longer counts.
+    await expectDocumentSet(sellerPage, 'Documents approved: 0 of 1', [0, 1, 0, 0]);
     await openActionCenterAndRead(seller);
     await expect(actionsOn(sellerPage, reference)).toHaveCount(0);
 
@@ -346,6 +357,9 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await expect(linkedRecordStatus(buyerPage)).toContainText(
       'Version 2 of the bill of lading has already been approved',
     );
+    await expectDocumentSet(buyerPage, 'Documents approved: 1 of 1', [0, 0, 0, 1], {
+      complete: true,
+    });
 
     await openActionCenterAndRead(buyer);
     await expect(actionsOn(buyerPage, reference)).toHaveCount(0);
@@ -358,6 +372,9 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
     await openVoyage(sellerPage, reference);
     await openVoyage(buyerPage, reference);
     for (const page of [sellerPage, buyerPage]) {
+      await expectDocumentSet(page, 'Documents approved: 1 of 1', [0, 0, 0, 1], {
+        complete: true,
+      });
       const item = billOfLading(page);
       await expect(item).toContainText(`Version 2: ${second.name}`);
       await expect(item).toContainText(`Approved by ${WEI_LING.fullName}`);
