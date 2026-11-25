@@ -126,9 +126,10 @@ does not.
 
 ### The portfolio showcase: `pnpm demo:portfolio`
 
-The same demo with one opt-in extra: a voyage whose document workflow is already under way, to
-open and explain without clicking through setup first. `pnpm demo` and `pnpm demo:verify` are
-unchanged; the extra exists only when this profile is asked for.
+The same demo with two opt-in extras: a voyage whose document workflow is already under way, to
+open and explain without clicking through setup first, and a guided sign-in so a visitor can find
+it without reading this page. `pnpm demo` and `pnpm demo:verify` are unchanged; the extras exist
+only when this profile is asked for.
 
 ```bash
 pnpm demo:portfolio          # the demo, plus the showcase voyage; Ctrl+C or q to stop
@@ -136,10 +137,37 @@ pnpm demo:portfolio:verify   # the showcase checked in Chromium, on a fresh envi
 ```
 
 **What it starts.** Exactly what `pnpm demo` starts (its own container, temporary directory,
-built apps, all migrations, the unchanged seed, production sign-in admission), then one more
-startup step: _Preparing the portfolio showcase voyage through the API_. When the step is done,
-the banner prints the showcase's reference (the next free one, `TF-2026-0008` on a fresh run),
-its address, the accounts and what each document shows. It prints no session token.
+built apps, all migrations, the unchanged seed, production sign-in admission), except that the
+web app is built in the `portfolio-demo` mode, then one more startup step: _Preparing the
+portfolio showcase voyage through the API_. When the step is done, the banner prints the
+showcase's reference (the next free one, `TF-2026-0008` on a fresh run), its address, the
+accounts and what each document shows. It prints no session token.
+
+**What a visitor sees.** The sign-in page says in two sentences what TradeFlow is, lists the four
+accounts below (seller, buyer, viewer, outsider) as fictional, and shows the published password.
+Choosing an account only fills in the email and password; signing in is still the visitor's own
+click on **Sign in**, through the normal sign-in (same errors, admission limits, sign-out
+ordering and cross-tab handling), and it returns to the page that asked for it. A short **Demo
+guide** then opens once: a link to the showcase voyage and to the Action Center, what the
+signed-in account may do there (Lucía is told that "Voyage not found" is intended), the four
+document states, that seller and buyer side by side need two browser profiles or a normal and a
+private window (tabs share one sign-in), and that changes disappear when the demo stops. The
+**Demo guide** button in the bar under the top navigation reopens it. The guide only navigates:
+it sends no command, decision or upload.
+
+**How the web app knows.** Only the portfolio profile builds the web app with
+`vite build --mode portfolio-demo` (`webMode` in `e2e/demo/portfolio.ts`); the onboarding is
+switched on by that mode alone (`apps/web/src/features/portfolio-demo/portfolio-demo.ts`), never
+by `NODE_ENV`, the hostname, the accounts, the address or an environment variable, so an ordinary
+build, `pnpm dev`, `pnpm demo` and `pnpm demo:verify` cannot inherit it. The showcase's id exists
+only after the build, so once the voyage is prepared, startup writes `portfolio-demo.json`
+(`{ "schemaVersion": 1, "showcase": { "voyageId", "reference" } }`, nothing else) into this
+run's own web build and checks that the web server serves it as written; a failure there ends
+startup like any other step. The web app reads the file only when the guide opens, accepts only
+that exact shape (a UUID, a `TF-YYYY-NNNN` reference, at most 1 KiB) and builds its link from
+the id. It is a signpost, not a permission: what each account can open is still decided by the
+API. If the file is missing or malformed, sign-in works as usual and the guide says the showcase
+is not available in this run instead of linking anywhere.
 
 **The scenario.** Ana Souza (Cerrado Grãos, seller) and Tan Wei Ling (Meridian, buyer) under
 the voyage's only contract, Cerrado → Meridian: Santos to Dalian, 45,000 MT of soybeans on
@@ -195,16 +223,24 @@ is the same as [above](#starting-the-demo-pnpm-demo).
 
 **The verification, `pnpm demo:portfolio:verify`.** Starts a fresh environment with the same
 code as `pnpm demo:portfolio` (the same global setup as `pnpm demo:verify`, with the portfolio
-profile) and checks in headless Chromium, with Ana and Wei Ling in browser contexts of their own:
-all four document states on both sides; the approved bill of lading with rejected version 1 and
+profile) and checks in headless Chromium. First the onboarding, as a visitor: the explanation and
+the four accounts; choosing Ana with the keyboard fills the form and sends no sign-in request;
+submitting signs in and returns to the Action Center with the guide open; the guide's link leads
+to the showcase voyage by its actual id, its Action Center link to the queue, and it reopens from
+the demo bar and closes with Escape, all without a command; nothing overflows sideways at desktop
+width or at 390 px, signed in or not. Then the showcase, with Ana and Wei Ling in browser
+contexts of their own, each closing the guide that addresses them after signing in: all four
+document states on both sides; the approved bill of lading with rejected version 1 and
 its reason under "Earlier versions"; the current and the earlier bill of lading downloaded, each
 matching its SHA-256 above; Wei Ling's queue holding exactly one showcase action (review the
 certificate of origin) and Ana's exactly one (replace the weight certificate, with the reason),
 read from the API's answer as the browser received it and checked against the shared contract,
 so the missing invoice and the approved bill of lading create none; Rafael reading every record
 and downloading both bill-of-lading versions with no write control and without sending a single
-command; Lucía unable to open the voyage or see it listed. Queue checks are scoped to the
-showcase voyage. No retries, no mocked answers; it stops and removes everything, pass or fail,
+command; Lucía unable to open the voyage or see it listed. Rafael's and Lucía's guides are
+checked to say what their access allows. Queue checks are scoped to the showcase voyage.
+`pnpm demo:verify` checks the other way round that the plain demo shows no account list, demo
+bar or guide. No retries, no mocked answers; it stops and removes everything, pass or fail,
 and keeps a failure screenshot in `e2e/.output/demo/portfolio-results/`. CI runs it in the
 `demo` job, after `pnpm demo:verify`, in a second fresh environment.
 

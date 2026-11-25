@@ -76,6 +76,7 @@ function printShowcase(webUrl: string, showcase: Showcase): void {
   say('    Bill of lading         version 1 rejected, version 2 approved; both kept, with');
   say('                           their decisions, under "Earlier versions"');
   say("  Rafael (Ana's colleague) reads it all without write controls; Lucía cannot open it.");
+  say('  The sign-in page offers these accounts; the in-app Demo guide links here.');
   say('  More: docs/demo.md, "The portfolio showcase". Use one browser profile per account.');
 }
 

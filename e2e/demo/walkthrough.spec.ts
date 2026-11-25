@@ -104,6 +104,11 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
   await test.step('Ana and Wei Ling sign in, each on the Action Center, in contexts of their own', async () => {
     await actionCenterTab(seller, ANA);
     await actionCenterTab(buyer, WEI_LING);
+    // The plain demo has none of the portfolio profile's onboarding: no demo bar, no guide.
+    for (const page of [sellerPage, buyerPage]) {
+      await expect(page.getByRole('button', { name: 'Demo guide' })).toHaveCount(0);
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    }
     // The seed's open notice to Meridian on TF-2026-0002: this is the seeded database.
     await expect(actionItem(buyerPage, 'Acknowledge ETA notice', 'TF-2026-0002')).toBeVisible();
   });
@@ -385,6 +390,8 @@ test('a fresh voyage on the demo seed: created and set up, then instructions, a 
 
     const { page: finalBuyerPage } = await newTab(await newContext());
     await finalBuyerPage.goto('/voyages');
+    await expect(finalBuyerPage.getByRole('form', { name: 'Sign in' })).toBeVisible();
+    await expect(finalBuyerPage.getByRole('list', { name: 'Demo accounts' })).toHaveCount(0);
     await signIn(finalBuyerPage, EMRE);
     await openVoyage(finalBuyerPage, reference);
     await expect(ownChainItem(finalBuyerPage)).toContainText(EMRE.organizationName);

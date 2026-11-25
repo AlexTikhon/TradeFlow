@@ -4,7 +4,7 @@ import { type ActionItem, type ActionItemPage, ActionItemPageSchema } from '@tra
 import { actionCenterTab, actionItems, commandsSent } from '../support/action-center.js';
 import { instructionPanel, instructionRevision, signIn } from '../support/app.js';
 import type { Party } from '../support/scenario.js';
-import { ANA, LUCIA, RAFAEL, WEI_LING } from './accounts.js';
+import { ANA, DEMO_PASSWORD, LUCIA, RAFAEL, WEI_LING } from './accounts.js';
 import { expect, type Tab, test } from './fixtures.js';
 import { SHOWCASE_REASONS } from './portfolio.js';
 import { SHOWCASE_FILES, sha256, type ShowcaseFile } from './portfolio-files.js';
@@ -16,6 +16,11 @@ import { SHOWCASE_FILES, sha256, type ShowcaseFile } from './portfolio-files.js'
  * mocked or faked: the queues are the API's real answers, read as the browser received them.
  * The seed's own notices put other items in the queues, so every queue check is scoped to the
  * showcase voyage.
+ *
+ * The portfolio build adds onboarding: the sign-in page explains TradeFlow and offers the four
+ * accounts, and a short guide opens after each sign-in sent from that page. The first test
+ * follows it as a visitor would; the second closes the guide after each sign-in, checking what it
+ * says to that account, and then checks the showcase itself.
  */
 
 const weiLingDecision = `${WEI_LING.fullName} (${WEI_LING.organizationName})`;
@@ -28,6 +33,42 @@ const documentItem = (page: Page, label: string) =>
 const actionsOn = (page: Page, reference: string) =>
   actionItems(page).filter({ hasText: reference });
 
+/** The guide, open after a sign-in: it addresses this account; once closed, the page is usable. */
+async function closeGuide(page: Page, addressed: string): Promise<void> {
+  const guide = page.getByRole('dialog', { name: 'Demo guide' });
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText(addressed);
+  await guide.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(guide).toHaveCount(0);
+}
+
+/** How the guide addresses each account. */
+const ADDRESSED = new Map<Party, string>([
+  [ANA, 'You are Ana, the seller'],
+  [WEI_LING, 'You are Wei Ling, the buyer'],
+  [RAFAEL, 'You are Rafael, a viewer at the seller'],
+  [LUCIA, 'You are Lucía'],
+]);
+const addressed = (party: Party) => ADDRESSED.get(party) ?? party.fullName;
+
+/** Nothing is wider than the viewport: the page cannot be scrolled sideways. */
+async function expectNoHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow, 'horizontal overflow in CSS pixels').toBeLessThanOrEqual(0);
+}
+
+/** `locator` lies within the viewport's width and does not scroll sideways itself. */
+async function expectFitsWidth(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  const width = page.viewportSize()?.width ?? 0;
+  expect(box).not.toBeNull();
+  expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.x ?? 0) + (box?.width ?? Infinity)).toBeLessThanOrEqual(width);
+  expect(await locator.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+}
+
 /**
  * Signs `party` in on the Action Center and answers the queue's first page as the browser
  * received it from the API, checked against the shared contract.
@@ -39,7 +80,7 @@ async function signInOnActionCenter(tab: Tab, party: Party): Promise<ActionItemP
       response.request().method() === 'GET' &&
       response.status() === 200,
   );
-  await actionCenterTab(tab, party);
+  await actionCenterTab(tab, party, (page) => closeGuide(page, addressed(party)));
   return ActionItemPageSchema.parse(await (await answered).json());
 }
 
@@ -120,6 +161,130 @@ async function expectBillOfLadingDownloads(page: Page) {
   );
 }
 
+test('portfolio onboarding: a visitor picks an account, signs in, and follows the guide to the showcase', async ({
+  newContext,
+  newTab,
+  showcase,
+}) => {
+  const { reference, voyageId } = showcase;
+  const visitor = await newTab(await newContext());
+  const { page } = visitor;
+  const accounts = page.getByRole('list', { name: 'Demo accounts' });
+  const form = page.getByRole('form', { name: 'Sign in' });
+  const guide = page.getByRole('dialog', { name: 'Demo guide' });
+  const reopen = page.getByRole('button', { name: 'Demo guide' });
+  let signedIn = 0;
+
+  await test.step('The sign-in page explains TradeFlow and offers the four fictional accounts', async () => {
+    // A protected page first: signing in must come back to it.
+    await page.goto('/actions');
+    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page.getByText(/one shared record of its execution/)).toBeVisible();
+    await expect(page.getByText(/stay confidential to its seller and buyer/)).toBeVisible();
+    await expect(page.getByText(/Fictional people and companies/)).toContainText(DEMO_PASSWORD);
+    await expect(accounts.getByRole('button')).toHaveText([
+      /^Seller · Cerrado Grãos.*Ana Souza/,
+      /^Buyer · Meridian Agri Trading.*Tan Wei Ling/,
+      /^Viewer · Cerrado Grãos.*Rafael Lima/,
+      /^Outsider · Pampa Litoral.*Lucía Ferreyra/,
+    ]);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  await test.step('Choosing an account with the keyboard fills the form and sends nothing', async () => {
+    const before = visitor.network.mark();
+    // Nothing has focus on arrival: the first Tab reaches the first account.
+    await page.keyboard.press('Tab');
+    await expect(accounts.getByRole('button', { name: /Ana Souza/ })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(form.getByLabel('Email')).toHaveValue(ANA.email);
+    await expect(form.getByLabel('Password')).toHaveValue(DEMO_PASSWORD);
+    await expect(accounts.getByRole('button', { name: /Ana Souza/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(form.getByRole('button', { name: 'Sign in' })).toBeFocused();
+    await expect(page).toHaveURL(/\/sign-in$/);
+    expect(
+      visitor.network
+        .entries('request', { after: before })
+        .filter((request) => request.path.startsWith('/api/auth/'))
+        .map((request) => `${request.method} ${request.path}`),
+    ).toEqual([]);
+  });
+
+  await test.step('Submitting signs in normally, returns to the Action Center and opens the guide', async () => {
+    const answered = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === '/api/auth/sign-in' &&
+        response.request().method() === 'POST',
+    );
+    await page.keyboard.press('Enter');
+    expect((await answered).status()).toBe(200);
+    signedIn = visitor.network.mark();
+    await expect(page).toHaveURL(/\/actions$/);
+    await expect(guide).toBeVisible();
+    await expect(guide).toContainText(addressed(ANA));
+    await expect(guide).toContainText('replace the rejected weight certificate');
+    await expect(guide).toContainText('two browser profiles, or a normal and a private window');
+    await expect(guide).toContainText('disappears when the demo stops');
+    await expect(
+      guide.getByRole('link', { name: `Open showcase voyage ${reference}` }),
+    ).toHaveAttribute('href', `/voyages/${voyageId}`);
+    await expectNoHorizontalOverflow(page);
+    await expectFitsWidth(page, guide);
+  });
+
+  await test.step('The guide leads to the showcase voyage and to the Action Center, and reopens', async () => {
+    await guide.getByRole('link', { name: `Open showcase voyage ${reference}` }).click();
+    await expect(guide).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`/voyages/${voyageId}$`));
+    await expect(page.getByRole('heading', { level: 1, name: reference })).toBeVisible();
+
+    await reopen.click();
+    await expect(guide).toBeVisible();
+    await guide.getByRole('link', { name: 'Open Action Center' }).click();
+    await expect(guide).toHaveCount(0);
+    await expect(page).toHaveURL(/\/actions$/);
+    await expect(page.getByRole('heading', { name: 'Action Center' })).toBeVisible();
+
+    // By keyboard: it opens from the demo bar, Escape closes it, focus returns to the bar.
+    await reopen.focus();
+    await page.keyboard.press('Enter');
+    await expect(guide).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(guide).toHaveCount(0);
+    await expect(reopen).toBeFocused();
+
+    // Following the guide only reads: no command, decision or upload was sent.
+    expect(commandsSent(visitor.network, signedIn)).toEqual([]);
+  });
+
+  await test.step('At 390 px wide nothing overflows, signed in or not, and the guide fits', async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expectNoHorizontalOverflow(page);
+    await expect(reopen).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    await reopen.click();
+    await expect(guide).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await expectFitsWidth(page, guide);
+    await expect(guide.getByRole('link', { name: 'Open Action Center' })).toBeVisible();
+    await guide.getByRole('button', { name: 'Close the demo guide' }).click();
+    await expect(guide).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(form).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    for (const account of await accounts.getByRole('button').all()) {
+      await account.scrollIntoViewIfNeeded();
+      await expectFitsWidth(page, account);
+    }
+    await expectFitsWidth(page, form.getByRole('button', { name: 'Sign in' }));
+    expect(commandsSent(visitor.network, signedIn)).toEqual(['POST /api/auth/sign-out']);
+  });
+});
+
 test('the portfolio showcase: four document states, both queues, history and downloads, a viewer and an outsider', async ({
   newContext,
   newTab,
@@ -194,6 +359,12 @@ test('the portfolio showcase: four document states, both queues, history and dow
     const viewer = await newTab(await newContext());
     await viewer.page.goto(`/voyages/${voyageId}`);
     await signIn(viewer.page, RAFAEL);
+    const viewerGuide = viewer.page.getByRole('dialog', { name: 'Demo guide' });
+    await expect(viewerGuide).toContainText('cannot upload, review or acknowledge anything');
+    await expect(
+      viewerGuide.getByRole('link', { name: `Open showcase voyage ${reference}` }),
+    ).toHaveAttribute('href', `/voyages/${voyageId}`);
+    await closeGuide(viewer.page, addressed(RAFAEL));
     await expect(viewer.page.getByRole('heading', { level: 1, name: reference })).toBeVisible();
     await expect(viewer.page.getByText(RAFAEL.fullName, { exact: true })).toBeVisible();
     const reading = viewer.network.mark();
@@ -224,6 +395,10 @@ test('the portfolio showcase: four document states, both queues, history and dow
     const outsider = await newTab(await newContext());
     await outsider.page.goto(`/voyages/${voyageId}`);
     await signIn(outsider.page, LUCIA);
+    const outsiderGuide = outsider.page.getByRole('dialog', { name: 'Demo guide' });
+    await expect(outsiderGuide).toContainText('takes no part in the showcase voyage');
+    await expect(outsiderGuide).toContainText('that is intended');
+    await closeGuide(outsider.page, addressed(LUCIA));
     await expect(outsider.page.getByText('Voyage not found')).toBeVisible();
     await expect(outsider.page.getByText(reference)).toHaveCount(0);
     await outsider.page

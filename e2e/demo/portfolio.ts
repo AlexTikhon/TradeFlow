@@ -471,10 +471,33 @@ export async function preparePortfolioShowcase(context: PreparedApp): Promise<Sh
   }
 }
 
-/** The portfolio profile: the showcase as the demo's last startup step (demo-run.ts). */
+/**
+ * The web app's portfolio onboarding (apps/web/src/features/portfolio-demo): switched on only by
+ * this build mode, and pointed at the showcase by this file in the run's own web build. The web
+ * app reads the file with a schema of its own, kept in step with this one by the verification,
+ * which follows the guide's link to this voyage.
+ */
+export const PORTFOLIO_WEB_MODE = 'portfolio-demo';
+export const SHOWCASE_METADATA_FILE = 'portfolio-demo.json';
+
+/** What the web app may know of the showcase: where it is, nothing that grants anything. */
+export const showcaseMetadata = (showcase: Showcase) => ({
+  schemaVersion: 1,
+  showcase: { voyageId: showcase.voyageId, reference: showcase.reference },
+});
+
+/**
+ * The portfolio profile: the web app built with its onboarding, and the showcase as the demo's
+ * last startup step (demo-run.ts), published to the web app as metadata.
+ */
 export const PORTFOLIO_PROFILE: Preparation<Showcase> = {
   step: 'Preparing the portfolio showcase voyage through the API, as Ana Souza and Tan Wei Ling',
+  webMode: PORTFOLIO_WEB_MODE,
   run: preparePortfolioShowcase,
+  webMetadata: (showcase) => ({
+    fileName: SHOWCASE_METADATA_FILE,
+    content: showcaseMetadata(showcase),
+  }),
 };
 
 /** The four states the showcase promises, checked on the API's own answer. */

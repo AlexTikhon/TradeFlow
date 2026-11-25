@@ -31,12 +31,18 @@ export async function openActionCenter(page: Page): Promise<void> {
 
 /**
  * Signs `party` in on the Action Center, with the page's own clock installed before it loads
- * (see `expectQueuePolled`), and waits for the first page of the queue to be shown.
+ * (see `expectQueuePolled`), and waits for the first page of the queue to be shown. `afterSignIn`
+ * runs as soon as the sign-in is sent (the portfolio demo closes its guide there).
  */
-export async function actionCenterTab(tab: Tab, party: Party): Promise<void> {
+export async function actionCenterTab(
+  tab: Tab,
+  party: Party,
+  afterSignIn?: (page: Page) => Promise<void>,
+): Promise<void> {
   await tab.page.clock.install();
   await tab.page.goto('/actions');
   await signIn(tab.page, party);
+  await afterSignIn?.(tab.page);
   await expect(tab.page.getByRole('heading', { name: 'Action Center' })).toBeVisible();
   await expect(tab.page.getByText(party.fullName, { exact: true })).toBeVisible();
   await expect(

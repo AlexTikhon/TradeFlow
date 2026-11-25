@@ -13,9 +13,12 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type SignInRequest, SignInRequestSchema } from '@tradeflow/contracts';
-import { type SubmitEvent, useState } from 'react';
+import { type SubmitEvent, useRef, useState } from 'react';
 import { type Location, Navigate, useLocation } from 'react-router';
 import { ApiError, isUnauthenticated } from '../../../shared/api/http-client';
+import { DemoAccountPicker } from '../../portfolio-demo/components/DemoAccountPicker';
+import { DEMO_PASSWORD } from '../../portfolio-demo/demo-accounts';
+import { GUIDE_AFTER_SIGN_IN, isPortfolioDemo } from '../../portfolio-demo/portfolio-demo';
 import { useSignOut, useSignOutState } from '../hooks/use-sign-out';
 import { sessionQuery, startSession } from '../session';
 import { announceSessionChange } from '../session-sync';
@@ -58,6 +61,10 @@ export function SignInPage() {
   const queryClient = useQueryClient();
   const { data: identity } = useQuery(sessionQuery);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const submitRef = useRef<HTMLButtonElement>(null);
+  const onboarding = isPortfolioDemo();
   const signOut = useSignOutState();
   const retrySignOut = useSignOut();
 
@@ -73,7 +80,16 @@ export function SignInPage() {
   const signingOut = signOut.status === 'pending';
 
   if (identity) {
-    return <Navigate to={redirectTarget(location.state)} replace />;
+    // The portfolio demo's guide opens once after a sign-in sent from this page, not when
+    // someone else (another tab) signed in.
+    const guide = onboarding && (mutation.isPending || mutation.isSuccess);
+    return (
+      <Navigate
+        to={redirectTarget(location.state)}
+        replace
+        state={guide ? { [GUIDE_AFTER_SIGN_IN]: true } : undefined}
+      />
+    );
   }
 
   const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
@@ -106,13 +122,27 @@ export function SignInPage() {
         px: 2,
       }}
     >
-      <Card sx={{ width: '100%', maxWidth: 400 }}>
+      <Card sx={{ width: '100%', maxWidth: onboarding ? 560 : 400, my: onboarding ? 2 : 0 }}>
         <CardContent sx={{ p: 4 }}>
           <Stack spacing={3} component="form" noValidate onSubmit={onSubmit} aria-label="Sign in">
             <Stack spacing={1} sx={{ alignItems: 'center', color: 'primary.main' }}>
               <DirectionsBoatOutlinedIcon aria-hidden fontSize="large" />
               <Typography variant="h1">Sign in to TradeFlow</Typography>
             </Stack>
+
+            {onboarding && (
+              <DemoAccountPicker
+                email={email}
+                password={password}
+                onChoose={(account) => {
+                  // Fills the form only: signing in stays the visitor's own explicit step.
+                  setEmail(account.email);
+                  setPassword(DEMO_PASSWORD);
+                  setFieldErrors({});
+                  submitRef.current?.focus();
+                }}
+              />
+            )}
 
             {signingOut && (
               <Alert
@@ -149,7 +179,11 @@ export function SignInPage() {
               type="email"
               autoComplete="username"
               required
-              autoFocus
+              autoFocus={!onboarding}
+              value={email}
+              onChange={(event) => {
+                setEmail(event.target.value);
+              }}
               error={Boolean(fieldErrors.email)}
               helperText={fieldErrors.email}
             />
@@ -159,10 +193,15 @@ export function SignInPage() {
               type="password"
               autoComplete="current-password"
               required
+              value={password}
+              onChange={(event) => {
+                setPassword(event.target.value);
+              }}
               error={Boolean(fieldErrors.password)}
               helperText={fieldErrors.password}
             />
             <Button
+              ref={submitRef}
               type="submit"
               variant="contained"
               size="large"

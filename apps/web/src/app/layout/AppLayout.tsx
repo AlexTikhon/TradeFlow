@@ -2,6 +2,8 @@ import DirectionsBoatOutlinedIcon from '@mui/icons-material/DirectionsBoatOutlin
 import { AppBar, Box, Button, Container, Toolbar, Typography } from '@mui/material';
 import { NavLink, Outlet } from 'react-router';
 import { UserMenu } from '../../features/auth/components/UserMenu';
+import { DemoGuide } from '../../features/portfolio-demo/components/DemoGuide';
+import { isPortfolioDemo } from '../../features/portfolio-demo/portfolio-demo';
 
 const NAV_ITEMS = [
   { to: '/voyages', label: 'Voyages' },
@@ -40,6 +42,7 @@ export function AppLayout() {
             <UserMenu />
           </Box>
         </Toolbar>
+        {isPortfolioDemo() && <DemoGuide />}
       </AppBar>
       <Container component="main" maxWidth="xl" sx={{ py: 4 }}>
         <Outlet />

@@ -34,6 +34,10 @@ import { freePort, OwnedProcess, runScript, waitUntilServing } from '../support/
  * - the API (`node main.js` from that build) and the web app (`vite preview` of that build, with
  *   the same-origin `/api` proxy), both on loopback ports of their own.
  *
+ * A profile may also build the web app in a mode of its own, and add one small JSON file to that
+ * build once its data exists (the portfolio onboarding's showcase metadata). The plain run passes
+ * no mode and writes no file.
+ *
  * The caller's DATABASE_URL, apps/api/.env and the development or test databases are never used:
  * the app's variables are removed from the inherited environment and set explicitly, and the API
  * runs from the temporary build directory, which holds no .env. Each resource is recorded as owned
@@ -369,12 +373,34 @@ export interface Preparation<Prepared> {
   /** Told to `onStep` as the step begins. */
   step: string;
   /**
+   * The Vite mode the web app is built in for this profile (`vite build --mode …`): the one
+   * explicit switch for a profile's web behaviour, such as the portfolio onboarding. Nothing is
+   * read from the environment for it, so a plain run, which passes no mode, cannot inherit it.
+   */
+  webMode?: string;
+  /**
    * Runs once the app answers through the web server, before the run is handed over: an opt-in
    * profile's data, written through the API (the portfolio showcase). It is part of startup: if
    * it fails or is interrupted, everything created so far is removed, as after any other step.
    */
   run: (app: PreparedApp) => Promise<Prepared>;
+  /**
+   * A small, non-secret JSON file for the web app, written into this run's web build once `run`
+   * has answered, and checked to be served before the run is handed over: what only exists after
+   * the build, such as the showcase voyage's id. Part of startup, like `run`.
+   */
+  webMetadata?: (prepared: Prepared) => WebMetadata;
 }
+
+export interface WebMetadata {
+  /** A plain file name at the web build's root, such as `portfolio-demo.json`. */
+  fileName: string;
+  content: unknown;
+}
+
+const WEB_MODE = /^[a-z][a-z0-9-]{0,39}$/;
+const WEB_METADATA_FILE = /^[a-z][a-z0-9-]{0,39}\.json$/;
+const MAX_WEB_METADATA_BYTES = 1_024;
 
 export interface StartOptions<Prepared = undefined> {
   /** Aborts startup (a Ctrl+C): whatever was created so far is removed. */
@@ -516,11 +542,19 @@ export async function startDemo<Prepared = undefined>({
       },
     );
 
-    onStep('Building the web app');
+    const webMode = prepare?.webMode;
+    if (webMode !== undefined && !WEB_MODE.test(webMode)) {
+      throw new Error(`Unexpected web build mode ${JSON.stringify(webMode)}`);
+    }
+    onStep(
+      webMode === undefined ? 'Building the web app' : `Building the web app (${webMode} mode)`,
+    );
     const webBuild = join(runRoot, 'web');
     const vite = join(webDir, 'node_modules', 'vite', 'bin', 'vite.js');
     stepLog = join(logsDir, 'web-build.log');
-    await runScript('web build', vite, ['build', '--outDir', webBuild, '--emptyOutDir'], {
+    const webBuildArgs = ['build', '--outDir', webBuild, '--emptyOutDir'];
+    if (webMode !== undefined) webBuildArgs.push('--mode', webMode);
+    await runScript('web build', vite, webBuildArgs, {
       cwd: webDir,
       env: inherited,
       logFile: stepLog,
@@ -637,11 +671,16 @@ export async function startDemo<Prepared = undefined>({
       onStep(prepare.step);
       // The API's log, shown if the step fails: its answers say what failed, its log may say why.
       stepLog = join(logsDir, 'api.log');
-      prepared = await prepare.run({
+      const result = await prepare.run({
         apiUrl: `http://127.0.0.1:${apiPort}`,
         ...(signal !== undefined && { signal }),
       });
       signal?.throwIfAborted();
+      if (prepare.webMetadata !== undefined) {
+        stepLog = undefined;
+        await publishWebMetadata(webUrl, webBuild, prepare.webMetadata(result), signal);
+      }
+      prepared = result;
     }
 
     let stopped: Promise<void> | undefined;
@@ -676,6 +715,42 @@ export async function startDemo<Prepared = undefined>({
       failure.message += `\n${messageOf(cleanupError)}`;
     }
     throw failure;
+  }
+}
+
+/**
+ * Writes a profile's metadata file into the run's web build (inside the run's directory, so it is
+ * removed with it), then checks that the web server answers it byte for byte as JSON.
+ */
+async function publishWebMetadata(
+  webUrl: string,
+  webBuild: string,
+  { fileName, content }: WebMetadata,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!WEB_METADATA_FILE.test(fileName)) {
+    throw new Error(`Unexpected web metadata file name ${JSON.stringify(fileName)}`);
+  }
+  const text = `${JSON.stringify(content)}\n`;
+  if (Buffer.byteLength(text) > MAX_WEB_METADATA_BYTES) {
+    throw new Error(`The web metadata ${fileName} is larger than ${MAX_WEB_METADATA_BYTES} bytes`);
+  }
+  const file = join(webBuild, fileName);
+  assertInside(webBuild, file);
+  // 'wx': the build is this run's own and fresh, so the file cannot exist yet.
+  await writeFile(file, text, { flag: 'wx' });
+
+  const timeout = AbortSignal.timeout(30_000);
+  const response = await fetch(`${webUrl}/${fileName}`, {
+    headers: { accept: 'application/json' },
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  const served = await response.text();
+  const type = response.headers.get('content-type') ?? '';
+  if (!response.ok || !/^application\/json\b/i.test(type) || served !== text) {
+    throw new Error(
+      `The web server does not serve ${fileName} as written (status ${response.status}, ${type || 'no content type'})`,
+    );
   }
 }
 

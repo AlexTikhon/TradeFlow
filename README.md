@@ -232,7 +232,7 @@ API docs are at <http://localhost:3000/api/docs>.
 | `pnpm test:e2e`              | Browser smoke tests in Chromium (CI's e2e job, not `check`) |
 | `pnpm demo`                  | A fresh, isolated demo until Ctrl+C; nothing is kept        |
 | `pnpm demo:verify`           | Walkthrough 2 in Chromium on a fresh demo (CI's demo job)   |
-| `pnpm demo:portfolio`        | The demo plus a showcase voyage with documents under way    |
+| `pnpm demo:portfolio`        | The demo plus a guided sign-in and a showcase voyage        |
 | `pnpm demo:portfolio:verify` | The showcase checked in Chromium (CI's demo job, too)       |
 | `pnpm db:reset`              | Drop, re-migrate and re-seed the development database       |
 
