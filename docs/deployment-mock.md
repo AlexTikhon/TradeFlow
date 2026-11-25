@@ -63,12 +63,33 @@ topology behind another ingress without reviewing how that ingress supplies addr
 - session, database and document survival after an API restart;
 - DB readiness becoming 503 while process liveness remains 200, then recovery without an API restart;
 - changing spoofed forwarding headers cannot move sign-in attempts to a fresh budget;
-- sign-out revokes the prior session; no API/DB/S3 ports are published and API/edge are non-root.
+- sign-out revokes the prior session; no API/DB/S3 ports are published and API/edge are non-root;
+- the API, as uid 1000 with only its mounted mock CA, completes a verified HTTPS request to the
+  private S3 endpoint, which refuses it anonymously (403).
 
 Separate API integration tests check trusted versus untrusted peers and the nearest-untrusted
 address rule. The existing E2E suite remains the business-flow regression coverage. The mock's
 own production sign-in budget is unchanged. Browser traces, videos and storage-state exports
 are disabled; failure screenshots/results remain ignored under `e2e/.output/deploy/`.
+
+### Failure diagnostics
+
+When startup, the post-startup setup or the scenario fails (a timeout or a crashed worker
+included), `e2e/deploy/diagnostics.ts` writes evidence to `e2e/.output/deploy/diagnostics/`
+**before** the owned containers are removed, and prints the API log tail:
+
+- `summary.txt`: the reason, the Compose project and each service's state;
+- `api.log`, `edge.log`, `s3.log`: the last 300 lines per service, at most 64 KiB each;
+- `upload-response.json`: status, media type, size and Problem Details fields of an
+  unexpected upload response.
+
+Before writing, the run's generated database password and S3 keys are replaced, and so are
+cookies, `Authorization`/signature/credential values, database URL passwords, private keys,
+header maps in structured log lines, and terminal colors. Nothing is read from the mock's temporary
+directory (recovery environment, S3 identity, certificates), and no PDF bodies, dumps, browser
+state, HARs or traces are written. A collection problem is logged in one line and never
+blocks cleanup or replaces the original error. Each run clears the directory first. The CI
+`deploy` job uploads `e2e/.output/deploy/` as `deploy-diagnostics` (7 days) when the step fails.
 
 ### Local verification, 2026-10-31
 
@@ -103,6 +124,67 @@ Docker 29.9.3, in a fresh worktree after `pnpm install --frozen-lockfile` with
 reproduced before the fix; with it, the scenario passed (one Chromium test, seven steps, no
 retries), and containers, volumes, networks, image tags and temporary directories matched their
 pre-run state. Hosted `deploy` success is still unverified until CI runs on the fix.
+
+### Hosted upload 500: unreadable mock CA on Linux hosts, 2026-11-25
+
+[Hosted run 45627100683](https://github.com/AlexTikhon/TradeFlow/actions/runs/45627100683) at
+`fc62608` (ubuntu-latest): `verify`, `e2e`, `demo` and `storage` passed. `deploy` built
+contracts, started the mock and passed the first three steps. The multipart-sized upload then
+answered 500 instead of 201 (`https.spec.ts:244`) after 83 ms. The job log held no server-side
+cause, because the API log was removed with its container.
+
+**Reproduction.** The Playwright host side ran on Linux: a container from
+`mcr.microsoft.com/playwright:v1.63.0-noble` (Node 24.20.0, Chromium 1243, Docker CLI 29) ran as
+uid 1001 with umask 0022, like the hosted runner. It used a Linux `git clone` of `84239e0`
+on an ext4 Docker volume mounted at its own daemon path, so Compose bind mounts resolve with
+Linux ownership and modes, plus the Docker socket and host networking. With the new
+diagnostics, the 500 reproduced, and the API log showed where it failed:
+
+```text
+Warning: Ignoring extra certs from `/etc/tradeflow/mock-ca.crt`, load failed: error:8000000D:system library::Permission denied
+…
+ERROR [ProblemDetailsFilter] POST …/documents/BILL_OF_LADING/versions failed
+Error: unable to get local issuer certificate
+    at TLSSocket.onConnectSecure (node:internal/tls/wrap:1788:34)
+```
+
+The failure is in **S3 transport (TLS trust)**. The request was received, authorized and its
+write precondition checked. The first S3 call made while staging the streamed bytes then failed
+its handshake, before the PDF checks completed and before any SQL write. The
+upload's compensation also failed for the same reason ("Could not remove failed upload…").
+Credentials, readiness, certificate hostnames and the SDK were not involved.
+
+**Cause.** A standalone probe isolated the mechanism. Caddy writes its local root
+`root.crt` as `0600`, owned by uid 1000. `mock-run.ts` copies it out with `docker cp`, which keeps
+the mode and, on a Linux host, makes the copy owned by the invoking user (uid 1001 on the
+runner). Bind-mounted read-only into the API, uid 1000 then gets `Permission denied`. Node
+skips `NODE_EXTRA_CA_CERTS` with only a warning, so the API starts and stays healthy. The
+first request to use the private HTTPS endpoint fails, and that is the upload. Docker
+Desktop on Windows presents the same bind-mounted file as `0777 root`, which is why every
+Windows run passed.
+
+**Fix.** `mock-run.ts` makes the copied file `0644`. It is the public CA certificate; the key
+never leaves the edge's volume. Certificate and hostname verification, private S3
+authentication, the uid 1000 API, container isolation, upload limits and the PDF size are
+unchanged. **Regression:** the first scenario step now runs a verified HTTPS request from
+inside the API, as uid 1000 and with no explicit `ca`, to `https://objects:9443/tradeflow-mock`,
+and expects S3's anonymous 403.
+
+| Run (2026-11-25)                                                  | Result                                                                                                    |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Linux host, `84239e0` + diagnostics                               | Failed as hosted: upload 500; diagnostics captured the API log above                                      |
+| Linux host, + regression, before fix                              | Failed in step 1: `Expected "403"`, received `unable to get local issuer certificate`                     |
+| Linux host, + fix                                                 | Passed: 1 test, 7 steps, no retries                                                                       |
+| Linux host, final tree, no `contracts/dist`                       | Passed: 1 test, 7 steps, no retries; no owned resources or temporary directories left                     |
+| Windows host, final tree, no `contracts/dist` or `.output/deploy` | Passed: 1 test, 7 steps, no retries; Docker resources and temporary directories matched the pre-run state |
+| Linux host, injected API startup failure                          | Diagnostics kept (API config error, service states); none of the 3 generated credentials in any output    |
+| Linux host, injected startup failure + failing diagnostics        | One-line collection error; original startup error reported; all owned resources removed                   |
+
+Host: Windows Node 24.11.1, pnpm 11.9.0, Docker 29.9.3 (WSL2 backend), Compose 5.7.1. Static
+checks: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, actionlint 1.7.12 and
+`git diff --check` passed. No application, storage or database code changed, so `pnpm check`
+and `pnpm test:storage` were not rerun. The Linux runs approximate the hosted runner but are
+not hosted evidence: hosted `deploy` success is unverified until CI runs on this change.
 
 This does not prove AWS IAM/instance roles, EC2 metadata access, RDS permissions or server
 certificates, VPC/firewall behavior, public DNS/ACME, managed backups or hosted availability.

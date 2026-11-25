@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { chromium, expect, test } from '@playwright/test';
 import {
@@ -12,6 +13,7 @@ import {
 } from '@tradeflow/contracts';
 import { ANA, DEMO_PASSWORD } from '../demo/accounts.js';
 import { signIn } from '../support/app.js';
+import { DIAGNOSTICS_DIR, describeResponse, PASSED_MARKER } from './diagnostics.js';
 
 const exec = promisify(execFile);
 const metadataFile = process.env.DEPLOY_MOCK_METADATA;
@@ -111,6 +113,24 @@ test('production containers: HTTPS cookies, proxy trust, streamed updates and du
     }
     expect(await docker('exec', apiId, 'id', '-u')).toBe('1000');
     expect(await docker('exec', await container('edge'), 'id', '-u')).toBe('1000');
+    // The API trusts the private S3 endpoint only through the mounted mock CA (its
+    // NODE_EXTRA_CA_CERTS). Node skips an unreadable CA file with a mere startup warning, so probe
+    // the verified handshake itself from the API, as uid 1000, without any explicit `ca`. An
+    // anonymous request must reach S3 and be refused there: TLS trusted, bucket still private.
+    const objectStore = await docker(
+      'exec',
+      apiId,
+      'node',
+      '--input-type=module',
+      '-e',
+      `
+      import https from 'node:https';
+      const outcome=await new Promise((resolve)=>{
+        https.get('https://objects:9443/tradeflow-mock',res=>{res.resume();resolve(String(res.statusCode));})
+          .on('error',error=>resolve(error.message));
+      });console.log(outcome);`,
+    );
+    expect(objectStore, 'API HTTPS request to the private S3 endpoint').toBe('403');
   });
 
   // Trust only this run's verified leaf public key in Chromium; never disable verification globally
@@ -241,7 +261,12 @@ test('production containers: HTTPS cookies, proxy trust, streamed updates and du
         },
         body,
       );
-      expect(uploaded.status).toBe(201);
+      if (uploaded.status !== 201) {
+        // The server-side cause is in the API log tail collected at teardown (diagnostics.ts).
+        await mkdir(DIAGNOSTICS_DIR, { recursive: true });
+        await writeFile(join(DIAGNOSTICS_DIR, 'upload-response.json'), describeResponse(uploaded));
+      }
+      expect(uploaded.status, `Upload response: ${describeResponse(uploaded)}`).toBe(201);
       expect(
         ContractDocumentSchema.parse(JSON.parse(uploaded.body.toString())).currentVersion.sha256,
       ).toBe(hash(bytes));
@@ -325,6 +350,7 @@ test('production containers: HTTPS cookies, proxy trust, streamed updates and du
         401,
       );
     });
+    await writeFile(join(dirname(metadataFile), PASSED_MARKER), '');
   } finally {
     await seller.close();
     await buyer.close();

@@ -1,12 +1,13 @@
 import { spawn, execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { freePort } from '../support/processes.js';
+import { DIAGNOSTICS_DIR, LOG_SERVICES, LOG_TAIL_LINES, sanitize, tail } from './diagnostics.js';
 
 const exec = promisify(execFile);
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -15,6 +16,8 @@ const CA_PATH = '/data/caddy/pki/authorities/local/root.crt';
 /** Docker Compose resources are exclusively scoped by a random project name, never the dev stack. */
 export async function startMock(onStep: (message: string) => void, signal?: AbortSignal) {
   const project = `tradeflow-mock-${randomUUID().slice(0, 8)}`;
+  // Evidence of an earlier run must not be mistaken for this one's.
+  await rm(DIAGNOSTICS_DIR, { recursive: true, force: true });
   const root = await mkdtemp(join(tmpdir(), `${project}-`));
   const variables = {
     MOCK_API_IMAGE: `tradeflow-api:${project}`,
@@ -87,6 +90,53 @@ export async function startMock(onStep: (message: string) => void, signal?: Abor
         else reject(new Error(`Docker ${target} build failed:\n${output}`));
       });
     });
+  const secrets = () => [env.MOCK_DATABASE_PASSWORD, env.MOCK_ACCESS_KEY, env.MOCK_SECRET_KEY];
+  /**
+   * Bounded, sanitized log tails of the owned containers, written before they are removed.
+   * Never throws: a collection problem must neither block cleanup nor replace the real failure.
+   */
+  const collectDiagnostics = async (reason: string) => {
+    try {
+      await mkdir(DIAGNOSTICS_DIR, { recursive: true });
+      const failed = (error: unknown) =>
+        `(unavailable: ${error instanceof Error ? error.message : 'unknown error'})`;
+      const status = await compose(
+        'ps',
+        '--all',
+        '--format',
+        '{{.Service}}\t{{.State}}\t{{.Status}}',
+      ).catch(failed);
+      await writeFile(
+        join(DIAGNOSTICS_DIR, 'summary.txt'),
+        tail(
+          sanitize(
+            `Reason: ${reason}\nProject: ${project}\nCollected: ${new Date().toISOString()}\n` +
+              `Log tails: last ${String(LOG_TAIL_LINES)} lines per service.\n\nContainers:\n${status}\n`,
+            secrets(),
+          ),
+        ),
+      );
+      for (const service of LOG_SERVICES) {
+        const logs = await compose(
+          'logs',
+          '--no-color',
+          '--timestamps',
+          '--tail',
+          String(LOG_TAIL_LINES),
+          service,
+        ).catch(failed);
+        const text = tail(sanitize(logs, secrets()));
+        await writeFile(join(DIAGNOSTICS_DIR, `${service}.log`), `${text}\n`);
+        if (service === 'api') console.error(`[deploy] API log tail:\n${tail(text, 6_000)}`);
+      }
+      console.error(`[deploy] Sanitized diagnostics: ${DIAGNOSTICS_DIR}`);
+    } catch (error) {
+      console.error(
+        '[deploy] Diagnostics collection failed:',
+        sanitize(error instanceof Error ? error.message : 'unknown error', secrets()),
+      );
+    }
+  };
   let stopped = false;
   const stop = async () => {
     if (stopped) return;
@@ -138,6 +188,10 @@ export async function startMock(onStep: (message: string) => void, signal?: Abor
     env.MOCK_TRUSTED_PROXY = `${address}/32`;
     await saveEnvironment();
     await docker(['cp', `${edgeId}:${CA_PATH}`, join(root, 'root.crt')]);
+    // `docker cp` keeps Caddy's 0600 mode and, on a Linux host, gives the copy to the invoking
+    // user, so the API's uid 1000 could not read its bind mount and Node would skip
+    // NODE_EXTRA_CA_CERTS (S3 TLS then fails). It is the public CA certificate; its key stays put.
+    await chmod(join(root, 'root.crt'), 0o644);
     const ca = await readFile(join(root, 'root.crt'));
     const baseURL = `https://localhost:${env.MOCK_HTTPS_PORT}`;
     // Create the mock bucket using the actual signed SDK inside its own network, then migrate.
@@ -206,11 +260,12 @@ export async function startMock(onStep: (message: string) => void, signal?: Abor
       compose,
       container,
       docker,
+      collectDiagnostics,
       stop,
     };
   } catch (error) {
-    console.error(
-      await compose('logs', '--tail', '30', 'api', 'edge', 's3').catch(() => 'No mock logs'),
+    await collectDiagnostics(
+      `Startup failed: ${error instanceof Error ? error.message.slice(0, 2_000) : 'unknown error'}`,
     );
     await stop().catch((cleanupError: unknown) => {
       console.error(
