@@ -16,6 +16,11 @@ pnpm deploy:verify   # builds, starts, exercises and removes an isolated mock
 pnpm deploy:mock     # interactive; Ctrl+C or q + Enter removes this run
 ```
 
+`pnpm deploy:verify` first builds `@tradeflow/contracts` on the host, because the Playwright
+scenario imports its response schemas from `packages/contracts/dist`, which a fresh checkout
+lacks. The images build their own copy inside Docker (`.dockerignore` excludes host `dist`).
+`pnpm deploy:mock` imports nothing from contracts on the host and needs no such step.
+
 The first build downloads pinned images/dependencies. Subsequent builds reuse BuildKit layers
 and the pnpm store cache. The banner prints random loopback HTTP/HTTPS ports and the owned
 Compose project. Fictional users/passwords are the [demo accounts](demo.md); credentials and
@@ -84,6 +89,20 @@ The public-key pin was generated only after real CA/hostname validation of the l
 Earlier failed attempts exposed Caddy's upstream file capability and pnpm's runtime auto-install;
 the delivered images remove that unused capability and invoke installed operator CLIs directly.
 These local results are not hosted CI or AWS-provider evidence.
+
+### Hosted CI and cold-start fix, 2026-11-25
+
+[Hosted run 41198286937](https://github.com/AlexTikhon/TradeFlow/actions/runs/41198286937) at
+`baf9a67`: `verify`, `e2e`, `demo` and `storage` passed; `deploy` failed before any HTTPS step
+with `Cannot find module …/@tradeflow/contracts/dist/index.js` imported from
+`e2e/deploy/https.spec.ts`. The earlier local pass most likely ran with a `contracts/dist` left by a prior build.
+
+`pnpm deploy:verify` now builds contracts first. Locally, Windows host Node 24.11.1/pnpm 11.9.0,
+Docker 29.9.3, in a fresh worktree after `pnpm install --frozen-lockfile` with
+`packages/contracts/dist` confirmed absent and no other build step: the original import error
+reproduced before the fix; with it, the scenario passed (one Chromium test, seven steps, no
+retries), and containers, volumes, networks, image tags and temporary directories matched their
+pre-run state. Hosted `deploy` success is still unverified until CI runs on the fix.
 
 This does not prove AWS IAM/instance roles, EC2 metadata access, RDS permissions or server
 certificates, VPC/firewall behavior, public DNS/ACME, managed backups or hosted availability.

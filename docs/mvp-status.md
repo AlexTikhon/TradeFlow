@@ -27,7 +27,11 @@ or cloud-provider restore evidence. The following 2026-10-28 verification record
 The next increment is the requested [local AWS deployment mock](deployment-mock.md): production
 containers, HTTPS cookies, explicit proxy trust, SSE and private S3 over TLS. Actual AWS account,
 domain, IAM/RDS setup and hosted verification remain deferred. CI has a new `deploy` job;
-it has no hosted result yet.
+its first hosted run ([41198286937](https://github.com/AlexTikhon/TradeFlow/actions/runs/41198286937),
+`baf9a67`) failed because `pnpm deploy:verify` did not build contracts on a fresh checkout, while
+`verify`, `e2e`, `demo` and `storage` passed. The command now builds them first and passed a local
+cold start on 2026-11-25 ([record](deployment-mock.md#hosted-ci-and-cold-start-fix-2026-11-25));
+a hosted `deploy` pass is still pending.
 
 The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and builds),
 `pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS

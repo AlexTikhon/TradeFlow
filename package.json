@@ -22,7 +22,7 @@
     "demo": "pnpm codegen && pnpm --filter @tradeflow/e2e demo",
     "demo:verify": "pnpm codegen && pnpm --filter @tradeflow/e2e demo:verify",
     "deploy:mock": "pnpm --filter @tradeflow/e2e deploy:mock",
-    "deploy:verify": "pnpm --filter @tradeflow/e2e deploy:verify",
+    "deploy:verify": "pnpm --filter @tradeflow/contracts build && pnpm --filter @tradeflow/e2e deploy:verify",
     "db:up": "docker compose up -d --wait postgres",
     "db:down": "docker compose down",
     "db:migrate": "pnpm --filter @tradeflow/api db:migrate",
