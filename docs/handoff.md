@@ -60,6 +60,8 @@ pnpm --filter @tradeflow/e2e exec playwright install chromium
 ```bash
 pnpm demo           # fresh PostgreSQL container, migrations, seed, built apps on 127.0.0.1
 pnpm demo:verify    # the same demo, driven through walkthrough 2 (F1 to F8) in Chromium
+pnpm demo:portfolio          # the demo plus the portfolio showcase voyage (docs/demo.md)
+pnpm demo:portfolio:verify   # the showcase checked in Chromium on its own fresh demo
 ```
 
 `pnpm demo` prints the address (a new port every run), the accounts (password `tradeflow-demo`)
@@ -113,12 +115,12 @@ before the first check. A local pass is not a CI pass: confirm the hosted run fo
 
 ## Temporary and persistent data
 
-| Where                           | Lives in                                                                       | Kept?                                                              |
-| ------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `pnpm demo`, `pnpm demo:verify` | `tradeflow-demo-<random>` container (tmpfs) and temp directory                 | No: removed on stop, pass or fail                                  |
-| `pnpm test:e2e`                 | `tradeflow_e2e` on `E2E_DATABASE_URL`; a temp directory for builds and uploads | Database dropped after the run; logs and reports in `e2e/.output/` |
-| API integration tests           | `tradeflow_test` on `TEST_DATABASE_URL`                                        | Truncated by every run                                             |
-| Development (`pnpm dev`)        | Volume `tradeflow_postgres-data`; uploads in `apps/api/var/documents`          | **Yes, and nothing backs it up**                                   |
+| Where                                                                                | Lives in                                                                       | Kept?                                                              |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `pnpm demo`, `pnpm demo:verify`, `pnpm demo:portfolio`, `pnpm demo:portfolio:verify` | `tradeflow-demo-<random>` container (tmpfs) and temp directory                 | No: removed on stop, pass or fail                                  |
+| `pnpm test:e2e`                                                                      | `tradeflow_e2e` on `E2E_DATABASE_URL`; a temp directory for builds and uploads | Database dropped after the run; logs and reports in `e2e/.output/` |
+| API integration tests                                                                | `tradeflow_test` on `TEST_DATABASE_URL`                                        | Truncated by every run                                             |
+| Development (`pnpm dev`)                                                             | Volume `tradeflow_postgres-data`; uploads in `apps/api/var/documents`          | **Yes, and nothing backs it up**                                   |
 
 `e2e/.output/` (ignored by Git) holds server logs, failure screenshots and reports; it may be
 deleted at any time.

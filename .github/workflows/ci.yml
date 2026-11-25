@@ -154,6 +154,11 @@ jobs:
   # database service: the demo starts its own PostgreSQL 18 container on the runner's Docker
   # daemon, on a loopback port Docker picks, and removes it, its temporary directory and its
   # servers at the end, pass or fail. No retries: demo/playwright.config.ts sets `retries: 0`.
+  # Then the portfolio showcase (docs/demo.md, "The portfolio showcase"), in a second fresh
+  # environment of its own started as `pnpm demo:portfolio` starts it, with the same rules.
+  # Budget: on hosted runners the whole job took about 1.5 minutes with the walkthrough alone
+  # (about 30 seconds of it in `pnpm demo:verify`); the second environment roughly doubles that
+  # step, which leaves 20 minutes a wide margin for a slow runner or image pull.
   demo:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -176,12 +181,16 @@ jobs:
       - id: demo
         run: pnpm demo:verify
 
-      # The walkthrough's failure screenshot, error context and results/.last-run.json, whenever
-      # the walkthrough itself failed. Traces, videos and storage state are off
-      # (demo/playwright.config.ts); the exclusions below keep it so if that ever changes. The
-      # server logs live in the run's temporary directory and are removed with it; a failing
-      # startup step or a server exiting on its own prints their last lines to the job log.
-      - if: failure() && steps.demo.outcome == 'failure'
+      - id: portfolio
+        run: pnpm demo:portfolio:verify
+
+      # The failure screenshot, error context and .last-run.json of whichever check failed (the
+      # walkthrough's in results/, the showcase's in portfolio-results/). Traces, videos and
+      # storage state are off (demo/playwright.config.ts, which the portfolio config extends);
+      # the exclusions below keep it so if that ever changes. The server logs live in the run's
+      # temporary directory and are removed with it; a failing startup step (the showcase's
+      # preparation included) or a server exiting on its own prints their last lines to the log.
+      - if: failure() && (steps.demo.outcome == 'failure' || steps.portfolio.outcome == 'failure')
         uses: actions/upload-artifact@v7
         with:
           name: demo-diagnostics

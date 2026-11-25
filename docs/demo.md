@@ -124,6 +124,90 @@ pnpm demo:verify
 It is a test, not a person: see [what it proves](#automated-runs-of-walkthrough-2), and what it
 does not.
 
+### The portfolio showcase: `pnpm demo:portfolio`
+
+The same demo with one opt-in extra: a voyage whose document workflow is already under way, to
+open and explain without clicking through setup first. `pnpm demo` and `pnpm demo:verify` are
+unchanged; the extra exists only when this profile is asked for.
+
+```bash
+pnpm demo:portfolio          # the demo, plus the showcase voyage; Ctrl+C or q to stop
+pnpm demo:portfolio:verify   # the showcase checked in Chromium, on a fresh environment of its own
+```
+
+**What it starts.** Exactly what `pnpm demo` starts (its own container, temporary directory,
+built apps, all migrations, the unchanged seed, production sign-in admission), then one more
+startup step: _Preparing the portfolio showcase voyage through the API_. When the step is done,
+the banner prints the showcase's reference (the next free one, `TF-2026-0008` on a fresh run),
+its address, the accounts and what each document shows. It prints no session token.
+
+**The scenario.** Ana Souza (Cerrado Grãos, seller) and Tan Wei Ling (Meridian, buyer) under
+the voyage's only contract, Cerrado → Meridian: Santos to Dalian, 45,000 MT of soybeans on
+MV Baltic Grace, laycan three to four weeks after the run. Wei Ling gave the documentary
+instructions (revision 1, consignee "To order of Banco Austral Demo S.A.") and Ana acknowledged
+them. Revision 1 requires four documents:
+
+| Document              | State                                                                                                      | Who is asked to act                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Commercial invoice    | Not uploaded yet                                                                                           | Nobody: the Action Center has no such action |
+| Certificate of origin | Version 1 uploaded, pending review                                                                         | Wei Ling: _Review document_                  |
+| Weight certificate    | Version 1 rejected: "Net weight of 44,850.000 MT does not match the contract quantity of 45,000.000 MT. …" | Ana: _Replace rejected document_             |
+| Bill of lading        | Version 1 rejected (wrong consignee), version 2 approved; both kept with their decisions                   | Nobody: approved                             |
+
+Two more accounts show access: **Rafael Lima** (`rafael.lima@cerrado-graos.example`, a viewer at
+Cerrado) reads every record and download but has no upload, review or acknowledgement control;
+**Lucía Ferreyra** (Pampa Litoral, no part in the voyage) gets "Voyage not found". The password
+is `tradeflow-demo`, as for every seeded user. The seed's own voyages and notices are there as
+in `pnpm demo`, so the queues also hold their items (Wei Ling's ETA notice on TF-2026-0002).
+
+**How it is made.** Through the API only, as those two users would through the web app
+(`e2e/demo/portfolio.ts`): Ana and Wei Ling sign in (two of the 20 sign-ins per minute the
+admission defaults allow), then Ana creates the voyage from the seeded vessel, commodity and
+ports, and sets up its trade string; Wei Ling gives the instructions (`If-None-Match: *`); Ana
+reads and acknowledges them (`If-Match` with the entity tag she read); Ana uploads the files;
+Wei Ling reads each document and rejects or approves it on the version she read; Ana reads the
+bill of lading again before uploading version 2. Every answer is checked against the shared
+contracts (`@tradeflow/contracts`), and every write's `ETag` against the version in its body;
+both sessions are signed out at the end. Nothing is inserted into the database, no trigger is
+disabled, and there is no fixture or reset endpoint. The API assigns every id, reference,
+version and timestamp, so a second run has the same states and files under other ids.
+
+**The files.** Four small, valid single-page PDFs built by `e2e/demo/portfolio-files.ts`, byte
+for byte the same on every run. Their text is synthetic and says so; it names no person. Their
+SHA-256 is pinned in that file (the module refuses to load if the generator ever produces other
+bytes) and checked twice: by the preparation, against the API's checksum of each upload, and by
+the verification, against each download:
+
+| File                           | SHA-256                                                            |
+| ------------------------------ | ------------------------------------------------------------------ |
+| `certificate-of-origin-v1.pdf` | `1ad30395319c8c13eca2f7ef837ab2bd66823bc868f29d0123415c02c853aef5` |
+| `weight-certificate-v1.pdf`    | `64535c8e2cd1827d2fd807d24fa7edade2d709b939c2add0686ac5cb538aea03` |
+| `bill-of-lading-v1.pdf`        | `038790ac868a3a7afbaa95f077f3abe77ae3a96436254021e459de6c94d4933e` |
+| `bill-of-lading-v2.pdf`        | `7490dd8cd5423e8ceb635a2c0ef829a9d2b4ed6c74adca03415af227ffd8e2aa` |
+
+**Isolation and cleanup.** As for `pnpm demo`: every run is a fresh environment of its own, and
+stopping removes the servers, the container and the temporary directory, the uploaded files
+included. The preparation is part of startup. If any of its requests fails or answers
+something unexpected, or Ctrl+C arrives while it runs, the demo stops and removes everything it
+created, prints the failing request (method, path, status and the API's problem title, never a
+header or cookie) and the last lines of the API's log, and exits with an error. Recovery by hand
+is the same as [above](#starting-the-demo-pnpm-demo).
+
+**The verification, `pnpm demo:portfolio:verify`.** Starts a fresh environment with the same
+code as `pnpm demo:portfolio` (the same global setup as `pnpm demo:verify`, with the portfolio
+profile) and checks in headless Chromium, with Ana and Wei Ling in browser contexts of their own:
+all four document states on both sides; the approved bill of lading with rejected version 1 and
+its reason under "Earlier versions"; the current and the earlier bill of lading downloaded, each
+matching its SHA-256 above; Wei Ling's queue holding exactly one showcase action (review the
+certificate of origin) and Ana's exactly one (replace the weight certificate, with the reason),
+read from the API's answer as the browser received it and checked against the shared contract,
+so the missing invoice and the approved bill of lading create none; Rafael reading every record
+and downloading both bill-of-lading versions with no write control and without sending a single
+command; Lucía unable to open the voyage or see it listed. Queue checks are scoped to the
+showcase voyage. No retries, no mocked answers; it stops and removes everything, pass or fail,
+and keeps a failure screenshot in `e2e/.output/demo/portfolio-results/`. CI runs it in the
+`demo` job, after `pnpm demo:verify`, in a second fresh environment.
+
 ## Cast
 
 Every seeded user's password is `tradeflow-demo`.

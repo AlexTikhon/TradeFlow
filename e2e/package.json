@@ -8,6 +8,8 @@
     "test:e2e": "playwright test",
     "demo": "node --import tsx demo/demo.ts",
     "demo:verify": "playwright test --config demo/playwright.config.ts",
+    "demo:portfolio": "node --import tsx demo/demo.ts --portfolio",
+    "demo:portfolio:verify": "playwright test --config demo/playwright.portfolio.config.ts",
     "deploy:mock": "node --import tsx deploy/mock.ts",
     "deploy:verify": "playwright test --config deploy/playwright.config.ts",
     "typecheck": "tsc --noEmit"

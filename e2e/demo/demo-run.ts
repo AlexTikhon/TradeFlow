@@ -23,7 +23,9 @@ import { freePort, OwnedProcess, runScript, waitUntilServing } from '../support/
 
 /*
  * One run of the local demo, used by `pnpm demo` (interactive) and `pnpm demo:verify` (the
- * automated walkthrough). Everything it uses is its own, created fresh and discarded at the end:
+ * automated walkthrough), and with the portfolio profile's extra startup step by
+ * `pnpm demo:portfolio` and `pnpm demo:portfolio:verify` (portfolio.ts). Everything it uses is
+ * its own, created fresh and discarded at the end:
  *
  * - a PostgreSQL 18 container with a unique name and this run's label, its data on a tmpfs inside
  *   the container (no volume), published on a loopback port Docker chooses;
@@ -336,9 +338,11 @@ export interface DemoResources {
   webPid: number | undefined;
 }
 
-export interface DemoRun {
+export interface DemoRun<Prepared = undefined> {
   /** The web app's origin: the only address a browser needs. */
   readonly webUrl: string;
+  /** What the profile's `prepare` step answered (undefined without one). */
+  readonly prepared: Prepared;
   readonly resources: DemoResources;
   /** Manual recovery steps for an uncatchable forced termination, printed at startup. */
   readonly recovery: string[];
@@ -353,17 +357,39 @@ export interface DemoRun {
   stop(): Promise<void>;
 }
 
-export interface StartOptions {
+/** Where a profile's `prepare` step reaches the running app. */
+export interface PreparedApp {
+  /** The API's own origin on loopback. */
+  apiUrl: string;
+  /** Aborts the step with the rest of startup. */
+  signal?: AbortSignal;
+}
+
+export interface Preparation<Prepared> {
+  /** Told to `onStep` as the step begins. */
+  step: string;
+  /**
+   * Runs once the app answers through the web server, before the run is handed over: an opt-in
+   * profile's data, written through the API (the portfolio showcase). It is part of startup: if
+   * it fails or is interrupted, everything created so far is removed, as after any other step.
+   */
+  run: (app: PreparedApp) => Promise<Prepared>;
+}
+
+export interface StartOptions<Prepared = undefined> {
   /** Aborts startup (a Ctrl+C): whatever was created so far is removed. */
   signal?: AbortSignal;
   /** Told each step as it begins. */
   onStep?: (step: string) => void;
+  /** An extra last step of startup, for a profile. Without it the demo is the plain seed. */
+  prepare?: Preparation<Prepared>;
 }
 
-export async function startDemo({
+export async function startDemo<Prepared = undefined>({
   signal,
   onStep = () => undefined,
-}: StartOptions = {}): Promise<DemoRun> {
+  prepare,
+}: StartOptions<Prepared> = {}): Promise<DemoRun<Prepared>> {
   const ownership = new Ownership();
   const runId = randomBytes(4).toString('hex');
   const container = `tradeflow-demo-${runId}`;
@@ -606,9 +632,23 @@ export async function startDemo({
     // The whole chain: browser origin → web server's /api proxy → API → database.
     await waitUntilServing(`${webUrl}/api/health`, web, 60_000, signal);
 
+    let prepared: Prepared | undefined;
+    if (prepare !== undefined) {
+      onStep(prepare.step);
+      // The API's log, shown if the step fails: its answers say what failed, its log may say why.
+      stepLog = join(logsDir, 'api.log');
+      prepared = await prepare.run({
+        apiUrl: `http://127.0.0.1:${apiPort}`,
+        ...(signal !== undefined && { signal }),
+      });
+      signal?.throwIfAborted();
+    }
+
     let stopped: Promise<void> | undefined;
     return {
       webUrl,
+      // Undefined exactly when no `prepare` was given, the case where Prepared is undefined.
+      prepared: prepared as Prepared,
       resources: { runRoot, container, databasePort, apiPort, apiPid: api.pid, webPid: web.pid },
       recovery: ownership.recoverySteps(),
       serverExit,

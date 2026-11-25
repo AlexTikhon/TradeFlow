@@ -32,6 +32,14 @@ export const EMRE: Party = {
   password: DEMO_PASSWORD,
 };
 
+/** Ana's colleague, a viewer: reads the portfolio showcase on the seller's side, changes nothing. */
+export const RAFAEL: Party = {
+  email: 'rafael.lima@cerrado-graos.example',
+  fullName: 'Rafael Lima',
+  organizationName: 'Cerrado Grãos Exportadora S.A.',
+  password: DEMO_PASSWORD,
+};
+
 /** Takes no part in the new voyage. */
 export const LUCIA: Party = {
   email: 'lucia.ferreyra@pampalitoral.example',
