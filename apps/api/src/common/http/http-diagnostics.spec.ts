@@ -193,6 +193,17 @@ describe('HttpDiagnostics middleware', () => {
     expect(listeners(response)).toBe(0);
   });
 
+  it('closes its sink at application shutdown, and copes with a sink that cannot close', () => {
+    const sink = { write: vi.fn(), close: vi.fn() };
+    new HttpDiagnostics({ httpRequestLog: true } as AppConfig, sink).onApplicationShutdown();
+    expect(sink.close).toHaveBeenCalledTimes(1);
+    expect(() => {
+      new HttpDiagnostics({ httpRequestLog: true } as AppConfig, {
+        write: () => undefined,
+      }).onApplicationShutdown();
+    }).not.toThrow();
+  });
+
   it('still sets the id and context, but writes nothing, when disabled', () => {
     const { lines, handle } = setUp({ enabled: false });
     const { response, context } = handle();

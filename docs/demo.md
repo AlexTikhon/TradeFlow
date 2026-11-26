@@ -60,8 +60,8 @@ The same command in PowerShell, cmd or a Linux shell. It prints each step, then 
 the logs exist only while the demo runs, and are discarded when it stops. The demo never reads
 `DATABASE_URL`, from your environment or from `apps/api/.env`: it removes the app's variables
 from what it passes on and sets each one itself. `HTTP_REQUEST_LOG` is among them, so the API
-always writes its per-request JSON records ([HTTP diagnostics](architecture.md#http-diagnostics))
-to the run's API log, whatever your shell sets. It never connects to, resets, seeds, stops or
+always writes its per-request JSON records ([HTTP diagnostics](architecture.md#http-diagnostics),
+best effort) to the run's API log, whatever your shell sets. It never connects to, resets, seeds, stops or
 removes the development (`tradeflow`) or test databases, other containers or volumes, or a
 running `pnpm dev`.
 

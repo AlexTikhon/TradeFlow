@@ -87,8 +87,9 @@ included), `e2e/deploy/diagnostics.ts` writes evidence to `e2e/.output/deploy/di
 - `upload-response.json`: status, media type, `requestId` (the response's `X-Request-ID`), size
   and Problem Details fields of an unexpected upload response.
 
-The API writes one JSON lifecycle record per request on standard output
-([HTTP diagnostics](architecture.md#http-diagnostics)), so `api.log` holds them. To find the
+The API writes one JSON lifecycle record per request on standard output, best effort
+([HTTP diagnostics](architecture.md#http-diagnostics)), so `api.log` holds them unless the log
+pipe fell behind and records were dropped. To find the
 server's side of the failed upload, search `api.log` for the `requestId` from
 `upload-response.json`: its record has the route template, status, duration, outcome and, for a
 5xx, the error's class, code and a few stack frames. For the 2026-11-25 CA failure below that
@@ -221,6 +222,37 @@ pnpm 11.9.0, Docker 29.9.3 with the WSL2 backend), on the working tree committed
 
 The two first attempts are recorded because the margin was real: CI on Linux syncs faster, but
 the hook's cost grows with the number of tests before it. Hosted CI has not run this change.
+
+### HTTP diagnostics writer, local verification, 2026-11-26
+
+At `3e47280` the records were written with a bare `process.stdout.write()`. Two defects were
+reported from probes: a closed stdout pipe ended the process with an unhandled asynchronous
+EPIPE, and a stdout pipe that was not read let Node's buffer grow without bound. The bounded
+writer ([HTTP diagnostics, Writer](architecture.md#http-diagnostics)) was verified on Windows
+(Node 24.11.1, pnpm 11.9.0, Docker 29.9.3) and on Linux in a container
+(`mcr.microsoft.com/playwright:v1.63.0-noble`, Ubuntu 24.04, Node 24.20.0, kernel
+6.18.33.2-microsoft-standard-WSL2), with a fresh `pnpm install` on a disposable volume. The
+"old writer" rows were run in that container's throwaway copy, with the module's factory
+pointed back at the bare write.
+
+| Check                                         | Result                                                                                                                                                                                                                                                               |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reader closes the pipe, old writer            | Child crashed: the next request failed with `ECONNRESET` (Windows and Linux)                                                                                                                                                                                         |
+| Reader closes the pipe, `StreamSink`          | Child alive, sink `failed`, 20 more requests and a final one answered 200 with fresh ids; clean shutdown, exit 0, no sink listeners left (Windows and Linux)                                                                                                         |
+| Paused reader, 3 × 3,000 requests, old writer | All answered; `process.stdout.writableLength` 556,167 → 1,203,116 → 1,849,943 bytes                                                                                                                                                                                  |
+| Paused reader, 3 × 3,000 requests, writer     | All answered; held bytes 65,385 after every burst (bound 65,536), 8,291 records dropped. The sink stayed `open`: the bound tripped before the pipe's 64 KiB high-water mark. Resumed: held bytes fell to 0 and records flowed again (Linux)                          |
+| Process spec, paused reader (Linux only)      | Passed: 6,000 requests answered, held bytes within the bound, then records received + records dropped = requests made, all whole JSON records                                                                                                                        |
+| Windows pipe, paused reader                   | Not run as a test: a 100 KB burst of stdout writes blocked the event loop for 2,952 ms until the reader resumed (Node writes Windows pipes synchronously)                                                                                                            |
+| Mutations                                     | Without the sink's `error` listener, 6 of 11 writer unit tests fail with unhandled errors; without the pending-error check, the listener-release test fails with an unhandled error                                                                                  |
+| `pnpm check`                                  | Passed against a disposable PostgreSQL 18.6 container on 127.0.0.1:5544, checked over TCP first (server address 172.17.0.2 = the container's, database `tradeflow_test`, role `tradeflow`): contracts 193, API 870 + 1 skipped (the Linux-only spec), web 520, build |
+| `pnpm demo:verify`                            | Passed (1 test)                                                                                                                                                                                                                                                      |
+| `pnpm demo:portfolio:verify`                  | Passed (3 tests)                                                                                                                                                                                                                                                     |
+| `pnpm deploy:verify`                          | Passed: 1 test, no retries, including the request-id/record correlation through the HTTPS edge, with the production writer in the API container                                                                                                                      |
+
+Not shown: hosted CI (not run), stdout redirected to a file or a terminal (synchronous in Node,
+so a stalled destination there still stalls the API), and Docker's log driver itself falling
+behind. That last case is a pipe on Linux and should behave like the paused reader above, but it
+was not produced.
 
 ## Stop and recover
 

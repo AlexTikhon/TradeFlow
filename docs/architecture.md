@@ -262,8 +262,9 @@ work started during a request (the event streams' recheck timer, bus deliveries)
 `outsideRequestContext`, so it never carries that request's context.
 
 **Lifecycle records.** With `HTTP_REQUEST_LOG=enabled` (the default, in every environment) each
-request ends with exactly one single-line JSON record on standard output. These are all the
-fields there are:
+request ends with exactly one single-line JSON record, handed to a best-effort writer for
+standard output that may drop it (**Writer**, below). These are all the fields
+there are:
 
 | Field        | Value                                                                                   |
 | ------------ | --------------------------------------------------------------------------------------- |
@@ -282,8 +283,9 @@ fields there are:
   `aborted`: the connection closed first and no server-side failure was noted (the client left).
   `stream_failed`: a download or event stream that had started was ended early by the server
   (unreadable bytes mid-download, a failed access check, a stream bound).
-- One record per request: the first of the response's `finish` and `close` events writes it and
-  removes both listeners (Node emits `close` after `finish` too). Streams are not buffered and
+- One record per request: the first of the response's `finish` and `close` events builds it,
+  hands it to the sink and removes both listeners (Node emits `close` after `finish` too). Never
+  two; zero when the writer drops it. Streams are not buffered and
   nothing is recorded per chunk, event or heartbeat; the record is written when they end.
 - `error.source` is `exception` (the exception filter, 5xx only), `download_stream` (the
   download's byte stream failed) or `event_stream`. `name` is the error's class name from its
@@ -299,9 +301,49 @@ fields there are:
   signed storage URLs. Values are built from an allowlist and serialized with `JSON.stringify`,
   so no field can break a line. Client-facing answers are unchanged: Problem Details
   (`instance` still echoes the request path) and generic 5xx `detail`s.
-- The sink is injectable (`HTTP_DIAGNOSTICS_SINK`, standard output by default). A sink that
-  throws loses that record and changes nothing else: the response, its cleanup and later
-  requests are unaffected.
+- The sink is injectable (`HTTP_DIAGNOSTICS_SINK`; tests capture records with their own). A
+  sink that throws loses that record and changes nothing else: the response, its cleanup and
+  later requests are unaffected.
+
+**Writer.** The production sink, `StreamSink` on `process.stdout`
+(`common/http/diagnostics-sink.ts`), is bounded and best effort. Records are diagnostics, not an
+audit trail: **records can be lost**, and the output does not say when.
+
+- It hands each record, with its line break, to `process.stdout.write()` and never awaits it.
+  Handlers, response callbacks and event streams never wait for logging or for `drain`. There is
+  no queue, retry, timer or promise.
+- **Bounds, in UTF-8 bytes.** A record over `MAX_RECORD_BYTES` (8 KiB) is dropped; real records
+  are under about 3.5 KiB (a 256-character route template and five stack frames). Record bytes
+  handed to the stream and not yet reported written by its write callback (in flight, including
+  Node's own buffer) are at most `MAX_BUFFERED_BYTES` (64 KiB, a few hundred records): a record
+  that would go past it is dropped. Records are dropped whole, never truncated.
+- **Backpressure.** When `write()` returns false the sink is `blocked`: it drops every record
+  until the stream emits `drain` (one `once` listener), then writes again. Node signals this at
+  the stream's high-water mark: 64 KiB for a Linux stdout pipe on Node 24, the same as the byte
+  bound, so there the bound usually trips first; 16 KiB for a Windows pipe (measured). Either
+  way, writing resumes by itself once the reader catches up.
+- **Failure is permanent.** A write callback error, a synchronous throw from `write()`, or the
+  stream's `error` or `close` event (EPIPE when the reader of the pipe is gone) moves the sink to
+  `failed`: every later record is dropped until the process restarts. It reports nothing: it
+  never logs its own failure, so it cannot recurse, and it installs no process-wide handlers.
+  Its `error` listener is on `process.stdout` itself, so while attached it also absorbs a
+  stdout error that a Nest `Logger` write would raise; no other errors are touched.
+- **Shutdown.** `HttpDiagnostics.onApplicationShutdown` closes the sink after Nest has closed the
+  HTTP server, so requests that were draining still get their record. Afterwards every record
+  is dropped. Closing never ends or destroys `process.stdout` and waits for nothing: writes in
+  flight are left to the stream.
+- **Listeners.** The sink keeps one `error` and one `close` listener on `process.stdout`, plus
+  `drain` only while blocked. Once failed or closed, it removes them when no write is in flight
+  and the stream has no error left to emit (Node calls the failed write's callback before it
+  emits `error`, and a listener removed in between would leave that error uncaught). Writes a
+  stalled reader never settles keep those two listeners until the process exits.
+- **Not non-blocking everywhere.** `write()` returns at once only where Node writes
+  asynchronously. Node writes synchronously to files, to POSIX terminals and to Windows pipes:
+  measured on Windows (Node 24.11.1), with the reader of a stdout pipe paused, a write blocked
+  the whole process for 2.95 s until the reader resumed. In the mock and the intended hosts the
+  API's standard output is a Docker log pipe on Linux, which Node writes asynchronously. A
+  reader that stops there costs dropped records, not a stalled API; redirected to a file or a
+  terminal, a slow disk or terminal can still stall it.
 
 **Troubleshooting with a request id.** A client reports a failed download; its response carried
 `X-Request-ID: 9e33e7a5-bb80-422d-9af4-d0d1c6058371`. Search the API's output for the id:
@@ -366,8 +408,26 @@ synthetic secrets sent in headers, query strings, paths, bodies, file names and 
 run's session tokens. `pnpm deploy:verify` checks ids and records through the HTTPS edge
 ([results](deployment-mock.md#http-diagnostics-local-verification-2026-11-26)).
 
+The writer has its own tests. `diagnostics-sink.spec.ts` drives it with a `Writable` whose
+writes settle only when the test says: backpressure, drop and resume on `drain`, the byte bound
+on a stream that never pushes back, oversized records (counted in UTF-8 bytes), asynchronous
+write errors and `error`/`close` events (with no uncaught error), a throwing `write()`,
+shutdown idle and blocked, and listener release, including the tick between a failed write's
+callback and its `error` event. `diagnostics-sink.process.spec.ts` starts a child process
+running the production `HttpDiagnosticsModule` behind a `node:http` server, with its standard
+output a real pipe, and sends it real HTTP requests. It closes the pipe's read end and checks
+that the child keeps answering. It stops reading (POSIX only, since Windows pipes block) and
+checks that 6,000 requests are answered while held bytes stay within the bound, then resumes
+and checks that records flow again and that records received plus records dropped equal
+requests made. The child process is reaped after each test
+([results](deployment-mock.md#http-diagnostics-writer-local-verification-2026-11-26)).
+
 **Limitations.** Records go to standard output only: there is no retention, shipping, sampling or
-rate limit here, which is the runtime's job (Docker's log driver in the mock). A process killed
+rate limit here, which is the runtime's job (Docker's log driver in the mock). Records are lost
+while standard output's reader falls behind (beyond 64 KiB in flight), after it fails, and after
+shutdown, with nothing in the output to say so. A request id with no record does not mean the
+request never reached the API. Where Node writes standard output synchronously (files, POSIX
+terminals, Windows pipes), a stalled reader stalls the process. A process killed
 mid-request writes no record for it. Requests rejected by Node's HTTP parser before Express sees
 them (malformed request lines, oversized headers) get neither an id nor a record. `route` is
 `unmatched` for everything no controller route matched, including Swagger UI's static assets

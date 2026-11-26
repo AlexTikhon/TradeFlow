@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { performance } from 'node:perf_hooks';
-import { Inject, Injectable, Module } from '@nestjs/common';
+import { Inject, Injectable, Module, type OnApplicationShutdown } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config/app-config.js';
+import { StreamSink } from './diagnostics-sink.js';
 import { RequestContext, type RequestFailure, runInRequestContext } from './request-context.js';
 
 /*
@@ -45,26 +46,25 @@ export interface HttpRequestRecord {
   error?: RequestFailure;
 }
 
-/** Where serialized records go: one line each, without its line break. Must not block. */
+/**
+ * Where serialized records go: one line each, without its line break. Best effort: it may drop a
+ * record, and must neither block on its destination nor let the destination's errors escape.
+ * The production sink is a `StreamSink` on standard output (diagnostics-sink.ts).
+ */
 export interface HttpDiagnosticsSink {
   write(line: string): void;
+  /** At application shutdown: stop writing. Must not end or destroy a shared stream. */
+  close?(): void;
 }
 
 export const HTTP_DIAGNOSTICS_SINK = Symbol('HTTP_DIAGNOSTICS_SINK');
-
-/** The production sink: one line per record on standard output, for the container runtime. */
-export const stdoutSink: HttpDiagnosticsSink = {
-  write(line) {
-    process.stdout.write(`${line}\n`);
-  },
-};
 
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 /** Route templates as controllers declare them; anything else is not recorded. */
 const ROUTE_TEMPLATE = /^\/[\w\-/:.{}*]{0,255}$/;
 
 @Injectable()
-export class HttpDiagnostics {
+export class HttpDiagnostics implements OnApplicationShutdown {
   private readonly enabled: boolean;
 
   constructor(
@@ -72,6 +72,11 @@ export class HttpDiagnostics {
     @Inject(HTTP_DIAGNOSTICS_SINK) private readonly sink: HttpDiagnosticsSink,
   ) {
     this.enabled = config.httpRequestLog;
+  }
+
+  /** After the HTTP server has closed, so requests that were draining still get their record. */
+  onApplicationShutdown(): void {
+    this.sink.close?.();
   }
 
   /**
@@ -94,7 +99,8 @@ export class HttpDiagnostics {
    * Writes exactly one record when the response ends: on `finish` (all of it was handed to the
    * connection) or on `close` (the connection ended), whichever comes first; Node emits `close`
    * after `finish` too. Both listeners are released on the first. A failing sink is ignored:
-   * diagnostics never change a request's outcome.
+   * diagnostics never change a request's outcome. One record is built and handed to the sink;
+   * whether it reaches the output is the sink's affair (the production sink may drop it).
    */
   private watch(request: IncomingMessage, response: ServerResponse, context: RequestContext) {
     const settle = (finished: boolean) => {
@@ -157,7 +163,11 @@ function routeTemplate(request: IncomingMessage): string {
 }
 
 @Module({
-  providers: [{ provide: HTTP_DIAGNOSTICS_SINK, useValue: stdoutSink }, HttpDiagnostics],
+  providers: [
+    // Standard output, for the container runtime; made when the application starts, not on import.
+    { provide: HTTP_DIAGNOSTICS_SINK, useFactory: () => new StreamSink(process.stdout) },
+    HttpDiagnostics,
+  ],
   exports: [HttpDiagnostics],
 })
 export class HttpDiagnosticsModule {}
