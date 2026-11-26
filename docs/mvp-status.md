@@ -53,6 +53,16 @@ bucket, and 8 restored-mode checks. So did `pnpm test:storage` (14 tests) and
 ran on AWS, and no remote environment was contacted. Step 9 stays pending until a real hosted
 run and an AWS restore rehearsal pass.
 
+A review then found three defects, all now fixed:
+
+- the restore command's target could be redirected by the host shell's `PGDATABASE`;
+- the fixture command redirected a root-only file from the non-root shell;
+- `restart.session` had a READY timing race.
+
+`pnpm hosted:runbook-check` now runs the two privileged runbook blocks in a disposable Linux
+instance, and a deterministic unit test covers the race
+([review fixes](hosted-verification.md#review-fixes-2026-11-26)).
+
 The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and builds),
 `pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS
 scenario, seven steps). Details and limits: [deployment verification](deployment-mock.md#local-verification-2026-10-31).

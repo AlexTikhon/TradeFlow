@@ -15,6 +15,7 @@
     "deploy:verify": "playwright test --config deploy/playwright.config.ts",
     "hosted:verify": "node --import tsx hosted/verify.ts",
     "hosted:rehearse-mock": "node --import tsx hosted/mock-rehearsal.ts",
+    "hosted:runbook-check": "node --import tsx hosted/runbook-check.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"hosted/*.test.ts\""
   },

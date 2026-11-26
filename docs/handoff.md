@@ -184,7 +184,8 @@ deleted at any time.
 5. Run [verification](#verification-against-isolated-postgresql-only) against a throwaway
    server, then remove it. Also run `pnpm test:storage` and `pnpm deploy:verify`, which own
    their database/object servers and cleanup, and `pnpm hosted:rehearse-mock` when touching
-   deployment, recovery or the hosted suite.
+   deployment, recovery or the hosted suite. Also run `pnpm hosted:runbook-check` when changing
+   a runbook block marked `runbook-check`.
 6. Before `pnpm db:up`, check who owns port 5433.
 7. Re-read [Limitations](mvp-status.md#limitations) and the directions below before choosing
    work.

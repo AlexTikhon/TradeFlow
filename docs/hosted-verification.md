@@ -97,7 +97,13 @@ refuses to write unless `--confirm-database` names exactly the `host:port/databa
 `DATABASE_URL`. A rerun sets new passwords and revokes the accounts' earlier sessions. Nothing
 else is touched.
 
-On the instance, in an SSM session, with the operator's own credentials (unrehearsed):
+On the instance, in an SSM session (a non-root shell), with the operator's own credentials
+(AWS unrehearsed). `/run/tradeflow` and its files are root-only, so the SSM user's shell
+cannot open them for a redirection. Root reads the password file (`sudo cat`) and pipes it to
+the container's standard input. The passwords never appear in a command line, and the
+permissions stay as they are:
+
+<!-- runbook-check: fixtures (pnpm hosted:runbook-check runs this block) -->
 
 ```sh
 umask 077
@@ -107,15 +113,17 @@ sudo install -d -m 0700 /run/tradeflow
 sudo tee /run/tradeflow/fixtures.env > /dev/null   # DATABASE_URL=postgresql://tradeflow_migrator:…@<database_address>:5432/tradeflow?sslmode=verify-full&sslrootcert=/etc/tradeflow/rds-ca.pem
 # Generate the three passwords into a root-only file; keep them in the operator's password manager.
 sudo sh -c 'printf "{\"seller\":\"%s\",\"buyer\":\"%s\",\"outsider\":\"%s\"}" "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" > /run/tradeflow/fixture-passwords.json'
-sudo docker run --rm -i --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges=true \
+sudo cat /run/tradeflow/fixture-passwords.json | sudo docker run --rm -i --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges=true \
   --env-file /run/tradeflow/fixtures.env --env DOCUMENT_STORAGE_DRIVER=local --env DOCUMENT_STORAGE_DIR=/tmp/unused \
   --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly \
   <registry>/tradeflow-portfolio/tools@sha256:<digest> \
-  node --import tsx scripts/verification-fixtures.ts --confirm-database <database_address>:5432/tradeflow \
-  < /run/tradeflow/fixture-passwords.json
+  node --import tsx scripts/verification-fixtures.ts --confirm-database <database_address>:5432/tradeflow
 sudo cat /run/tradeflow/fixture-passwords.json   # copy into the password manager, then:
 sudo rm /run/tradeflow/fixtures.env /run/tradeflow/fixture-passwords.json
 ```
+
+Do not write `sudo docker run … < /run/tradeflow/fixture-passwords.json`: the SSM user's shell
+opens that file before `sudo` runs, and fails with `Permission denied`.
 
 ## Running the suite
 
@@ -211,9 +219,13 @@ both.
   restore prefix), and the maintenance identity's temporary credentials
   (`aws configure export-credentials --format env-no-export`). The IMDS guard keeps the tools
   container from using the instance role.
-- `/run/tradeflow/pg-source.env` and `/run/tradeflow/pg-restore.env`: libpq variables for the
-  same roles (`PGHOST`, `PGPORT=5432`, `PGDATABASE`, `PGUSER=tradeflow_migrator`, `PGPASSWORD`,
-  `PGSSLMODE=verify-full`, `PGSSLROOTCERT=/etc/tradeflow/rds-ca.pem`).
+- `/run/tradeflow/pg-source.env`: libpq variables for the source (`PGHOST`, `PGPORT=5432`,
+  `PGDATABASE=tradeflow`, `PGUSER=tradeflow_migrator`, `PGPASSWORD`, `PGSSLMODE=verify-full`,
+  `PGSSLROOTCERT=/etc/tradeflow/rds-ca.pem`), for `pg_dump`.
+- `/run/tradeflow/pg-restore.env` is never written by hand. Step 10 derives it from
+  `restore.env`'s `DATABASE_URL` line, so `pg_restore` connects to exactly the database that
+  `restore-check` accepted in step 9. libpq reads the same URL: its query is only `sslmode` and
+  `sslrootcert`.
 
 `tools` below stands for
 `sudo docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges=true --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly`,
@@ -231,11 +243,33 @@ followed by an `--env-file` and the tools image by digest. `pg` stands for the s
 | 7   | Recovery point         | `jq .recoveryPoint objects/source.json`: the latest audit event time, the audit event and document version counts, and the latest migration. **This is the actual recovery point**, not the clock time                                                                                                                                                                                                                                                                                                                             | recovery point                            |
 | 8   | Create targets         | As `tradeflow_admin`: `CREATE DATABASE tradeflow_restore_<yyyymmdd>`, then the per-database part of the [role SQL](aws-infrastructure.md#database-tls-and-roles) in it (`REVOKE … FROM PUBLIC`, `GRANT CONNECT`, schema owner, default privileges). Default privileges are per database. The restore prefix needs no creation, but must be empty                                                                                                                                                                                   | restore started at                        |
 | 9   | Guards                 | `restore-check /backup/objects` with `source.env` **must refuse** (source database, not empty, overlapping objects). With `restore.env` it must print `"refusals": []`. Compare both identities it prints with the ones written down                                                                                                                                                                                                                                                                                               | both outputs                              |
-| 10  | Restore database       | `pg --env-file /run/tradeflow/pg-restore.env -i postgres:18 pg_restore --dbname="$PGDATABASE" --exit-on-error --no-owner --no-acl < database.dump`. Never `--clean`, never the seed                                                                                                                                                                                                                                                                                                                                                | end                                       |
+| 10  | Restore database       | [Restore the database](#restore-the-database) below: `pg_restore` into the `DATABASE_URL` of `restore.env`, the target `restore-check` accepted. Never `--clean`, never the seed                                                                                                                                                                                                                                                                                                                                                   | end                                       |
 | 11  | Import objects         | `tools --env-file /run/tradeflow/restore.env --mount …,target=/backup,readonly <tools> … import /backup/objects`. It refuses the source prefix and database, a manifest or recovery point that differs from the restored database, a non-empty prefix, and any file that fails its checksum, all before the first write                                                                                                                                                                                                            | end                                       |
 | 12  | Reconcile restored     | `verify` with `restore.env`: no problems, no orphans                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | report                                    |
 | 13  | API on restored stores | With the unit still stopped, start **one** API container exactly like `/usr/local/libexec/tradeflow/run api`, with the same name, address and alias, plus `--env-file /run/tradeflow/api-restore.env` (the app role's URL for the restore database, checked with `check-database-url`) and `--env S3_PREFIX=tradeflow/restore-<yyyymmdd>/` after `/etc/tradeflow/api.env`, and `--detach`. Then, from the workstation: `pnpm hosted:verify --origin https://<domain> --mode restored --expect <full results> --results <new file>` | restore verified at; **elapsed = 13 − 8** |
 | 14  | Return                 | `sudo docker stop tradeflow-api`, then `sudo systemctl start tradeflow-api` (the source stores), `https://<domain>/api/health` 200, and a sign-in. Keep the source environment and the backup until the rehearsal is accepted. Remove the restore database and prefix only by an explicit later decision                                                                                                                                                                                                                           | writers resumed at                        |
+
+### Restore the database
+
+Step 10, from the SSM user's shell. The destination comes only from `restore.env`. The
+`--dbname` argument is in single quotes, so `$DATABASE_URL` is expanded inside the container,
+from the derived env file. A `PGDATABASE` or `DATABASE_URL` in the operator's own shell
+cannot redirect the restore. The backup directory and the env files are root-only, so root
+reads them (`sudo sh -c`, `sudo cat`), as with the fixtures:
+
+<!-- runbook-check: restore-database (pnpm hosted:runbook-check runs this block) -->
+
+```sh
+sudo sh -c 'umask 077 && grep "^DATABASE_URL=" /run/tradeflow/restore.env > /run/tradeflow/pg-restore.env'
+sudo cat /var/lib/tradeflow-backups/<id>/database.dump | sudo docker run --rm -i --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges=true \
+  --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly \
+  --env-file /run/tradeflow/pg-restore.env postgres:18 \
+  sh -c 'exec pg_restore --dbname="$DATABASE_URL" --exit-on-error --no-owner --no-acl'
+```
+
+Never write `--dbname="$PGDATABASE"` (or any `$…`) unquoted on the host command line. The host
+shell expands it before Docker reads the env file, and a value left in the operator's shell
+(the source `tradeflow`, for example) silently replaces the target.
 
 The restored database contains the source's sessions, so cookies from before the backup are
 valid against it. The window keeps the public site on that copy only briefly. A real
@@ -281,6 +315,41 @@ The mock proves the tooling and the sequence. It does not prove ACME or public c
 AWS IAM/IMDS, RDS TLS or roles, S3 behavior, systemd or the instance's timing. The restore time
 it prints is a laptop measurement, not an AWS one.
 
+### Runbook shell blocks
+
+```powershell
+pnpm hosted:runbook-check
+```
+
+`e2e/hosted/runbook-check.ts` runs the two privileged blocks marked `runbook-check` above
+([fixtures](#verification-fixtures), [restore the database](#restore-the-database)). It reads
+them from this file, so a change here is what gets checked. It needs only Docker, and runs
+them in a disposable Linux "instance": a privileged `docker:29-dind` container with its own
+daemon, a non-root sudo user `ssm-user` (uid 1001) in place of the SSM session, root-only
+`/run/tradeflow` files, a backup directory owned by uid 1000 with mode 0700, and a PostgreSQL 18
+server that requires TLS. That server's certificate comes from a private CA placed at
+`/etc/tradeflow/rds-ca.pem`, and the URLs use `verify-full`.
+
+- **restore-database:** the caller's shell exports `PGDATABASE=tradeflow` and a `DATABASE_URL`
+  for the source. The block must exit 0. The server's own connection log must show every
+  `pg_restore` connection going to the restore database over TLS. The dumped row must now be in
+  that database, and the source must be unchanged. `pg-restore.env` must hold only
+  `restore.env`'s `DATABASE_URL` line, and every file must stay root-only.
+- **fixtures:** the block runs as `ssm-user`, split at its `docker run`. After the preparation,
+  the directory is 0700 and both files are 0600 root, and `ssm-user` cannot read the password
+  file. A probe image stands in for the tools image and reports the SHA-256 of its standard
+  input and its arguments. The hash must equal the password file's, and no password may appear
+  in the arguments, the host command line or stderr. The cleanup removes both files.
+- The reviewed commands (10186bd) run against the same setup and must show the defects: the
+  restore connects to the source `tradeflow`, and the fixture redirection fails with
+  `Permission denied` before any container starts.
+- The probe and the `postgres:18` image used by the blocks live in the instance's own daemon.
+  The instance container, its volume and its image tag are removed at the end, and the host's
+  Docker state is compared with the state before the run.
+
+It proves the shell's privilege, redirection and expansion behavior and libpq's reading of
+the URL. It does not prove the tools image, SSM, AWS or RDS.
+
 ## Verification record, 2026-11-26
 
 Local evidence on the working tree committed after `e2f9063`, on Windows 11 with Docker Desktop
@@ -302,3 +371,26 @@ was used.
 | `pnpm deploy:verify`                 | Passed: 1 test, 8 steps, no retries, with the refactored TLS pin, the optional seed and the compose defaults. Docker state was identical afterwards                                                                                                                                                                                                                                                 |
 | Unit tests, static checks            | The `e2e` input tests passed 7 of 7 (`node --test`). `pnpm lint`, `pnpm typecheck`, `pnpm format:check` and `git diff --check` passed. Without a target or credentials, the CLI exits 2 before any request                                                                                                                                                                                          |
 | **Not performed**                    | Anything on AWS: provisioning, image publishing, DNS/ACME, the suite against a public origin, the `systemctl` restart, the RDS/S3 recovery rehearsal, and every command in [Recovery rehearsal](#recovery-rehearsal). Also not run: the rehearsal on a Linux host (its `--user` branch for the tools container), the full `pnpm check`, and hosted CI                                               |
+
+## Review fixes, 2026-11-26
+
+An independent review of the increment above (`10186bd`) found three defects. All three were
+fixed and verified locally, on the same machine and toolchain. **No AWS verification was
+performed.** No account, credential, registry, DNS zone, Terraform plan/apply/destroy or remote
+environment was used. Step 9 stays pending.
+
+| Finding                                                                                                                                         | Fix                                                                                                                                                                                                                                           | Regression evidence                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Step 10's `--dbname="$PGDATABASE"` was expanded by the host shell, so a value left there (the source) replaced the target                       | [Restore the database](#restore-the-database): `pg-restore.env` is derived from `restore.env`'s `DATABASE_URL`, the URL `restore-check` accepted, and `--dbname="$DATABASE_URL"` is expanded inside the container. The backup is read by root | `pnpm hosted:runbook-check`, with `PGDATABASE=tradeflow` and a source `DATABASE_URL` in the caller's shell. The reviewed command connected to `tradeflow` and failed (`relation "restore_marker" already exists`). The runbook block connected only to `tradeflow_restore_20261126`, over TLS (`verify-full`, private CA), and restored the row. The source kept its one row |
+| The fixture command redirected root-only `/run/tradeflow/fixture-passwords.json` from the non-root shell, so it failed with `Permission denied` | `sudo cat … \| sudo docker run -i …`: root reads the file and pipes it to the container's stdin. Permissions are unchanged                                                                                                                    | `pnpm hosted:runbook-check`, as `ssm-user` (uid 1001). The reviewed feed failed with `Permission denied`, and no container started. The runbook feed delivered the file byte for byte (SHA-256 equal), with no password in the arguments, the command line or stderr. The directory stayed 0700 and the files 0600 root, and the cleanup removed them                        |
+| `restart.session` took its READY cutoff after the reload and the "Sign out" wait, so a READY that arrived first was discarded                   | `reloadSignedInWithReady` (`e2e/hosted/stream-ready.ts`) takes the boundary before the reload. The stream history is per document anyway                                                                                                      | `e2e/hosted/stream-ready.test.ts`, a deterministic page model with a fake page clock. The "READY before Sign out is visible" case failed on the reviewed ordering (`No READY message arrived … within 1 s`) and passes with the fix. The "READY never arrives" and "only the previous document's READY" cases fail in both orderings, as they must                           |
+
+| Check                         | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm hosted:runbook-check`   | Passed on the first run and on the final run (60 s, run `b5716811`). Docker state was identical afterwards, and the log holds no password or connection URL                                                                                                                                                                                                                                                                                                                                          |
+| Mutation runs (expected fail) | With the runbook temporarily changed back, the check failed both times, with Docker state identical afterwards. A host-expanded `--dbname="$DATABASE_URL"` restored into the source (`relation "restore_marker" already exists`). `sudo docker run … < /run/tradeflow/fixture-passwords.json` failed with `Permission denied`                                                                                                                                                                        |
+| `e2e` unit tests              | 11 of 11 passed (`node --test`): 7 input tests and 4 READY tests. The READY test was first watched failing against the reviewed ordering, extracted unchanged into `stream-ready.ts`. It failed again on a recheck of the final code with that ordering swapped back                                                                                                                                                                                                                                 |
+| `pnpm hosted:rehearse-mock`   | Passed. The full run passed 22 of 22 checks, `restart.session` (now through `reloadSignedInWithReady`) in 430 ms. The run restarted API container `3c859ede252e`, ready after 3.3 s. Streams dropped 0.43 s after the checkpoint and received `READY` 5.1 s later. Restored mode passed 8 of 8 checks. `restore-check` refused the source with all four reasons. Restore to the verified API took 23.5 s (laptop, not AWS). Every container, volume, image and temporary file of the run was removed |
+| `pnpm deploy:verify`          | Passed: 1 test, 8 steps (1.8 min). Containers and volumes were identical afterwards                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Static checks                 | `pnpm format:check`, `pnpm typecheck` and `git diff --check` passed. `pnpm lint` failed on the first attempt (floating `describe`/`it` promises in the new test, and an unbound-method warning on the steps interface). After the fix (the repo's `void describe` style, function-typed properties), it passed. The new script also first failed `tsc` under `exactOptionalPropertyTypes`, and was fixed before it first ran                                                                         |
+| Not run                       | `pnpm test:storage`: the recovery tooling (`document-objects.ts`) is unchanged. The full `pnpm check`, hosted CI, and anything on AWS                                                                                                                                                                                                                                                                                                                                                                |

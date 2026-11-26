@@ -29,6 +29,7 @@
     "deploy:verify": "pnpm --filter @tradeflow/contracts build && pnpm --filter @tradeflow/e2e deploy:verify",
     "hosted:verify": "pnpm --filter @tradeflow/contracts build && pnpm --filter @tradeflow/e2e hosted:verify",
     "hosted:rehearse-mock": "pnpm --filter @tradeflow/contracts build && pnpm --filter @tradeflow/e2e hosted:rehearse-mock",
+    "hosted:runbook-check": "pnpm --filter @tradeflow/e2e hosted:runbook-check",
     "db:up": "docker compose up -d --wait postgres",
     "db:down": "docker compose down",
     "db:migrate": "pnpm --filter @tradeflow/api db:migrate",

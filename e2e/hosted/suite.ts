@@ -16,6 +16,7 @@ import {
 } from '@tradeflow/contracts';
 import type { AccountKey, HostedInputs } from './inputs.js';
 import { fictionalPdf } from './pdf.js';
+import { awaitStreamMessage, reloadSignedInWithReady, waitFor } from './stream-ready.js';
 
 /*
  * Hosted verification of one TradeFlow environment through its public HTTPS origin, as its users
@@ -127,20 +128,6 @@ class CheckFailed extends Error {}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-}
-
-async function waitFor<T>(
-  probe: () => Promise<T | undefined>,
-  timeoutMs: number,
-  message: () => string,
-): Promise<T> {
-  const until = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > until) throw new Error(message());
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
 }
 
 interface NodeResponse {
@@ -312,17 +299,11 @@ function streams(page: Page, voyageId: string): Promise<StreamLog[]> {
 
 const pageNow = (page: Page) => page.evaluate(() => Date.now());
 
-async function streamMessage(page: Page, voyageId: string, type: string, since: number) {
-  return waitFor(
-    async () => {
-      for (const entry of await streams(page, voyageId))
-        for (const message of entry.messages)
-          if (message.type === type && message.at >= since) return message.at;
-      return undefined;
-    },
-    30_000,
-    () => `No ${type} message arrived on the web app's event stream within 30 s`,
-  );
+const streamMessages = async (page: Page, voyageId: string) =>
+  (await streams(page, voyageId)).flatMap(({ messages }) => messages);
+
+function streamMessage(page: Page, voyageId: string, type: string, since: number) {
+  return awaitStreamMessage(() => streamMessages(page, voyageId), type, since);
 }
 
 interface Digest {
@@ -970,9 +951,15 @@ export async function runSuite(
           );
         }
         const seller = party('seller').page;
-        await seller.reload();
-        await seller.getByRole('button', { name: 'Sign out' }).waitFor({ timeout: 20_000 });
-        await streamMessage(seller, voyageId, 'READY', (await pageNow(seller)) - 1);
+        await reloadSignedInWithReady({
+          now: () => pageNow(seller),
+          reload: async () => {
+            await seller.reload();
+          },
+          signedIn: () =>
+            seller.getByRole('button', { name: 'Sign out' }).waitFor({ timeout: 20_000 }),
+          messages: () => streamMessages(seller, voyageId),
+        });
       });
 
       await check('restart.database', async () => {
