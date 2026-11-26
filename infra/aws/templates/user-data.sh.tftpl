@@ -88,6 +88,10 @@ ENV
 
 # --- Start-time preparation: release, secret, network, IMDS guard, image pulls --------------
 install -d -m 0755 /usr/local/libexec/tradeflow
+# Verbatim copy of infra/aws/templates/check-database-url.sh (tested offline against node-postgres).
+cat > /usr/local/libexec/tradeflow/check-database-url <<'SCRIPT'
+${check_database_url}
+SCRIPT
 cat > /usr/local/libexec/tradeflow/prepare <<'SCRIPT'
 #!/bin/bash
 # Usage: prepare api|edge. Runs before each container start; serialized by a lock.
@@ -121,10 +125,8 @@ if [ "$1" = api ]; then
   secret=$(aws secretsmanager get-secret-value --secret-id "$APP_SECRET_ARN" --query SecretString --output text)
   url=$(jq -er '.DATABASE_URL | strings' <<< "$secret") ||
     { echo "Application secret has no DATABASE_URL string" >&2; exit 1; }
-  if [[ "$url" != postgresql://* || "$url" == *$'\n'* || "$url" != *sslmode=verify-full* || "$url" != *sslrootcert=/etc/tradeflow/rds-ca.pem* ]]; then
-    echo "DATABASE_URL must be postgresql:// with sslmode=verify-full and sslrootcert=/etc/tradeflow/rds-ca.pem" >&2
-    exit 1
-  fi
+  # Strict TLS contract (check-database-url); printf is a builtin, so the URL is never an argument.
+  printf '%s' "$url" | /usr/local/libexec/tradeflow/check-database-url
   (umask 077 && printf 'DATABASE_URL=%s\n' "$url" > /run/tradeflow/api-secrets.env.new)
   mv /run/tradeflow/api-secrets.env.new /run/tradeflow/api-secrets.env
   unset secret url
@@ -198,7 +200,8 @@ exec docker run --rm --cap-drop ALL --security-opt no-new-privileges=true --tmpf
   --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly \
   --pull never "$tools_image"
 SCRIPT
-chmod 0755 /usr/local/libexec/tradeflow/prepare /usr/local/libexec/tradeflow/run
+chmod 0755 /usr/local/libexec/tradeflow/check-database-url /usr/local/libexec/tradeflow/prepare \
+  /usr/local/libexec/tradeflow/run
 chmod 0700 /usr/local/bin/tradeflow-migrate
 
 # --- systemd units: retry every 30 s until a release exists and its prerequisites answer -----

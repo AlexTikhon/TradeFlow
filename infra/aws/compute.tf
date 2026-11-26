@@ -52,6 +52,7 @@ resource "aws_instance" "app" {
     api_container_ip        = local.api_container_ip
     container_log_max_size  = "10m"
     container_log_max_files = 5
+    check_database_url      = chomp(file("${path.module}/templates/check-database-url.sh"))
   })
   # Changing user data replaces the instance deliberately rather than leaving it half-applied.
   user_data_replace_on_change = true

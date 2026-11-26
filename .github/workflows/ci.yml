@@ -86,6 +86,16 @@ jobs:
           terraform_version: 1.17.2
           terraform_wrapper: false
 
+      # The DATABASE_URL gate in user data is tested with bash and openssl against the locked
+      # node-postgres the API runs, so this job needs the workspace's dependencies.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:infra
+
       - run: terraform fmt -check -recursive infra/aws
 
       - name: Main configuration (validate, mock-provider tests)

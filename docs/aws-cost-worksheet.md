@@ -54,7 +54,7 @@ retrieved 2026-11-26. Publication timestamps: AmazonEC2 2026-11-24T23:14Z, Amazo
 | CPU                     | EC2 in `standard` credit mode (throttles, never bills credits); RDS T4g runs in Unlimited mode (AWS: "RDS for PostgreSQL T4g and T3 DB instances run in Unlimited mode"), assumed below baseline on a 24-hour average |
 | Documents in S3         | 5 GB-month including noncurrent versions (versions never expire by default)                                                                                                                                           |
 | S3 requests             | 10,000 PUT/LIST-class and 100,000 GET-class per month (uploads, multipart parts, downloads)                                                                                                                           |
-| ECR                     | 3 GB stored across api/web/tools (up to 20 images each, layers shared), pulls in-Region                                                                                                                               |
+| ECR                     | 3 GB stored across api/web/tools (layers shared), pulls in-Region. Images never expire automatically, so this grows with every pushed build until an operator deletes digests ([growth](#registry-growth))            |
 | Secrets                 | 3 secrets (RDS master, app, migrator); about 2,000 API calls per month                                                                                                                                                |
 | Internet egress         | 20 GB per month (SPA assets, API responses, PDF downloads)                                                                                                                                                            |
 | Cross-AZ                | 0 GB: instance and database are placed in the same AZ                                                                                                                                                                 |
@@ -89,6 +89,18 @@ Sizing alternatives, instance hours only (730 h): EC2 `t4g.medium` $28.03, `t3.s
 `t3.medium` $35.04; RDS `db.t4g.small` $27.01, `db.t4g.medium` $54.02. Multi-AZ RDS is not
 proposed and not priced.
 
+### Registry growth
+
+The repositories keep every pushed image until an operator deletes specific digests
+([image retention](aws-infrastructure.md#image-retention-and-cleanup)), so the 3 GB above is a
+starting point, not a ceiling. ECR bills stored layers, and layers shared between images are
+stored once. Each build adds only the layers it changes, but how much that is has not been
+measured. Each additional GB kept costs $0.10 per month, in every column, including a stopped
+month and after destroy. For example, if each release added 0.5 GB across the three
+repositories, 20 releases without cleanup would add 10 GB and $1.00 per month. Check
+`aws ecr describe-images` sizes or Cost Explorer after the first releases, and clean up
+deliberately.
+
 ## Stopped month
 
 EC2 stopped and RDS stopped. Instance hours stop. Storage, the idle Elastic IP, secrets and
@@ -120,7 +132,7 @@ until an operator deletes them deliberately:
 | RDS automated backups (kept after deletion)                | same rate, until the 7-day retention ends                                                       | up to about $0.48 once  |
 | Caddy volume final snapshot                                | $0.054 / GB-month                                                                               | 1 GB: $0.05             |
 | Document bucket objects and versions (if not emptied)      | $0.0245 / GB-month                                                                              | 5 GB: $0.12             |
-| ECR images (if not deleted)                                | $0.10 / GB-month                                                                                | 3 GB: $0.30             |
+| ECR images (if not deleted)                                | $0.10 / GB-month; more if builds accumulated ([growth](#registry-growth))                       | 3 GB: $0.30             |
 | App and migrator secrets during the 30-day recovery window | AWS's pricing page does not say whether secrets scheduled for deletion bill; assumed $0.40 each | up to $0.80 once        |
 | State bucket                                               | negligible                                                                                      | < $0.01                 |
 
@@ -133,4 +145,4 @@ destroy. An Elastic IP left allocated but unassociated would still cost $3.65 pe
   Budgets alert (notification only) is added in the next step.
 - Recalculate with the chosen Region and sizes. Prices differ by Region and change over time.
 - After the first month, compare against Cost Explorer. The largest uncertainties are egress,
-  S3 versions and RDS CPU credits.
+  S3 versions, accumulated ECR images and RDS CPU credits.

@@ -232,8 +232,15 @@ run "user_data_contract" {
   }
 
   assert {
-    condition     = strcontains(aws_instance.app.user_data, "\"$url\" != *sslmode=verify-full*") && strcontains(aws_instance.app.user_data, "\"$url\" != *sslrootcert=/etc/tradeflow/rds-ca.pem*") && strcontains(aws_instance.app.user_data, "https://truststore.pki.rds.amazonaws.com/eu-central-1/eu-central-1-bundle.pem")
+    condition     = strcontains(aws_instance.app.user_data, "https://truststore.pki.rds.amazonaws.com/eu-central-1/eu-central-1-bundle.pem")
     error_message = "The API must verify the RDS certificate and hostname against the regional bundle."
+  }
+
+  # The URL check's behavior is tested by tests/database-url.test.js (pnpm test:infra) against the
+  # locked node-postgres parser. Here: user data installs exactly that script and gates on it.
+  assert {
+    condition     = strcontains(aws_instance.app.user_data, "<<'SCRIPT'\n${chomp(file("templates/check-database-url.sh"))}\nSCRIPT\n") && strcontains(aws_instance.app.user_data, "  printf '%s' \"$url\" | /usr/local/libexec/tradeflow/check-database-url\n  (umask 077")
+    error_message = "User data must install the tested check-database-url verbatim and run it before writing the API secret file."
   }
 
   assert {

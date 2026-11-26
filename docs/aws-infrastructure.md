@@ -28,7 +28,7 @@ Budgets resource is created.
 | Security group `database`              | In: TCP 5432 from `app` only. No egress                                                                                                                                                                                  |
 | RDS PostgreSQL 18                      | Single-AZ in the instance's AZ, private, encrypted gp3, `rds.force_ssl=1`, CA `rds-ca-rsa2048-g1`, RDS-managed master secret, 7-day backups kept after deletion, deletion protection, final snapshot                     |
 | S3 document bucket                     | Public access blocked, bucket owner enforced (no ACLs), SSE-S3, versioning, TLS-only policy, lifecycle aborts incomplete multipart uploads after 7 days and expires nothing else                                         |
-| ECR `<env>/api`, `/web`, `/tools`      | Immutable tags, scan on push, AES256, no forced deletion; untagged images expire after 14 days, at most 20 images kept                                                                                                   |
+| ECR `<env>/api`, `/web`, `/tools`      | Immutable tags, scan on push, AES256, no forced deletion; no lifecycle policy: images never expire automatically ([cleanup](#image-retention-and-cleanup))                                                               |
 | Secrets `app-database`, `migrator-db…` | Containers only, 30-day recovery window; values written by the operator, never by Terraform                                                                                                                              |
 | SSM parameter `/<env>/release`         | Non-secret, digest-pinned image references; created as `unset`, never overwritten by Terraform                                                                                                                           |
 | IAM instance role + profile            | One inline policy (below); Terraform removes any other inline or managed policy on apply                                                                                                                                 |
@@ -106,8 +106,8 @@ The existing `deploy/Dockerfile` targets are reused unchanged: `api` (pruned Nod
 1000), `web` (Caddy + SPA, uid 1000) and `tools` (Prisma migrations). Their pinned base images
 are multi-platform indexes with `linux/amd64` and `linux/arm64` (checked 2026-11-26 with
 `docker buildx imagetools inspect`). Each image is built for exactly the instance platform
-(`terraform output image_platform`) and pushed as a single-platform manifest, so ECR's untagged
-rule never sees index children:
+(`terraform output image_platform`) and pushed as a single-platform manifest, so the digest in a
+release names exactly that image and no untagged index children accumulate:
 
 ```sh
 docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
@@ -197,8 +197,22 @@ postgresql://tradeflow_app:<hex>@<database_address>:5432/tradeflow?sslmode=verif
 ```
 
 User data downloads the Region's RDS CA bundle over verified HTTPS to `/etc/tradeflow/rds-ca.pem`
-and mounts it read-only. The start script refuses an application URL without
-`sslmode=verify-full` and that CA path. The server side refuses plaintext (`rds.force_ssl=1`).
+and mounts it read-only. Before writing the URL for the API, the start script pipes it on
+standard input (never as an argument) to `check-database-url`, a verbatim copy of
+[`infra/aws/templates/check-database-url.sh`](../infra/aws/templates/check-database-url.sh). It
+accepts only the shape above: a `postgresql://` URL whose query is exactly `sslmode=verify-full`
+and `sslrootcert=/etc/tradeflow/rds-ca.pem`, each once, in either order. The parser URL-decodes
+parameter names and values and lets the last repeat win, so a substring check would pass
+`...&sslmode=no-verify`, which turns certificate verification off. The check therefore refuses
+any other or repeated parameter, any percent-encoding, `+`, `;`, fragment or empty part in the
+query, whitespace, control or non-ASCII characters, and a malformed user, host, port or database.
+Rejection messages never repeat the URL. Its tests (`pnpm test:infra`, also in the CI `iac` job)
+run the real script against the locked `pg` 8.23.1 and `pg-connection-string` 2.14.1. For every
+case they record what the client would have done. They also connect the actual `pg` client to a
+local TLS endpoint: an accepted URL refuses a wrong hostname and an unknown CA, and the rejected
+duplicate-`sslmode` URL would have connected to an untrusted server. Changing the URL contract or
+updating either package means updating the script and these tests together. The server side
+refuses plaintext (`rds.force_ssl=1`).
 Migrations run Prisma's schema engine, whose documented TLS parameters differ
 (`sslmode=require&sslcert=/etc/tradeflow/rds-ca.pem&sslaccept=strict`). Before trusting it, the
 rehearsal must show that it rejects a wrong CA and a wrong hostname.
@@ -268,7 +282,47 @@ repositories pinned by digest, pulls the image and checks its architecture. Whil
 is `unset`, both units retry every 30 s and log `No release yet`. To release: push the images,
 run any migrations (next section), `aws ssm put-parameter --overwrite` the JSON, then
 `sudo systemctl restart tradeflow-api tradeflow-edge` in an SSM session. Rolling back is the
-same with the previous digests, provided the schema is still compatible with them.
+same with the previous digests, provided the schema is still compatible with them and the
+images are still in ECR (next section).
+
+### Image retention and cleanup
+
+The repositories have no lifecycle policy, so ECR never deletes an image on its own. ECR expiry
+rules count images or measure age; they cannot tell whether the release parameter or a rollback
+plan still names a digest. The start script pulls the released digests from ECR before every
+container start. A deleted digest therefore breaks the next restart, instance replacement or
+rollback, not only a new instance. The cost of this default: storage grows with every pushed
+build until an operator deletes images (see the [cost worksheet](aws-cost-worksheet.md)), and
+`terraform destroy` stops at non-empty repositories. Only operator credentials can delete
+images; the instance role can only pull.
+
+Proposed cleanup, unrehearsed, for each of the `api`, `web` and `tools` repositories:
+
+1. Decide what to keep. Keep the digests in the current release parameter and in each designated
+   rollback release, at least the previous one. Keep the `tools` digest that matches each kept
+   release, and anything pushed for a release that has not been set yet.
+   `aws ssm get-parameter-history --name /tradeflow-portfolio/release` lists earlier releases
+   (SSM keeps the last 100 versions).
+2. List the images, oldest first:
+
+   ```sh
+   aws ecr describe-images --repository-name tradeflow-portfolio/api \
+     --query 'sort_by(imageDetails, &imagePushedAt)[].{digest: imageDigest, tags: join(`,`, imageTags || `[]`), pushed: imagePushedAt, bytes: imageSizeInBytes}' \
+     --output table
+   ```
+
+3. Read the release parameter again immediately before deleting, and never delete a digest it
+   names or one kept in step 1.
+4. Delete only digests chosen one by one:
+
+   ```sh
+   aws ecr batch-delete-image --repository-name tradeflow-portfolio/api \
+     --image-ids imageDigest=sha256:<digest>
+   ```
+
+   Never select by tag pattern, by age or with a "keep the newest N" script. Deletion is
+   permanent. Rebuilding produces a new digest unless the build is reproducible, so a deleted
+   rollback image means a new release, not a rollback.
 
 ### Explicit operator operations
 
@@ -339,7 +393,7 @@ conservative outcome. Reconciliation uses the maintenance identity.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | RDS                      | Deletion protection; final snapshot `tradeflow-<env>-final` (an existing snapshot of that name makes destroy fail); automated backups retained after deletion until their retention ends |
 | Document bucket          | `force_destroy = false`: a bucket with objects or versions cannot be destroyed; versions kept indefinitely                                                                               |
-| ECR repositories         | `force_delete = false`: a repository with images cannot be destroyed                                                                                                                     |
+| ECR repositories         | `force_delete = false`: a repository with images cannot be destroyed; images never expire automatically, only [explicit cleanup](#image-retention-and-cleanup) removes them              |
 | Secrets                  | 30-day recovery window. The RDS master secret is deleted with the instance (AWS documents this)                                                                                          |
 | Caddy volume             | Final snapshot on destroy                                                                                                                                                                |
 | Root volume, Elastic IP  | Deleted/released with the instance/configuration                                                                                                                                         |
@@ -350,6 +404,30 @@ deliberately empties them or turns protection off. The retained snapshots, versi
 keep costing money: see [retained costs](aws-cost-worksheet.md#after-terraform-destroy).
 
 ## Verification
+
+### Review fixes: strict database TLS check, no image expiry (2026-11-26)
+
+An independent review found that the start script's substring check accepted
+`...?sslmode=verify-full&sslrootcert=/etc/tradeflow/rds-ca.pem&sslmode=no-verify`, where the
+locked parser uses the last `sslmode` and turns verification off. It also found that the
+"newest 20 images" ECR rule could delete a digest the release parameter still named. Commands
+actually run, all offline:
+
+| Kind                    | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Result                                                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static                  | `terraform fmt -check -recursive infra/aws`; in `infra/aws` and `infra/aws/bootstrap`: `terraform init -backend=false -input=false -lockfile=readonly`, `terraform validate`. Terraform 1.17.2 `windows_amd64` downloaded to a temporary directory: archive matched the signed `SHA256SUMS`, good signature from HashiCorp key `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`. Provider data and plugin cache outside the repository; AWS config and credential files pointed at nonexistent paths                                                | Passed; AWS provider 6.74.0 installed from the committed lock (signed by HashiCorp); lock files unchanged                                                                                                                                                                                                                 |
+| `terraform test`        | Mock providers only. `user_data_contract` now asserts that user data installs `check-database-url` verbatim and runs it before writing the API's secret file; the registry run also asserts AES256 encryption                                                                                                                                                                                                                                                                                                                                          | 22 passed (main) + 2 passed (bootstrap). Two template mutations (the gate line removed; the embedded script replaced) each failed `user_data_contract`                                                                                                                                                                    |
+| `pnpm test:infra`       | The real `check-database-url.sh` under bash, with the locked `pg` 8.23.1 / `pg-connection-string` 2.14.1. 4 accepted URLs, each verified by the client against the RDS bundle. 60 rejected URLs, each also run through the client: 21 would weaken TLS (verification off, another CA or another host), 38 would still verify, 1 would fail to start. Argument and NUL refusal, no URL fragment in messages. Four `pg` handshakes against a local TLS endpoint with throwaway openssl certificates. Static guard: no ECR expiry resource in either root | 72 passed on Windows (Git Bash 5.2.37, Node 24.11.1) and 72 passed in a disposable `node:24-bookworm` container (bash 5.2.15, OpenSSL 3.0.22, frozen-lockfile install)                                                                                                                                                    |
+| Mutation check (script) | Seven variants of the check, each swapped in temporarily: the reviewed substring check; `sslmode` or `sslrootcert` allowed more than once; unknown parameters allowed; any CA path allowed; `%` allowed in the query; the printable-ASCII check removed                                                                                                                                                                                                                                                                                                | The substring check failed 41 tests and four variants failed 1–4 each. A first pass let the repeated-`sslrootcert` variant through; a case was added and it now fails. The `%` and printable-ASCII variants pass because the exact-value allowlist and anchored patterns already reject those inputs (overlapping layers) |
+| User data               | Rendered with fictional inputs through `terraform console` (12,804 of 16,384 bytes); `bash -n` and ShellCheck 0.11.0 on it and its four embedded scripts                                                                                                                                                                                                                                                                                                                                                                                               | Passed; the embedded check is byte-identical to the tested file                                                                                                                                                                                                                                                           |
+| Formatting              | `pnpm format:check`, `git diff --check`, ESLint on the new test files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Passed                                                                                                                                                                                                                                                                                                                    |
+| Local deployment        | `pnpm deploy:verify` on Windows, Docker 29.9.3 (images, Caddyfile and application unchanged)                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Passed: 1 test, 8 steps, no retries (5.3 min); containers, volumes, networks and image tags matched the pre-run state                                                                                                                                                                                                     |
+| **Not performed**       | Any AWS API call, real plan/apply/destroy, the check on an instance or against RDS, an ECR cleanup command (the commands in [Image retention and cleanup](#image-retention-and-cleanup) are unrehearsed), plus everything listed below                                                                                                                                                                                                                                                                                                                 | Next step                                                                                                                                                                                                                                                                                                                 |
+
+### Foundation (commit 50de086)
+
+The DB TLS mutation below was caught by a substring assertion, but the check itself was still
+too loose; the review fixes above replace it.
 
 | Kind                                   | What                                                                                                                                                                                                                                                                                                         | Result (2026-11-26)                                                                                                                                                                          |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

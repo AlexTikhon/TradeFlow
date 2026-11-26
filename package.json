@@ -24,6 +24,7 @@
     "demo:portfolio": "pnpm codegen && pnpm --filter @tradeflow/e2e demo:portfolio",
     "demo:portfolio:verify": "pnpm codegen && pnpm --filter @tradeflow/e2e demo:portfolio:verify",
     "demo:portfolio:rehearse-reset": "pnpm codegen && pnpm --filter @tradeflow/e2e demo:portfolio:rehearse-reset",
+    "test:infra": "node --test \"infra/aws/tests/*.test.js\"",
     "deploy:mock": "pnpm --filter @tradeflow/e2e deploy:mock",
     "deploy:verify": "pnpm --filter @tradeflow/contracts build && pnpm --filter @tradeflow/e2e deploy:verify",
     "db:up": "docker compose up -d --wait postgres",

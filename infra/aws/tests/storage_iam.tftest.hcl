@@ -174,6 +174,11 @@ run "registry_secrets_and_release_are_retained" {
   }
 
   assert {
+    condition     = alltrue([for r in aws_ecr_repository.image : r.encryption_configuration[0].encryption_type == "AES256"])
+    error_message = "Repositories must be encrypted at rest."
+  }
+
+  assert {
     condition     = keys(aws_ecr_repository.image) == ["api", "tools", "web"]
     error_message = "One repository per existing Dockerfile target."
   }

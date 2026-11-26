@@ -232,6 +232,7 @@ API docs are at <http://localhost:3000/api/docs>.
 | `pnpm build`                         | Production builds of contracts, API and web                        |
 | `pnpm check`                         | CI's verify job: format, lint, typecheck, test, build              |
 | `pnpm test:e2e`                      | Browser smoke tests in Chromium (CI's e2e job, not `check`)        |
+| `pnpm test:infra`                    | Offline `infra/aws` checks in Node (CI's iac job, not `check`)     |
 | `pnpm demo`                          | A fresh, isolated demo until Ctrl+C; nothing is kept               |
 | `pnpm demo:verify`                   | Walkthrough 2 in Chromium on a fresh demo (CI's demo job)          |
 | `pnpm demo:portfolio`                | The demo plus a guided sign-in and a showcase voyage               |

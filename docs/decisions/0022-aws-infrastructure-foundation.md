@@ -31,7 +31,12 @@ separate `infra/aws/bootstrap` for the remote-state bucket. Details are in
 - **Images and releases:** three ECR repositories with immutable tags. The instance runs the
   digests named in an SSM parameter, so a replacement instance returns to the last release.
   Images are built for the instance's architecture, which is a required input checked against
-  the instance type.
+  the instance type. Images never expire automatically: no ECR expiry rule can tell whether a
+  digest is still released or kept for rollback, so cleanup is an explicit operator step that
+  preserves those digests.
+- **Database TLS:** the instance accepts the application URL only in one literal shape
+  (`sslmode=verify-full` and the RDS CA path, each exactly once). The check is tested against
+  the locked node-postgres parser, which honors the last repeated parameter.
 - **Credentials:** one instance role with an exact inline policy. IMDS hop limit 2 lets the API
   container obtain it; a host firewall rule keeps every other container away from IMDS.
 - **Operations:** migrations and any fixture preparation stay explicit operator commands.
@@ -67,3 +72,5 @@ separate `infra/aws/bootstrap` for the remote-state bucket. Details are in
   issuance and restore are proven only in the next, provisioning step.
 - Retained resources (final snapshots, versions, images, secrets in their recovery window) keep
   costing money after destroy ([cost worksheet](../aws-cost-worksheet.md)).
+- Registry storage grows with every pushed build until an operator deletes specific digests.
+  Forgetting cleanup costs money slowly; automatic expiry could break a restart or rollback.
