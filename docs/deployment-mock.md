@@ -65,7 +65,11 @@ topology behind another ingress without reviewing how that ingress supplies addr
 - changing spoofed forwarding headers cannot move sign-in attempts to a fresh budget;
 - sign-out revokes the prior session; no API/DB/S3 ports are published and API/edge are non-root;
 - the API, as uid 1000 with only its mounted mock CA, completes a verified HTTPS request to the
-  private S3 endpoint, which refuses it anonymously (403).
+  private S3 endpoint, which refuses it anonymously (403);
+- a request through the edge with a spoofed `X-Request-ID`, a bearer token and a secret in its
+  path and query gets a fresh server-generated `X-Request-ID`; the API container's own log has
+  exactly that id on an `unmatched` 404 lifecycle record, and neither the spoofed id nor the
+  secret appears in its log.
 
 Separate API integration tests check trusted versus untrusted peers and the nearest-untrusted
 address rule. The existing E2E suite remains the business-flow regression coverage. The mock's
@@ -80,8 +84,17 @@ included), `e2e/deploy/diagnostics.ts` writes evidence to `e2e/.output/deploy/di
 
 - `summary.txt`: the reason, the Compose project and each service's state;
 - `api.log`, `edge.log`, `s3.log`: the last 300 lines per service, at most 64 KiB each;
-- `upload-response.json`: status, media type, size and Problem Details fields of an
-  unexpected upload response.
+- `upload-response.json`: status, media type, `requestId` (the response's `X-Request-ID`), size
+  and Problem Details fields of an unexpected upload response.
+
+The API writes one JSON lifecycle record per request on standard output
+([HTTP diagnostics](architecture.md#http-diagnostics)), so `api.log` holds them. To find the
+server's side of the failed upload, search `api.log` for the `requestId` from
+`upload-response.json`: its record has the route template, status, duration, outcome and, for a
+5xx, the error's class, code and a few stack frames. For the 2026-11-25 CA failure below that
+would have read `"error":{"source":"exception","name":"Error","code":"UNABLE_TO_GET_ISSUER_CERT_LOCALLY",…}`
+(the TLS error's code; not re-run). Records contain no URL, header, body or message, so the
+sanitizer below has nothing extra to redact in them; it re-serializes them unchanged.
 
 Before writing, the run's generated database password and S3 keys are replaced, and so are
 cookies, `Authorization`/signature/credential values, database URL passwords, private keys,
@@ -189,6 +202,25 @@ not hosted evidence: hosted `deploy` success is unverified until CI runs on this
 This does not prove AWS IAM/instance roles, EC2 metadata access, RDS permissions or server
 certificates, VPC/firewall behavior, public DNS/ACME, managed backups or hosted availability.
 The mock DB user and S3 identity have broader fixture privileges than the future hosted roles.
+
+### HTTP diagnostics, local verification, 2026-11-26
+
+Server-generated request ids and one JSON lifecycle record per request
+([HTTP diagnostics](architecture.md#http-diagnostics)) were verified on Windows (Node 24.11.1,
+pnpm 11.9.0, Docker 29.9.3 with the WSL2 backend), on the working tree committed after
+`bd9c233`:
+
+| Check                            | Result                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm check`                     | Passed against a disposable PostgreSQL 18.6 container on 127.0.0.1:5544, checked over TCP first (server address = the container's, database `tradeflow_test`, role `tradeflow`, postmaster started with the container): contracts 193, API 857 (42 files), web 520 (22 files), build                                                    |
+| New API tests                    | 17 unit (lifecycle races, listener release, failing sink, spoofed id, route/method allowlist, failure classification) and 17 integration through the real pipeline (success, guard and validation rejections, 5xx, 40 concurrent requests, unmatched routes, aborts, downloads, SSE, failing sink, disabled)                            |
+| `pnpm demo:verify`               | Passed (1 test) with `HTTP_REQUEST_LOG=bogus` in the caller's shell: the API would refuse that value, so it was not inherited                                                                                                                                                                                                           |
+| `pnpm demo:portfolio:verify`     | Passed (3 tests), with the same caller value                                                                                                                                                                                                                                                                                            |
+| `pnpm deploy:verify`             | Passed: 1 test, 8 steps, no retries. Through the HTTPS edge, a spoofed `X-Request-ID` was replaced by a fresh id, the API container's log had exactly one `unmatched` 404 record with it, and neither the spoofed id nor the request's secret appeared in that log                                                                      |
+| `pnpm check`, first two attempts | Failed only in `document-review-migration`'s cleanup hook (all 857 tests passed): its `DROP DATABASE` checkpoint synced 37,876 files in 10.8 s against a 10 s hook limit, after every suite's `TRUNCATE`. The unchanged `bd9c233` integration project took 8.0 s (28,958 files) on the same server and passed. The hook now allows 60 s |
+
+The two first attempts are recorded because the margin was real: CI on Linux syncs faster, but
+the hook's cost grows with the number of tests before it. Hosted CI has not run this change.
 
 ## Stop and recover
 

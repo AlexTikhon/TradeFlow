@@ -1,6 +1,13 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { VoyageChangeType, VoyageStreamMessage } from '@tradeflow/contracts';
 import type { Response } from 'express';
+import {
+  outsideRequestContext,
+  type RequestContext,
+  type RequestFailure,
+  requestContextOf,
+} from '../../common/http/request-context.js';
+import { describeFailure } from '../../common/http/request-failure.js';
 import type { Principal } from '../auth/principal.js';
 import { SessionPrincipals } from '../auth/session-principals.js';
 import { CounterpartyContracts } from './counterparty-contracts.js';
@@ -50,6 +57,11 @@ interface Stream {
   readonly principal: Principal;
   readonly voyageId: string;
   readonly response: Response;
+  /**
+   * The diagnostic context of the request that opened the stream. Deliveries and rechecks run
+   * from timers and other requests' publications, so failures are noted here explicitly.
+   */
+  readonly diagnostics: RequestContext | undefined;
   /** Undelivered signals: contract id → the types of change under it, coalesced. */
   readonly pending: Map<string, Set<VoyageChangeType>>;
   unsubscribe: () => void;
@@ -77,7 +89,6 @@ interface Stream {
  */
 @Injectable()
 export class VoyageEventStreams implements OnModuleDestroy {
-  private readonly logger = new Logger(VoyageEventStreams.name);
   private readonly streams = new Set<Stream>();
   /** Streams being opened (their access is being checked), each by how to interrupt it. */
   private readonly openings = new Set<(reason: Interruption) => void>();
@@ -138,14 +149,18 @@ export class VoyageEventStreams implements OnModuleDestroy {
       principal,
       voyageId,
       response,
+      diagnostics: requestContextOf(response),
       pending: new Map(),
       unsubscribe: () => undefined,
       busy: false,
       closed: false,
     };
     // Subscribe before READY: whatever commits after the client hears READY is signalled.
+    // The publisher is another request: the delivery it schedules must not carry its context.
     stream.unsubscribe = this.bus.subscribe(voyageId, (change) => {
-      this.enqueue(stream, change);
+      outsideRequestContext(() => {
+        this.enqueue(stream, change);
+      });
     });
     this.streams.add(stream);
     response.on('close', () => {
@@ -185,8 +200,7 @@ export class VoyageEventStreams implements OnModuleDestroy {
     let types = stream.pending.get(change.contractId);
     if (!types) {
       if (stream.pending.size >= this.options.maxPendingContracts) {
-        this.logger.warn(`Closing a stream of voyage ${stream.voyageId}: too many pending signals`);
-        this.close(stream);
+        this.cutOff(stream, { source: 'event_stream', name: 'PendingSignalLimit' });
         return;
       }
       types = new Set();
@@ -245,7 +259,7 @@ export class VoyageEventStreams implements OnModuleDestroy {
     if (stream.closed) return;
     if (stream.response.writableNeedDrain) {
       // The client is not reading; buffering for it would grow without bound.
-      this.close(stream);
+      this.cutOff(stream, { source: 'event_stream', name: 'ClientNotReading' });
       return;
     }
     stream.response.write(chunk);
@@ -263,18 +277,27 @@ export class VoyageEventStreams implements OnModuleDestroy {
 
   /** A check could not be made: the stream cannot be kept authorized, so it ends. */
   private fail(stream: Stream, error: unknown): void {
-    this.logger.error(
-      `Closing a stream of voyage ${stream.voyageId}: its access could not be checked`,
-      error instanceof Error ? error.stack : String(error),
-    );
+    this.cutOff(stream, describeFailure('event_stream', error));
+  }
+
+  /**
+   * Ends a stream early for a reason on the server's side. The request's lifecycle record says
+   * `stream_failed` with `failure`: the one record of it, carrying the request id.
+   */
+  private cutOff(stream: Stream, failure: RequestFailure): void {
+    if (stream.closed) return;
+    stream.diagnostics?.noteStreamFailure(failure);
     this.close(stream);
   }
 
   private startRechecks(): void {
     if (this.recheckTimer || this.shutDown) return;
-    this.recheckTimer = setInterval(() => {
-      void this.recheckAll();
-    }, this.options.recheckIntervalMs);
+    // Started while the first stream's request is handled, but serves every stream after it.
+    this.recheckTimer = outsideRequestContext(() =>
+      setInterval(() => {
+        void this.recheckAll();
+      }, this.options.recheckIntervalMs),
+    );
     this.recheckTimer.unref();
   }
 

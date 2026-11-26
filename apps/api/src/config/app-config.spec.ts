@@ -15,6 +15,26 @@ describe('loadConfig', () => {
       signIn: { attemptsPerMinute: 20 },
       documentStorage: { driver: 'local', directory: resolve('var/documents') },
       demoWriteBudget: { enabled: false },
+      httpRequestLog: true,
+    });
+  });
+
+  describe('HTTP request log', () => {
+    const base = { DATABASE_URL: 'postgresql://u:p@db/t' };
+
+    it('is on unless explicitly disabled, in every environment', () => {
+      for (const NODE_ENV of ['development', 'test', 'production']) {
+        const env = { ...base, NODE_ENV, DOCUMENT_STORAGE_DIR: '/srv/documents' };
+        expect(loadConfig(env).httpRequestLog).toBe(true);
+        expect(loadConfig({ ...env, HTTP_REQUEST_LOG: 'enabled' }).httpRequestLog).toBe(true);
+        expect(loadConfig({ ...env, HTTP_REQUEST_LOG: 'disabled' }).httpRequestLog).toBe(false);
+      }
+    });
+
+    it('refuses anything else', () => {
+      for (const value of ['', 'true', 'off', 'Enabled', ' enabled']) {
+        expect(() => loadConfig({ ...base, HTTP_REQUEST_LOG: value })).toThrow(/HTTP_REQUEST_LOG/);
+      }
     });
   });
 

@@ -140,11 +140,15 @@ describe('Document review migrations on a populated database', () => {
     );
   });
 
+  // DROP DATABASE forces an immediate checkpoint, which first waits for one in progress. Every
+  // earlier suite's TRUNCATE gives each table, index and sequence new files, and the checkpoint
+  // syncs them all: on Docker Desktop, 29k-38k files took 8-11 s after a full run. Vitest's
+  // default 10 s hook timeout is too tight for that.
   afterAll(async () => {
     await scratch.$disconnect();
     await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS "${SCRATCH_DATABASE}" WITH (FORCE)`);
     await admin.$disconnect();
-  });
+  }, 60_000);
 
   it('counts the uploads of existing documents, changes nothing else, and takes new writes', async () => {
     await apply((name) => name < FIRST_REVIEW_MIGRATION);

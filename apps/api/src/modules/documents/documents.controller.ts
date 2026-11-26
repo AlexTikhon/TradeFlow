@@ -6,7 +6,6 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
-  Logger,
   NotFoundException,
   Param,
   Post,
@@ -65,6 +64,8 @@ import {
   writePrecondition,
 } from '../../common/http/preconditions.js';
 import { toProblemDetails } from '../../common/http/problem-details.filter.js';
+import { requestContextOf } from '../../common/http/request-context.js';
+import { describeFailure } from '../../common/http/request-failure.js';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe.js';
 import { ApiSessionAuth, CurrentPrincipal } from '../auth/auth.decorators.js';
 import type { Principal } from '../auth/principal.js';
@@ -122,8 +123,6 @@ const NOT_VISIBLE =
 @ApiParam({ name: 'voyageId', schema: { type: 'string', format: 'uuid' } })
 @Controller('voyages/:voyageId')
 export class DocumentsController {
-  private readonly logger = new Logger(DocumentsController.name);
-
   constructor(private readonly documents: DocumentsService) {}
 
   @Get('documents')
@@ -404,22 +403,29 @@ export class DocumentsController {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     response.setHeader('Repr-Digest', `sha-256=:${version.sha256.toString('base64')}:`);
+    // Taken now: the stream's callbacks do not necessarily run in this request's async context.
+    const diagnostics = requestContextOf(response);
     return new StreamableFile(version.content, {
       type: DOCUMENT_MEDIA_TYPE,
       disposition: attachmentDisposition(version.fileName),
       length: version.sizeBytes,
     })
-      .setErrorLogger((error) => {
-        this.logger.error(`${request.method} ${request.originalUrl} failed`, error.stack);
+      .setErrorLogger(() => {
+        // Called when writing to the client fails: the client went away. The request's
+        // lifecycle record already says so (`aborted`); Nest's default would log a second,
+        // unstructured record with the error's message.
       })
-      .setErrorHandler(() => {
-        // Never Nest's default (a 400 carrying the error's message). Before the first byte, a
-        // generic 500; after it, the connection is cut, so the client sees a short download
-        // instead of a complete-looking file.
+      .setErrorHandler((error) => {
+        // The stored bytes could not be read. Never Nest's default (a 400 carrying the error's
+        // message). Before the first byte, a generic 500; after it, the connection is cut, so
+        // the client sees a short download instead of a complete-looking file.
+        const failure = describeFailure('download_stream', error);
         if (response.headersSent) {
+          diagnostics?.noteStreamFailure(failure);
           response.destroy();
           return;
         }
+        diagnostics?.noteFailure(failure);
         const problem = toProblemDetails(new Error('stream failed'), request.originalUrl);
         response.removeHeader('Content-Disposition');
         response.removeHeader('Content-Length');

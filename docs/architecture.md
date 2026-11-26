@@ -56,7 +56,9 @@ src/
                                 local-filesystem implementation (ADR 0013)
   common/http/                  ProblemDetailsFilter, ZodValidationPipe, OpenAPI wiring;
                                 multipart-file.ts (one streamed file, limits enforced while it
-                                arrives), content-disposition.ts (attachment headers)
+                                arrives), content-disposition.ts (attachment headers);
+                                http-diagnostics.ts, request-context.ts, request-failure.ts
+                                (request ids and lifecycle records, see HTTP diagnostics)
   health/                       GET /api/health (readiness: DB answers SELECT 1)
   modules/
     auth/
@@ -194,6 +196,10 @@ storage.
 
 ### Request pipeline
 
+Before any of the steps below, the first middleware (`HttpDiagnostics.middleware`, registered
+first in `app.setup.ts`, ahead of the body parsers) gives the request a server-generated id and
+context and watches for its end ([HTTP diagnostics](#http-diagnostics)).
+
 1. **Guards** ([ADR 0007](decisions/0007-cookie-sessions.md)). `SameOriginGuard` refuses unsafe
    methods that the browser marks as cross-site (403). `AuthGuard` then resolves the session
    cookie into a `Principal { sessionId, userId, organizationId }`, or answers 401, unless the
@@ -223,8 +229,9 @@ storage.
    }
    ```
 
-   Errors with status 5xx are logged with their stack trace and returned with a generic `detail`,
-   so internals never leak. An integration test asserts this. An error can be answered before
+   Errors with status 5xx are returned with a generic `detail`, so internals never leak, and
+   described by bounded fields on the request's lifecycle record
+   ([HTTP diagnostics](#http-diagnostics)). Integration tests assert both. An error can be answered before
    the request's body was read (an upload refused by a guard, or by its service before receiving
    the file); Node would then reset the connection under a client still sending, so the filter
    first reads and discards the rest of the body, up to 16 MiB (`unread-body.ts`), and closes the
@@ -234,6 +241,138 @@ storage.
    is signed in, so no browser or proxy may keep them. Express's automatic `ETag` (a body hash)
    is switched off: entity tags appear only where writes are conditional, and mean an aggregate
    version ([ADR 0012](decisions/0012-documentary-instructions.md)).
+
+### HTTP diagnostics
+
+An operator can find the server's account of a failed request from what the client saw, without
+any credential, business content or document byte being logged.
+
+**Request ids.** Every response, from any route, guard, pipe, filter, stream or 404, carries
+`X-Request-ID`: a fresh `randomUUID()` made by the server when the request arrives. A caller's
+`X-Request-ID` is never read, so clients can neither choose nor inject log identifiers. The id is
+returned whether or not records are written.
+
+**Context.** `HttpDiagnostics.middleware` is the first middleware, so its context covers body
+parsing, guards, pipes, handlers and the exception filter. The rest of the pipeline runs inside
+`AsyncLocalStorage.run` (`currentRequestContext()`), and the context is also bound to the
+response object (`requestContextOf(response)`) for callbacks whose async context is not the
+request's: stream error handlers, and event-stream work driven by a shared timer or by another
+request's publication. Nothing keeps a "current request" in mutable shared state; long-lived
+work started during a request (the event streams' recheck timer, bus deliveries) runs under
+`outsideRequestContext`, so it never carries that request's context.
+
+**Lifecycle records.** With `HTTP_REQUEST_LOG=enabled` (the default, in every environment) each
+request ends with exactly one single-line JSON record on standard output. These are all the
+fields there are:
+
+| Field        | Value                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------- |
+| `timestamp`  | When the request ended, ISO 8601 UTC                                                    |
+| `level`      | `error` (a 5xx, or a noted failure), `warn` (`aborted`), otherwise `info`               |
+| `event`      | Always `http.request`                                                                   |
+| `requestId`  | The id returned as `X-Request-ID`                                                       |
+| `method`     | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, or `OTHER`                  |
+| `route`      | The matched route template, e.g. `/api/voyages/:voyageId/events`; `unmatched` otherwise |
+| `status`     | The status sent; `null` when the connection ended before any response headers were sent |
+| `durationMs` | Arrival to end, from the monotonic clock (`performance.now()`), to 0.1 ms               |
+| `outcome`    | `completed`, `aborted` or `stream_failed` (below)                                       |
+| `error`      | Only on 5xx answers and failed streams: `{ source, name, code?, frames? }`              |
+
+- `completed`: the whole response was handed to the connection, whatever its status.
+  `aborted`: the connection closed first and no server-side failure was noted (the client left).
+  `stream_failed`: a download or event stream that had started was ended early by the server
+  (unreadable bytes mid-download, a failed access check, a stream bound).
+- One record per request: the first of the response's `finish` and `close` events writes it and
+  removes both listeners (Node emits `close` after `finish` too). Streams are not buffered and
+  nothing is recorded per chunk, event or heartbeat; the record is written when they end.
+- `error.source` is `exception` (the exception filter, 5xx only), `download_stream` (the
+  download's byte stream failed) or `event_stream`. `name` is the error's class name from its
+  constructor (never the assignable `error.name`) or a fixed reason (`PendingSignalLimit`,
+  `ClientNotReading`); `code` is a library code matching `[A-Za-z0-9_]{1,64}` (`ECONNREFUSED`,
+  `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `P2002`, `23505`); `frames` are up to 5 stack frames,
+  each validated as a code location and read only after the stack's message header. An error's
+  message, properties and cause are never read. The filter, the download error handler and the
+  event streams note the failure on the context instead of logging it themselves, so a failure
+  has one record.
+- Not recorded: URLs, query strings, path parameter values, headers (cookies, `Authorization`),
+  request or response bodies, file names, PDF bytes, SQL or its parameters, connection strings,
+  signed storage URLs. Values are built from an allowlist and serialized with `JSON.stringify`,
+  so no field can break a line. Client-facing answers are unchanged: Problem Details
+  (`instance` still echoes the request path) and generic 5xx `detail`s.
+- The sink is injectable (`HTTP_DIAGNOSTICS_SINK`, standard output by default). A sink that
+  throws loses that record and changes nothing else: the response, its cleanup and later
+  requests are unaffected.
+
+**Troubleshooting with a request id.** A client reports a failed download; its response carried
+`X-Request-ID: 9e33e7a5-bb80-422d-9af4-d0d1c6058371`. Search the API's output for the id:
+
+```sh
+docker logs <api-container> 2>&1 | grep 9e33e7a5-bb80-422d-9af4-d0d1c6058371
+```
+
+```json
+{
+  "timestamp": "2026-11-26T07:26:09.154Z",
+  "level": "error",
+  "event": "http.request",
+  "requestId": "9e33e7a5-bb80-422d-9af4-d0d1c6058371",
+  "method": "GET",
+  "route": "/api/voyages/:voyageId/contracts/:contractId/documentary-instructions/revisions/:revisionNumber/documents/:documentType/versions/:versionNumber/content",
+  "status": 500,
+  "durationMs": 14.6,
+  "outcome": "completed",
+  "error": {
+    "source": "download_stream",
+    "name": "Error",
+    "code": "EIO",
+    "frames": [
+      "at Readable.read (node:internal/streams/readable:737:12)",
+      "at resume_ (node:internal/streams/readable:1260:12)",
+      "at process.processTicksAndRejections (node:internal/process/task_queues:89:21)"
+    ]
+  }
+}
+```
+
+The stored bytes failed with `EIO` before the first byte was sent, so the client got a generic
+500 (`completed`, not `stream_failed`). Which voyage and document it was is deliberately not in
+the record: the client knows the URL it requested; the server-side cause is in the storage
+provider's own logs and the reconciliation tools ([runbook](storage-recovery.md)). (This record
+was captured from the integration suite, which injects that failure.)
+
+**Remaining unstructured logs.** Only the HTTP lifecycle is structured. Nest's own startup lines
+(`main.ts`, Nest's bootstrap) and these service-level `Logger` calls remain plain Nest text
+lines without a request id, unchanged: `DocumentsService` (a staged upload that could not be
+discarded, bytes kept after a commit with an unknown outcome or a failed removal: orphans to
+reconcile), `S3DocumentStorage` (a failed upload's object that could not be removed),
+`NoticesService`, `DocumentaryInstructionsService` and `DocumentsService` ("Could not announce",
+a publication that failed after commit) and `VoyageEventBus` (a listener that throws). They may
+contain error messages, stacks, voyage ids and storage keys. They describe secondary facts
+(orphans, lost signals), not the request's own failure, which is on its record; correlate them
+with a request by time only. The failures that used to be logged as well as answered (the
+exception filter's 5xx, a download's stream error, an event stream's failed check or bound, the
+write budget's unavailable store) are now on the request's record only.
+
+**Tests.** Unit tests drive the middleware with a fake response (`finish`/`close` races, listener
+release, failing sink, spoofed id, route and method allowlist, monotonic duration) and the
+classifier with hostile errors. `test/http-diagnostics.int-spec.ts` goes through the real
+pipeline with a capturing sink and a test-only probe controller: success, guard and validation
+rejections, a 5xx, 40 concurrent requests whose handlers read their own context after timers and
+body parsing, spoofed ids, unmatched routes, a client abort, downloads (completed, failed before
+the first byte, cut off after it, abandoned by the client), event streams (client gone, ended
+normally, a failed check attributed to its own stream), a failing sink and `HTTP_REQUEST_LOG`
+disabled. Every record must be one line of JSON with only the fields above and none of the
+synthetic secrets sent in headers, query strings, paths, bodies, file names and errors, nor the
+run's session tokens. `pnpm deploy:verify` checks ids and records through the HTTPS edge
+([results](deployment-mock.md#http-diagnostics-local-verification-2026-11-26)).
+
+**Limitations.** Records go to standard output only: there is no retention, shipping, sampling or
+rate limit here, which is the runtime's job (Docker's log driver in the mock). A process killed
+mid-request writes no record for it. Requests rejected by Node's HTTP parser before Express sees
+them (malformed request lines, oversized headers) get neither an id nor a record. `route` is
+`unmatched` for everything no controller route matched, including Swagger UI's static assets
+under `/api/docs`. Durations end when the response is handed to the connection, not when the
+client has received it. No metrics, traces or OpenTelemetry.
 
 ### OpenAPI
 
@@ -298,7 +437,8 @@ PostgreSQL 18 with Prisma 7 and the `node-postgres` driver adapter
    contracts' positions and the counterparties' organizations and roles. No match (missing or not
    a participant) is the same 404 as `GET /voyages/:voyageId`.
 3. The stored contracts go through the domain rules (`toLinearTradeString`). A chain that breaks
-   them is a data error: it is logged and answered with a generic 500, never shown as valid.
+   them is a data error: it is answered with a generic 500 and recorded on the request's
+   lifecycle record, never shown as valid.
 4. The response is the topology only, `{ parties, edges }`
    ([ADR 0010](decisions/0010-trade-string-visibility.md)). An integration test pins its exact
    field set, so participant ids, contract ids or later columns cannot slip in.
@@ -412,7 +552,7 @@ timeout.
 3. Delete the files no row named. Delete files in `staging/` older than one hour as well.
 
 The reverse (a row whose object is missing) can only follow a power loss right after a rename, or
-damage to the directory; a download then answers a logged 500, and the version must be restored
+damage to the directory; a download then answers a recorded 500, and the version must be restored
 from a backup of the directory. Downloads check every file against its size and SHA-256 before
 serving it, so damaged bytes are never served as if they were the upload.
 
@@ -526,6 +666,13 @@ approval or a rejection).
 - **Bounds.** Pending signals are coalesced per contract and type while a check runs; a stream
   that would hold more than 32 contracts' worth, or whose client stops reading (socket buffer
   full), is closed. Client disconnects unsubscribe at once; shutdown ends every stream.
+- **Diagnostics.** A stream's one lifecycle record is written when it ends: `aborted` when the
+  client left, `completed` when the server ended it normally (session or participation gone,
+  shutdown), `stream_failed` when a check failed or a bound above cut it off
+  (`PendingSignalLimit`, `ClientNotReading`). Nothing is recorded per event or heartbeat. Each
+  stream keeps its own request's context: the shared recheck timer and bus deliveries run
+  outside any request's context, so a failure is never attributed to the request that started
+  the timer or published the change.
 - **Best effort.** The bus is in this process's memory: no durable replay, no `Last-Event-ID`,
   and no delivery across instances. Clients reconcile through REST on every `READY` and poll
   while disconnected.
@@ -591,7 +738,10 @@ working directory outside production and is required in production.
 calls `DemoWriteBudget.admit()` once, after its access and precondition checks and before its
 first write or storage staging; one conditional upsert on `demo_write_budget`, on a pool of its
 own, admits it or answers 429 (`/problems/demo-write-budget-exhausted`). Only the portfolio
-launcher sets them.
+launcher sets them. `HTTP_REQUEST_LOG` (`enabled` by default, or `disabled`; anything else is a
+startup error) turns the HTTP lifecycle records on or off; `X-Request-ID` is returned either way
+([HTTP diagnostics](#http-diagnostics)). The demo launchers drop a caller's value, so their API
+always keeps the default.
 
 ## Frontend (apps/web)
 
@@ -1077,7 +1227,7 @@ above still describe the default adapter.
 | Concern      | Today                                                                                        | Planned                                              |
 | ------------ | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | Health       | `GET /api/health` checks DB; `/api/health/live` checks process liveness                      | Hosted readiness/liveness monitoring                 |
-| Logging      | Nest logger; 5xx logged with stack                                                           | Structured JSON logs, request ids, OpenTelemetry     |
+| Logging      | `X-Request-ID`; one JSON record per HTTP request; service logs still plain Nest text         | Request ids in service logs, log shipping, OTel      |
 | Config       | Validated env, fail fast                                                                     | Secrets manager in cloud environments                |
 | Shutdown     | `enableShutdownHooks`; open event streams ended; Prisma disconnects on destroy               | —                                                    |
 | Real-time    | SSE per voyage from one process; best effort, no replay; idle streams re-checked every 30 s  | Shared bus (outbox + broker) for several instances   |

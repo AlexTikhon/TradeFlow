@@ -1,8 +1,12 @@
 import type { Server } from 'node:http';
-import type { INestApplication } from '@nestjs/common';
+import type { INestApplication, Type } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AppModule } from '../../src/app.module.js';
 import { configureApp } from '../../src/app.setup.js';
+import {
+  HTTP_DIAGNOSTICS_SINK,
+  type HttpDiagnosticsSink,
+} from '../../src/common/http/http-diagnostics.js';
 import { APP_CONFIG, type AppConfig } from '../../src/config/app-config.js';
 import { PrismaService } from '../../src/infrastructure/prisma/prisma.service.js';
 import { DocumentStorage } from '../../src/infrastructure/storage/document-storage.js';
@@ -51,7 +55,16 @@ export interface TestAppOptions {
   actionCenterClock?: Clock;
   /** Sign-in admission options instead of the suites' default (see SUITE_SIGN_IN_ADMISSION). */
   signInAdmission?: SignInAdmissionOptions;
+  /**
+   * Where HTTP lifecycle records go. By default they are built and dropped, so suites that do
+   * not test them keep their output readable.
+   */
+  diagnosticsSink?: HttpDiagnosticsSink;
+  /** Further modules to load beside the application (test-only controllers, say). */
+  imports?: Type[];
 }
+
+const discardSink: HttpDiagnosticsSink = { write: () => undefined };
 
 /** Boots the real application module and HTTP pipeline against the test database. */
 export async function createTestApp({
@@ -61,8 +74,11 @@ export async function createTestApp({
   eventStreams,
   actionCenterClock,
   signInAdmission = SUITE_SIGN_IN_ADMISSION,
+  diagnosticsSink = discardSink,
+  imports = [],
 }: TestAppOptions = {}): Promise<TestApp> {
-  const builder = Test.createTestingModule({ imports: [AppModule] });
+  const builder = Test.createTestingModule({ imports: [AppModule, ...imports] });
+  builder.overrideProvider(HTTP_DIAGNOSTICS_SINK).useValue(diagnosticsSink);
   if (config) builder.overrideProvider(APP_CONFIG).useValue(config);
   builder.overrideProvider(SIGN_IN_ADMISSION_OPTIONS).useValue(signInAdmission);
   if (storage) {

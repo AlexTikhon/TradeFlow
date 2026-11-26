@@ -85,6 +85,8 @@ const APP_VARIABLES = new Set([
   // Portfolio-demo write protection (ADR 0021): set only by a profile that asks for it.
   'PORTFOLIO_DEMO_WRITE_PROTECTION',
   'PORTFOLIO_DEMO_WRITE_ALLOWANCE',
+  // HTTP lifecycle records: the demo keeps the API's default (on), whatever the caller's shell says.
+  'HTTP_REQUEST_LOG',
 ]);
 
 function inheritedEnvironment(): NodeJS.ProcessEnv {

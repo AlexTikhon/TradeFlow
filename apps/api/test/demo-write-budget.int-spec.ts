@@ -12,6 +12,7 @@ import {
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DEMO_WRITE_BUDGET_EXHAUSTED } from '../src/common/http/demo-write-budget-exhausted.exception.js';
+import type { HttpRequestRecord } from '../src/common/http/http-diagnostics.js';
 import { loadConfig } from '../src/config/app-config.js';
 import type { UserRole } from '../src/generated/prisma/client.js';
 import { signIn } from './support/auth.js';
@@ -85,11 +86,27 @@ describe('Portfolio-demo write budget', () => {
   let ctx: TestApp;
   let storage: TestStorage;
   const events = new TestEventBus();
+  /** The HTTP lifecycle records of the suite's main application. */
+  const records: HttpRequestRecord[] = [];
   const api = () => request(ctx.server);
+
+  /** Records are written once the response is handed over, so the client can be first. */
+  async function until(condition: () => boolean, timeoutMs = 3_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error('Condition not met in time');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
 
   beforeAll(async () => {
     storage = await TestStorage.create();
-    ctx = await createTestApp({ config: protectedConfig(ALLOWANCE), storage, eventBus: events });
+    ctx = await createTestApp({
+      config: protectedConfig(ALLOWANCE),
+      storage,
+      eventBus: events,
+      diagnosticsSink: { write: (line) => records.push(JSON.parse(line) as HttpRequestRecord) },
+    });
   });
 
   afterAll(async () => {
@@ -798,6 +815,19 @@ describe('Portfolio-demo write budget', () => {
           detail: 'An unexpected error occurred.',
         });
         expect(JSON.stringify(response.body)).not.toMatch(/budget|store/i);
+        // One record, naming the database failure behind the 503, without its message.
+        const id = String(response.headers['x-request-id']);
+        await until(() => records.some((record) => record.requestId === id));
+        const recorded = records.filter((record) => record.requestId === id);
+        expect(recorded).toEqual([
+          expect.objectContaining({
+            status: 503,
+            level: 'error',
+            error: expect.objectContaining({ source: 'exception' }) as unknown,
+          }),
+        ]);
+        expect(recorded[0]?.error?.name).not.toBe('ServiceUnavailableException');
+        expect(JSON.stringify(recorded)).not.toMatch(/budget store unavailable/);
       }
     } finally {
       await ctx.prisma.$executeRawUnsafe(

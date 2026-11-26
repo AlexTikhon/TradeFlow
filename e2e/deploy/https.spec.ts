@@ -133,6 +133,43 @@ test('production containers: HTTPS cookies, proxy trust, streamed updates and du
     expect(objectStore, 'API HTTPS request to the private S3 endpoint').toBe('403');
   });
 
+  await test.step('request ids cross the edge and correlate with the API’s own records', async () => {
+    const spoofed = 'mock-spoofed-request-id';
+    const secret = `mock-secret-${randomBytes(6).toString('hex')}`;
+    const traced = await request(`/api/does-not-exist/${secret}?token=${secret}`, {
+      headers: { 'X-Request-ID': spoofed, Authorization: `Bearer ${secret}` },
+    });
+    expect(traced.status).toBe(404);
+    const requestId = traced.headers['x-request-id'];
+    expect(requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(requestId).not.toBe(spoofed);
+    // The API writes the record once the response is handed over: poll its container log.
+    let line: string | undefined;
+    await expect
+      .poll(
+        async () => {
+          const logs = await docker('logs', '--tail', '500', apiId);
+          line = logs.split('\n').find((candidate) => candidate.includes(String(requestId)));
+          return line !== undefined;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+    expect(JSON.parse(line ?? '')).toMatchObject({
+      event: 'http.request',
+      requestId,
+      method: 'GET',
+      route: 'unmatched',
+      status: 404,
+      outcome: 'completed',
+    });
+    const logs = await docker('logs', '--tail', '500', apiId);
+    expect(logs).not.toContain(secret);
+    expect(logs).not.toContain(spoofed);
+  });
+
   // Trust only this run's verified leaf public key in Chromium; never disable verification globally
   // or modify the user's OS trust store. All Node HTTPS requests verify its real CA chain too.
   const browser = await chromium.launch({

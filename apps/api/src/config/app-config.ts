@@ -61,6 +61,9 @@ const EnvironmentSchema = z
       .transform(Number)
       .pipe(z.number().int().min(1).max(MAX_DEMO_WRITE_ALLOWANCE))
       .optional(),
+    // One JSON lifecycle record per HTTP request on standard output (docs/architecture.md, HTTP
+    // diagnostics). On unless explicitly disabled; X-Request-ID is returned either way.
+    HTTP_REQUEST_LOG: z.enum(['enabled', 'disabled']).default('enabled'),
   })
   .superRefine((env, context) => {
     // An allowance without protection would look like a limit while nothing is limited.
@@ -135,6 +138,8 @@ export interface AppConfig {
   documentStorage: LocalStorageConfig | S3StorageConfig;
   /** Portfolio-demo write protection (ADR 0021). Disabled everywhere unless opted in. */
   demoWriteBudget: DemoWriteBudgetConfig;
+  /** Whether each HTTP request ends with a JSON lifecycle record (HTTP_REQUEST_LOG). */
+  httpRequestLog: boolean;
 }
 
 export type DemoWriteBudgetConfig =
@@ -185,6 +190,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     S3_PREFIX,
     PORTFOLIO_DEMO_WRITE_PROTECTION,
     PORTFOLIO_DEMO_WRITE_ALLOWANCE,
+    HTTP_REQUEST_LOG,
   } = result.data;
   return {
     nodeEnv: NODE_ENV,
@@ -215,6 +221,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
             allowance: PORTFOLIO_DEMO_WRITE_ALLOWANCE ?? DEFAULT_DEMO_WRITE_ALLOWANCE,
           }
         : { enabled: false },
+    httpRequestLog: HTTP_REQUEST_LOG === 'enabled',
   };
 }
 

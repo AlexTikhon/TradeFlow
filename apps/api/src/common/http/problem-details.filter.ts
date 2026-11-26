@@ -5,7 +5,6 @@ import {
   type ExceptionFilter,
   HttpException,
   HttpStatus,
-  Logger,
 } from '@nestjs/common';
 import { PROBLEM_CONTENT_TYPE, type ProblemDetails, ProblemTypes } from '@tradeflow/contracts';
 import type { Request, Response } from 'express';
@@ -13,18 +12,20 @@ import {
   DEMO_WRITE_BUDGET_EXHAUSTED_TITLE,
   DemoWriteBudgetExhaustedException,
 } from './demo-write-budget-exhausted.exception.js';
+import { requestContextOf } from './request-context.js';
+import { describeFailure } from './request-failure.js';
 import { RequestValidationException } from './request-validation.exception.js';
 import { TooManyRequestsException } from './too-many-requests.exception.js';
 import { discardUnreadBody } from './unread-body.js';
 
 /**
  * Renders every error as RFC 9457 Problem Details so clients handle one error shape.
- * Unexpected errors are logged in full but never leak internals to the client.
+ * Unexpected errors never leak internals to the client. A 5xx is described, by bounded fields
+ * only, on the request's lifecycle record (HTTP diagnostics), which carries the request id the
+ * response returned: one record per failure, without the URL, the message or the error's data.
  */
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
-  private readonly logger = new Logger(ProblemDetailsFilter.name);
-
   catch(exception: unknown, host: ArgumentsHost): void {
     const http = host.switchToHttp();
     const request = http.getRequest<Request>();
@@ -32,10 +33,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
 
     const problem = toProblemDetails(exception, request.originalUrl);
     if (problem.status >= 500) {
-      this.logger.error(
-        `${request.method} ${request.originalUrl} failed`,
-        exception instanceof Error ? exception.stack : String(exception),
-      );
+      requestContextOf(response)?.noteFailure(describeFailure('exception', exception));
     }
 
     // An upload refused before its body was read is answered once the client has sent it all:

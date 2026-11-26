@@ -68,9 +68,13 @@ export function tail(text: string, limit = MAX_CHARACTERS): string {
     : `[${String(text.length - limit)} earlier characters omitted]\n${text.slice(-limit)}`;
 }
 
+/** The API's server-generated request ids (X-Request-ID). */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 /**
- * Status, media type, size and the Problem Details fields of an unexpected API response. No
- * response headers besides the media type, and no body unless it is a short JSON object.
+ * Status, media type, request id, size and the Problem Details fields of an unexpected API
+ * response. The request id finds the response's record in `api.log`. No other response headers,
+ * and no body unless it is a short JSON object.
  */
 export function describeResponse(response: {
   status: number;
@@ -78,9 +82,11 @@ export function describeResponse(response: {
   body: Buffer;
 }): string {
   const contentType = response.headers['content-type'] ?? '';
+  const requestId = response.headers['x-request-id'];
   const summary: Record<string, unknown> = {
     status: response.status,
     contentType,
+    requestId: typeof requestId === 'string' && REQUEST_ID.test(requestId) ? requestId : null,
     bodyBytes: response.body.length,
   };
   if (/json/i.test(contentType) && response.body.length <= 16 * 1024) {

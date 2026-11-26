@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { HttpDiagnosticsModule } from './common/http/http-diagnostics.js';
 import { ConfigModule } from './config/app-config.js';
 import { HealthModule } from './health/health.module.js';
 import { PrismaModule } from './infrastructure/prisma/prisma.module.js';
@@ -16,6 +17,7 @@ import { VoyagesModule } from './modules/voyages/voyages.module.js';
 @Module({
   imports: [
     ConfigModule,
+    HttpDiagnosticsModule,
     PrismaModule,
     DemoWriteBudgetModule,
     HealthModule,

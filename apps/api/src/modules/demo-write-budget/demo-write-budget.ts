@@ -1,7 +1,6 @@
 import {
   Inject,
   Injectable,
-  Logger,
   type OnModuleDestroy,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -9,6 +8,8 @@ import { ApiTooManyRequestsResponse } from '@nestjs/swagger';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { DemoWriteBudgetExhaustedException } from '../../common/http/demo-write-budget-exhausted.exception.js';
 import { schemaRef } from '../../common/http/openapi.js';
+import { currentRequestContext } from '../../common/http/request-context.js';
+import { describeFailure } from '../../common/http/request-failure.js';
 import { APP_CONFIG, type AppConfig, type DemoWriteBudgetConfig } from '../../config/app-config.js';
 import { PrismaClient } from '../../generated/prisma/client.js';
 
@@ -32,11 +33,10 @@ const ADMISSION_TIMEOUT_MS = 5_000;
  * transaction is keeping from the shared pool.
  *
  * Fails closed: if the count cannot be read and raised, the command is refused (503) before it
- * writes anything, and the cause is logged.
+ * writes anything, and the cause is recorded on the request's lifecycle record.
  */
 @Injectable()
 export class DemoWriteBudget implements OnModuleDestroy {
-  private readonly logger = new Logger(DemoWriteBudget.name);
   private readonly budget: DemoWriteBudgetConfig;
   private readonly connection: PrismaClient | undefined;
 
@@ -70,10 +70,9 @@ export class DemoWriteBudget implements OnModuleDestroy {
         WHERE budget.admitted < ${this.budget.allowance}::int
         RETURNING budget.admitted`;
     } catch (error) {
-      this.logger.error(
-        'Could not check the demo write budget; the command was refused before any write.',
-        error instanceof Error ? error.stack : String(error),
-      );
+      // The cause, by bounded fields, on the request's lifecycle record (HTTP diagnostics): the
+      // first failure noted wins over the 503 the exception filter then sees.
+      currentRequestContext()?.noteFailure(describeFailure('exception', error));
       throw new ServiceUnavailableException('Changes are temporarily unavailable.');
     }
     if (admitted.length === 0) {

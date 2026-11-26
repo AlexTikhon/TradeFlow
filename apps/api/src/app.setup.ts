@@ -1,5 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import type { Application, NextFunction, Request, Response } from 'express';
+import { HttpDiagnostics } from './common/http/http-diagnostics.js';
 import { setupOpenApi } from './common/http/openapi.js';
 import { ProblemDetailsFilter } from './common/http/problem-details.filter.js';
 import { SessionCookie } from './modules/auth/session-cookie.js';
@@ -10,6 +11,9 @@ import { APP_CONFIG, type AppConfig } from './config/app-config.js';
  * so tests exercise exactly the prefixes, filters and docs that production serves.
  */
 export function configureApp(app: INestApplication): INestApplication {
+  // First, before the body parsers and every route: each request gets its id and context, and
+  // its lifecycle record, whoever answers it (a guard, a pipe, the filter, a stream, a 404).
+  app.use(app.get(HttpDiagnostics).middleware);
   app.setGlobalPrefix('api');
   // Entity tags mean "this version of an aggregate" and are set explicitly where writes are
   // conditional (ADR 0012). Express's automatic body-hash tags would look usable in If-Match
