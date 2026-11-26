@@ -9,6 +9,8 @@ Terraform for TradeFlow's first AWS environment: a small portfolio deployment th
 > provisioned, no AWS account or credentials were used, no image was published, no DNS changed,
 > and no real `terraform plan`, `apply` or `destroy` has run. Every AWS behavior below is a
 > design to prove in the next step, not observed evidence. See [Verification](#verification).
+> The next step's operator runbook, hosted verification suite and recovery rehearsal are in
+> [hosted verification](hosted-verification.md); they have run only against the local mock.
 
 ## Resources proposed
 
@@ -71,6 +73,10 @@ There is no variable for a password, a connection string or a notification recip
 7. Confirmation or change of each default above, especially backup retention and environment name.
 8. Whether `PORTFOLIO_DEMO_WRITE_PROTECTION` (ADR 0021) is enabled when the portfolio rollout happens
    (not set by this configuration).
+
+The full deployment gate for step 9 also needs a maintenance identity for recovery, retention
+decisions (including where the rehearsal backup is kept) and controlled fixture preparation. All
+of it is listed in [hosted verification, deployment gate](hosted-verification.md#deployment-gate-inputs-still-needed).
 
 ## State
 
@@ -336,9 +342,11 @@ aws secretsmanager get-secret-value --secret-id <migrator_database_secret_arn> \
   | sudo tradeflow-migrate <registry>/tradeflow-portfolio/tools@sha256:<digest>
 ```
 
-The fictional demo seed (published passwords) must never run against this environment. Portfolio
-fixture preparation, a hosted reset schedule and public rollout are later steps and are not
-implemented here.
+The fictional demo seed (published passwords) must never run against this environment. The
+hosted verification accounts are prepared explicitly with `scripts/verification-fixtures.ts`
+(passwords on standard input, confirmed target; [fixtures](hosted-verification.md#verification-fixtures)).
+Portfolio fixtures for visitors, a hosted reset schedule and public rollout are later steps and
+are not implemented here.
 
 ### Instance replacement
 
@@ -362,7 +370,10 @@ that has the prefix-scoped `ListBucket`/`ListBucketMultipartUploads` the instanc
 Restore into a new empty database and bucket or prefix, never over the current one. RDS automated
 backups and point-in-time restore exist and S3 never expires complete objects, but an online or
 point-in-time pairing of the two stores is not established (ADR 0019). No AWS restore has been
-rehearsed, so RPO/RTO are unknown.
+rehearsed, so RPO/RTO are unknown. The concrete step-by-step rehearsal is in
+[hosted verification](hosted-verification.md#recovery-rehearsal). It covers identity guards
+(`restore-check`), a restore prefix the instance role can read (`tradeflow/restore-<date>/`),
+per-database role grants, and the one API pointed at the restored stores.
 
 ## IAM
 

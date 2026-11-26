@@ -1,37 +1,16 @@
-import { createHash, X509Certificate } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { connect } from 'node:tls';
 import { PASSED_MARKER } from './diagnostics.js';
 import { startMock } from './mock-run.js';
+import { verifiedLeafSpki } from './tls.js';
 
 export default async function setup() {
   const run = await startMock((message) => {
     console.log(`[deploy] ${message}`);
   });
   try {
-    const certificate = await new Promise<Buffer>((resolve, reject) => {
-      const socket = connect(
-        {
-          host: '127.0.0.1',
-          port: Number(new URL(run.baseURL).port),
-          servername: 'localhost',
-          ca: run.ca,
-        },
-        () => {
-          const certificate = socket.getPeerCertificate().raw;
-          socket.end();
-          resolve(certificate);
-        },
-      );
-      socket.once('error', reject);
-    });
-    const publicKey = new X509Certificate(certificate).publicKey.export({
-      type: 'spki',
-      format: 'der',
-    });
-    const spki = createHash('sha256').update(publicKey).digest('base64');
+    const spki = await verifiedLeafSpki(run.baseURL, run.ca);
     // Only non-secret run coordinates and its ephemeral CA. Never serialize browser auth state.
     const metadata = join(run.root, 'run.json');
     await writeFile(

@@ -13,7 +13,10 @@
     "demo:portfolio:rehearse-reset": "node --import tsx demo/portfolio-reset-rehearsal.ts",
     "deploy:mock": "node --import tsx deploy/mock.ts",
     "deploy:verify": "playwright test --config deploy/playwright.config.ts",
-    "typecheck": "tsc --noEmit"
+    "hosted:verify": "node --import tsx hosted/verify.ts",
+    "hosted:rehearse-mock": "node --import tsx hosted/mock-rehearsal.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"hosted/*.test.ts\""
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

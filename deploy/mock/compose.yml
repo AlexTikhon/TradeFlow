@@ -1,4 +1,6 @@
 # Local mock only. All credentials and paths are supplied by e2e/deploy/mock-run.ts.
+# MOCK_DATABASE_NAME and MOCK_S3_BUCKET are set only by the hosted rehearsal, to point the one API
+# at restored targets (e2e/hosted/mock-rehearsal.ts); the defaults are the run's own stores.
 services:
   permissions:
     image: ${MOCK_API_IMAGE:?}
@@ -48,10 +50,10 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: '3000'
-      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/tradeflow_mock
+      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/${MOCK_DATABASE_NAME:-tradeflow_mock}
       TRUSTED_PROXY_CIDRS: ${MOCK_TRUSTED_PROXY:?}
       DOCUMENT_STORAGE_DRIVER: s3
-      S3_BUCKET: tradeflow-mock
+      S3_BUCKET: ${MOCK_S3_BUCKET:-tradeflow-mock}
       S3_REGION: us-east-1
       S3_ENDPOINT: https://objects:9443
       S3_FORCE_PATH_STYLE: 'true'
@@ -115,7 +117,7 @@ services:
     profiles: [ops]
     image: ${MOCK_TOOLS_IMAGE:?}
     environment:
-      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/tradeflow_mock
+      DATABASE_URL: postgresql://tradeflow:${MOCK_DATABASE_PASSWORD:?}@postgres:5432/${MOCK_DATABASE_NAME:-tradeflow_mock}
       NODE_ENV: development
       DOCUMENT_STORAGE_DRIVER: local
       DOCUMENT_STORAGE_DIR: /tmp/seed-documents

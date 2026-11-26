@@ -14,7 +14,18 @@ pnpm install --frozen-lockfile
 pnpm --filter @tradeflow/e2e exec playwright install chromium
 pnpm deploy:verify   # builds, starts, exercises and removes an isolated mock
 pnpm deploy:mock     # interactive; Ctrl+C or q + Enter removes this run
+pnpm hosted:rehearse-mock   # the hosted runbook end to end against a mock (see below)
 ```
+
+`pnpm hosted:rehearse-mock` starts a mock **without** the demo seed and prepares the hosted
+verification accounts through the controlled fixture tool. It runs the
+[hosted verification suite](hosted-verification.md) with an API restart done outside the
+browser test, then the paired backup and an identity-guarded restore into a new empty database
+and bucket. The one API is recreated against the restored stores and the suite runs again in
+restored mode. Only that rehearsal sets `MOCK_DATABASE_NAME`/`MOCK_S3_BUCKET` in
+`deploy/mock/compose.yml`; their defaults are the run's own `tradeflow_mock`/`tradeflow-mock`.
+The suite's local trust (this run's CA and CA-verified leaf key) is a separate input, accepted
+only for `https://localhost`. Hosted targets always use public trust.
 
 `pnpm deploy:verify` first builds `@tradeflow/contracts` on the host, because the Playwright
 scenario imports its response schemas from `packages/contracts/dist`, which a fresh checkout
@@ -281,4 +292,5 @@ RDS and S3, ECR, the scoped instance role and SSM access, with offline tests, th
 contract and a [cost worksheet](aws-cost-worksheet.md). It has not been applied. Before
 provisioning, select the account/role, region, domain, resource sizes and cost ceiling (the
 exact list is in that document), then rehearse the paired recovery procedure in that account
-before keeping non-disposable data.
+before keeping non-disposable data. The operator sequence, the hosted suite and the evidence
+template are in [hosted verification](hosted-verification.md).

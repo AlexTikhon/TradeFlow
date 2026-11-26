@@ -160,7 +160,10 @@ deleted at any time.
 - No hosted deployment. The [local AWS mock](deployment-mock.md) exercises production mode,
   HTTPS and `Secure`/`__Host-` cookies. It uses a private mock CA and local services, so AWS
   IAM/RDS, public DNS, ACME and cloud backups remain unverified. The regular demo still runs
-  `NODE_ENV=development` over plain HTTP on loopback.
+  `NODE_ENV=development` over plain HTTP on loopback. Step 9's
+  [hosted verification](hosted-verification.md) is ready to run but has not been: the suite, the
+  fixture tool, the recovery guards and the runbook were proven only against the mock
+  (`pnpm hosted:rehearse-mock`). Its deployment gate lists the inputs still to be chosen.
 - Only seeded organizations and users, with a public demo password. No password reset, SSO or
   lockout. Seeded notice times are relative to the seed, so their states drift.
 - Browser coverage is Chromium only, and no person has run any walkthrough
@@ -180,7 +183,8 @@ deleted at any time.
 4. `pnpm install --frozen-lockfile`.
 5. Run [verification](#verification-against-isolated-postgresql-only) against a throwaway
    server, then remove it. Also run `pnpm test:storage` and `pnpm deploy:verify`, which own
-   their database/object servers and cleanup.
+   their database/object servers and cleanup, and `pnpm hosted:rehearse-mock` when touching
+   deployment, recovery or the hosted suite.
 6. Before `pnpm db:up`, check who owns port 5433.
 7. Re-read [Limitations](mvp-status.md#limitations) and the directions below before choosing
    work.
@@ -197,7 +201,10 @@ Not release blockers for the local demo. In order, each only when its trigger oc
    compensation guarantees of [ADR 0013](decisions/0013-documents.md) unchanged; and a written
    backup-and-restore procedure for the database and the object store together has been
    rehearsed into an empty environment, after which every stored document version downloads
-   with its recorded SHA-256 and the orphan check reports nothing unexplained.
+   with its recorded SHA-256 and the orphan check reports nothing unexplained. _Since
+   2026-11-26:_ the hosted rehearsal is written down step by step
+   ([runbook](hosted-verification.md#recovery-rehearsal)), with identity guards, and passed end
+   to end against the local mock. The rehearsal in AWS remains.
 2. **Durable delivery across API instances.** _Trigger:_ a requirement to run more than one API
    instance, or notifications that must not be lost. _Done when:_ events are written to an
    outbox in the command's transaction and relayed through a shared bus; a test with two API

@@ -60,12 +60,19 @@ Inspect incomplete multipart uploads separately using the provider's tooling.
    ```
 
    The object directory must not exist; export refuses to overwrite it. Each UUID file is checked
-   against the DB's size/SHA-256. `manifest.json` is written last. A failed export is incomplete;
-   keep writers stopped, discard that backup attempt explicitly, and start with a new directory.
+   against the DB's size/SHA-256. `source.json` is written first and `manifest.json` last. A
+   failed export is incomplete: keep writers stopped, discard that backup attempt explicitly, and
+   start with a new directory.
 
-4. Record SHA-256 of `database.dump` and the manifest in the backup record, along with the source
-   commit, schema migration level and snapshot time. Encrypt the complete backup and retain an
-   independently protected copy. Never commit it or upload it as CI diagnostics.
+   `source.json` holds no secret. It records the source database's identity (URL host, port and
+   name, server address and port, and the cluster's system identifier where the role may read
+   it), the source bucket and prefix, and the **recovery point**: the latest audit event time,
+   the audit event and document version counts, and the latest applied migration. Restore checks
+   compare targets against it before writing.
+
+4. Record SHA-256 of `database.dump`, the manifest and `source.json` in the backup record, along
+   with the source commit and the recovery point from `source.json`. Encrypt the complete backup
+   and retain an independently protected copy. Never commit it or upload it as CI diagnostics.
 5. Resume writers after successful verification. The recovery point is this maintenance snapshot;
    later writes are not part of it. Measure recovery time during each real environment rehearsal.
 
@@ -77,7 +84,25 @@ separate protocol coordinating database recovery points and object retention.
 1. Verify the backup record/digests. Create an **empty** PostgreSQL database and a private bucket
    or an empty dedicated prefix. Point `DATABASE_URL` and S3 variables at these targets. Keep
    API/seed writers stopped; never restore over the current environment.
-2. Restore the database with PostgreSQL 18 tools. Do not use `--clean` or the seed:
+2. Before the first write, check the targets. This is read-only:
+
+   ```powershell
+   pnpm --filter @tradeflow/api storage:objects restore-check C:\Backups\tf-001\objects
+   ```
+
+   It prints the source (from `source.json`) and target identities and refuses, naming every
+   reason, when:
+   - the target database is the source (same name on the same cluster, host or server address);
+   - the target database has any table, sequence, view or enum outside the system schemas;
+   - the target's object key space (`<prefix>objects/`) contains or lies inside the source's in
+     the same bucket;
+   - anything exists under the target prefix.
+
+   A sibling prefix such as `tradeflow/restore-1/` beside a source at `tradeflow/` is a separate
+   key space and is allowed. A role scoped to `tradeflow/*` can then read it. Compare the
+   printed identities with the intended ones as well.
+
+3. Restore the database with PostgreSQL 18 tools. Do not use `--clean` or the seed:
 
    ```powershell
    pg_restore --dbname=$env:DATABASE_URL --exit-on-error --no-owner --no-acl C:\Backups\tf-001\database.dump
@@ -85,17 +110,26 @@ separate protocol coordinating database recovery points and object retention.
    pnpm --filter @tradeflow/api storage:objects verify
    ```
 
-   Import requires the manifest to match **every** restored document-version row and refuses a
-   nonempty object prefix. It checks bytes against recorded size/SHA-256 and conditionally creates
-   original UUID keys. A failed import can leave a partial target; inspect it, then recreate the
-   isolated target explicitly before retrying. It never overwrites a current object.
+   Before writing, import refuses:
+   - the source's database or object key space;
+   - a restored database whose document versions differ from the manifest, or whose recovery
+     point differs from `source.json` (a dump and an export from different moments);
+   - a nonempty object prefix;
+   - a backup without `source.json`.
 
-3. Require no missing/corrupt files and no unexplained orphans. Start the matching application
+   It checks bytes against recorded size/SHA-256 and conditionally creates original UUID keys. A
+   failed import can leave a partial target; inspect it, then recreate the isolated target
+   explicitly before retrying. It never overwrites a current object.
+
+4. Require no missing/corrupt files and no unexplained orphans. Start the matching application
    version against the restored targets; authenticate both counterparties and download historical
-   and current versions through the API. Check the audit history as well as byte hashes. A restored
-   DB includes sessions: apply the environment's session-revocation policy before exposing it.
-4. Switch traffic only after that validation. Keep the original environment and backup until the
-   recovery is accepted. RPO/RTO and cloud-provider restore coverage have not been established.
+   and current versions through the API (`pnpm hosted:verify --mode restored`, see the
+   [hosted runbook](hosted-verification.md#recovery-rehearsal)). Check the audit history as well
+   as byte hashes. A restored DB includes sessions: apply the environment's session-revocation
+   policy before exposing it.
+5. Switch traffic only after that validation. Keep the original environment and backup until the
+   recovery is accepted. Record the measured restore time and the recovery point. RPO/RTO and
+   cloud-provider restore coverage have not been established.
 
 ## Automated rehearsal
 
@@ -107,8 +141,11 @@ This owns fresh loopback-only PostgreSQL 18 and digest-pinned SeaweedFS 4.17 con
 random credentials. It never uses development `.env`, `DATABASE_URL` or cloud accounts. It runs
 real HTTP document uploads/downloads, multipart failures, competing writes, certain rollback,
 unknown COMMIT, corruption/missing bytes, then `pg_dump` and object export, `pg_restore` into an
-empty database and object import into a new bucket. Every restored version downloads through
-the real API with its original hash; reconciliation must be clean. Containers and temporary
+empty database and object import into a new bucket. `restore-check` must refuse the source with
+all four reasons and a prefix inside the source's object key space, and accept a sibling prefix
+and the empty targets. It must also refuse the restored database once it is no longer empty.
+Import into the source must be refused. Every restored version downloads through the real API
+with its original hash; reconciliation must be clean. Containers and temporary
 backups are removed on success/failure. Requires a running Docker daemon and image downloads.
 
 CI has a separate `storage` job for this command. Hosted results for this change are pending.

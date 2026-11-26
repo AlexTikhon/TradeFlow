@@ -13,8 +13,16 @@ const exec = promisify(execFile);
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const CA_PATH = '/data/caddy/pki/authorities/local/root.crt';
 
-/** Docker Compose resources are exclusively scoped by a random project name, never the dev stack. */
-export async function startMock(onStep: (message: string) => void, signal?: AbortSignal) {
+/**
+ * Docker Compose resources are exclusively scoped by a random project name, never the dev stack.
+ * `demoSeed: false` starts with migrations only: no public-password demo users (the hosted
+ * rehearsal prepares its own accounts, as a hosted environment would).
+ */
+export async function startMock(
+  onStep: (message: string) => void,
+  signal?: AbortSignal,
+  options: { demoSeed?: boolean } = {},
+) {
   const project = `tradeflow-mock-${randomUUID().slice(0, 8)}`;
   // Evidence of an earlier run must not be mistaken for this one's.
   await rm(DIAGNOSTICS_DIR, { recursive: true, force: true });
@@ -221,8 +229,19 @@ export async function startMock(onStep: (message: string) => void, signal?: Abor
       'migrate',
       'deploy',
     );
-    onStep('Seeding fictional users into this run only');
-    await compose('run', '--rm', '--no-deps', 'tools', 'node', '--import', 'tsx', 'prisma/seed.ts');
+    if (options.demoSeed ?? true) {
+      onStep('Seeding fictional users into this run only');
+      await compose(
+        'run',
+        '--rm',
+        '--no-deps',
+        'tools',
+        'node',
+        '--import',
+        'tsx',
+        'prisma/seed.ts',
+      );
+    }
     onStep('Starting production API with S3 over the mock HTTPS endpoint');
     await compose('up', '--detach', '--wait', '--wait-timeout', '90', 'api');
     const request = (path: string, options: https.RequestOptions = {}, body?: Buffer | string) =>

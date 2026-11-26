@@ -38,6 +38,21 @@ sanitized failure diagnostics passed Linux and Windows reproductions
 ([record](deployment-mock.md#hosted-upload-500-unreadable-mock-ca-on-linux-hosts-2026-11-25));
 a hosted `deploy` pass is still pending.
 
+**Step 9, hosted deployment and recovery verification: prepared, not performed (2026-11-26).**
+The [hosted verification](hosted-verification.md) suite (`pnpm hosted:verify`) is ready, along with:
+
+- the controlled fixture tool;
+- identity guards for restores (`source.json`, `restore-check`, import refusals);
+- the operator runbook, with restart and recovery sequences and the remaining deployment inputs;
+- a [results template](hosted-verification-results.md).
+
+Locally, `pnpm hosted:rehearse-mock` passed end to end against the deployment mock: 22 full-run
+checks, an outside API restart, a paired backup, a guarded restore into a new database and
+bucket, and 8 restored-mode checks. So did `pnpm test:storage` (14 tests) and
+`pnpm deploy:verify` ([record](hosted-verification.md#verification-record-2026-11-26)). Nothing
+ran on AWS, and no remote environment was contacted. Step 9 stays pending until a real hosted
+run and an AWS restore rehearsal pass.
+
 The mock increment passed locally on 2026-10-31: `pnpm check` (1,460 tests and builds),
 `pnpm test:e2e` (14), `pnpm demo:verify` (1) and `pnpm deploy:verify` (one production HTTPS
 scenario, seven steps). Details and limits: [deployment verification](deployment-mock.md#local-verification-2026-10-31).

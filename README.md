@@ -38,6 +38,13 @@ S3 over TLS. `pnpm deploy:mock` keeps that local stack running until stopped. No
 domain is needed; no AWS resources are created. The [AWS infrastructure foundation](docs/aws-infrastructure.md)
 (Terraform in `infra/aws`, offline mock-provider tests, deployment contract and
 [cost worksheet](docs/aws-cost-worksheet.md)) is ready for review; nothing has been provisioned.
+The next step's [hosted verification](docs/hosted-verification.md) is prepared but not performed:
+`pnpm hosted:verify` (an explicit HTTPS origin, credentials from the environment, two
+counterparties and an outsider in Chromium, an operator-controlled API restart), identity-guarded
+recovery tooling, an operator runbook with the remaining deployment inputs, and a
+[results template](docs/hosted-verification-results.md). `pnpm hosted:rehearse-mock` proves them
+end to end against a local mock. Step 9 stays pending until a real hosted run and an AWS restore
+rehearsal pass.
 [Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
 by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
 [handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).

@@ -478,8 +478,46 @@ describe('S3 documents against isolated PostgreSQL and authenticated SeaweedFS',
       await writeFile(join(root, 'database.dump'), dump.stdout, { mode: 0o600 });
       await tool(['export', join(root, 'objects')]);
       await expect(tool(['export', join(root, 'objects')])).rejects.toThrow(); // no overwrite
+      const source = JSON.parse(await readFile(join(root, 'objects', 'source.json'), 'utf8')) as {
+        objects: unknown;
+        recoveryPoint: { documentVersions: number; auditEvents: number };
+      };
+      expect(source.objects).toEqual({
+        bucket: 'tradeflow-storage-test',
+        prefix: environment.S3_PREFIX,
+      });
+      expect(source.recoveryPoint).toMatchObject({
+        documentVersions: 2,
+        auditEvents: await ctx.prisma.auditEvent.count(),
+      });
+      // The guards refuse the source itself before any write, naming every reason.
+      const onSource = tool(['restore-check', join(root, 'objects')]);
+      await expect(onSource).rejects.toThrow(/source database.*not empty.*overlaps.*not empty/s);
       await ctx.prisma.$executeRawUnsafe(`CREATE DATABASE "${targetName}"`);
       await storage.client.send(new CreateBucketCommand({ Bucket: bucket }));
+      const restoredEnv = { ...environment, DATABASE_URL: targetUrl.toString(), S3_BUCKET: bucket };
+      // A prefix inside the source's object key space is refused even when it is still empty.
+      await expect(
+        tool(['restore-check', join(root, 'objects')], {
+          ...restoredEnv,
+          S3_BUCKET: 'tradeflow-storage-test',
+          S3_PREFIX: `${environment.S3_PREFIX}objects/nested/`,
+        }),
+      ).rejects.toThrow(/overlaps/);
+      // A sibling under the source prefix is a separate key space (how a role scoped to the
+      // source prefix can still read a restore). Only the restored database's checks remain.
+      const sibling = await tool(['restore-check', join(root, 'objects')], {
+        ...restoredEnv,
+        S3_BUCKET: 'tradeflow-storage-test',
+        S3_PREFIX: `${environment.S3_PREFIX}restore-sibling/`,
+      });
+      expect(JSON.parse(sibling.stdout)).toMatchObject({ refusals: [] });
+      const checked = await tool(['restore-check', join(root, 'objects')], restoredEnv);
+      expect(JSON.parse(checked.stdout)).toMatchObject({
+        refusals: [],
+        target: { objects: { bucket }, database: { database: targetName } },
+      });
+      await expect(tool(['import', join(root, 'objects')])).rejects.toThrow(/source/);
       await exec(
         'docker',
         ['cp', join(root, 'database.dump'), `${resources.postgresContainer}:/tmp/restore.dump`],
@@ -502,7 +540,9 @@ describe('S3 documents against isolated PostgreSQL and authenticated SeaweedFS',
         ],
         { windowsHide: true },
       );
-      const restoredEnv = { ...environment, DATABASE_URL: targetUrl.toString(), S3_BUCKET: bucket };
+      await expect(tool(['restore-check', join(root, 'objects')], restoredEnv)).rejects.toThrow(
+        /target database is not empty/,
+      );
       const imported = await tool(['import', join(root, 'objects')], restoredEnv);
       expect(JSON.parse(imported.stdout)).toEqual({ versions: 2, problems: [], orphans: [] });
       await expect(tool(['import', join(root, 'objects')], restoredEnv)).rejects.toThrow(); // no overwrite
