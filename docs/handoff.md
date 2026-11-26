@@ -1,9 +1,10 @@
 # Handoff: picking TradeFlow up again
 
-A practical note for whoever restarts work, written at the end of the planned implementation
-(2026-10-28), updated for S3 storage on 2026-10-31. What was verified, where and on which commit is kept in one place:
-[MVP status, at a glance](mvp-status.md#verification-at-a-glance). Read that first; this page
-does not repeat its numbers.
+**Frozen for the local portfolio on 2026-11-26, implementation baseline `7141c1e`.** The owner
+has deferred account setup, publication and real AWS verification. Start with the
+[freeze record](portfolio-freeze.md), including its local demo and resume instructions.
+This page retains the detailed development and recovery procedures. Historical verification,
+with its own commit boundaries, remains in [MVP status](mvp-status.md#verification-at-a-glance).
 
 ## What the product does today
 
@@ -20,7 +21,8 @@ chain of organizations. Signed-in users of seeded organizations can:
 - read a timeline of who did what, see notices, instructions, documents and the timeline update
   live, and work from an Action Center queue whose items open the exact record.
 
-Organizations and users exist only through the seed. Scope and deliberate gaps:
+Organizations and users are prepared by the local seed or the explicit hosted-verification
+fixture tool; there is no account-management UI. Scope and deliberate gaps:
 [README](../README.md#status-original-mvp-complete), [MVP status](mvp-status.md#limitations).
 
 ## Boundaries that must hold
@@ -164,18 +166,23 @@ deleted at any time.
   [hosted verification](hosted-verification.md) is ready to run but has not been: the suite, the
   fixture tool, the recovery guards and the runbook were proven only against the mock
   (`pnpm hosted:rehearse-mock`). Its deployment gate lists the inputs still to be chosen.
-- Only seeded organizations and users, with a public demo password. No password reset, SSO or
-  lockout. Seeded notice times are relative to the seed, so their states drift.
+- Local demo accounts have a public demo password. The hosted verification fixture tool uses
+  separately supplied passwords and explicit operator invocation. There is no account-management
+  UI, password reset or SSO. Seeded notice times are relative to the seed, so their states drift.
 - Browser coverage is Chromium only, and no person has run any walkthrough
   ([records](demo.md#record-of-walkthrough-2)).
-- CI's `verify`, `e2e` and `demo` jobs passed on `d00635f` on Linux
-  ([run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)). Both
-  failure-artifact uploads were skipped. The new `storage` job has no hosted result yet.
+- Hosted CI evidence belongs to earlier SHAs. The recorded `fc62608` run passed `verify`,
+  `e2e`, `demo` and `storage`, while `deploy` failed; its fix was verified locally
+  ([record](deployment-mock.md#hosted-upload-500-unreadable-mock-ca-on-linux-hosts-2026-11-25)).
+  The frozen checkpoint has no hosted CI result. Publication resumes with exact-SHA CI checks.
 
 ## Return-to-work checklist
 
+For publication after the freeze, follow [Resume for publication](portfolio-freeze.md#resume-for-publication)
+first. The checks below are for an explicit return to development, not tasks still running.
+
 1. `git status` and `git log --oneline origin/main..main`: note anything uncommitted or unpushed.
-2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e`, `demo`, `storage` and `deploy`
+2. `gh run list --limit 5`: for the latest pushed commit, confirm `verify`, `e2e`, `demo`, `storage`, `deploy` and `iac`
    all succeeded, then update [at a glance](mvp-status.md#verification-at-a-glance) with the run.
    If a job failed, its diagnostics artifact is kept for seven days.
 3. `node --version`, `pnpm --version`, `docker version`: Node 24.11 or later, pnpm 11.9.0, a

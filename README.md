@@ -14,7 +14,7 @@ documents and obligations. TradeFlow models that shared workspace. Today that me
 organizations taking part in them, the trade string, ETA notices from sellers to buyers,
 documentary instructions from buyers to sellers, the documents sellers present against them, and
 the buyers' decisions on those documents, with a timeline of who did what; notices, documentary instructions, documents and the timeline update live as they change.
-Next come further notices, deadlines and workflow.
+The portfolio scope stops at this workflow; further notices, deadlines and workflow are deferred.
 
 > This is an engineering portfolio project. It is inspired by real commodity-shipping workflow
 > problems, but it is not a clone of any commercial product, and all organizations and people in the
@@ -22,29 +22,33 @@ Next come further notices, deadlines and workflow.
 
 ## Status: original MVP complete
 
-The eight original MVP areas are implemented. The latest hosted run on `d00635f` passed
-`verify`, `e2e` and `demo` ([run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)),
-including sign-in admission and the fresh-voyage walkthrough on Linux. `pnpm demo` starts a
-fresh, isolated demo; `pnpm demo:verify` drives it in Chromium. No person has run a walkthrough.
+**Frozen as a local engineering portfolio on 2026-11-26.** The original MVP, guided portfolio
+showcase, private S3-compatible storage, production HTTPS mock and AWS infrastructure/verification
+tooling are implemented. The owner will publish and verify the hosted environment later.
+[Freeze record and engineering case study](docs/portfolio-freeze.md) defines the delivered scope,
+verification evidence, limitations and the exact restart path. There is no active feature work.
 
-The next increment adds opt-in private S3-compatible document storage and a paired database/object
-[recovery procedure](docs/storage-recovery.md), including `pnpm test:storage` against isolated
-PostgreSQL and an authenticated S3 server. Local storage remains the default. Hosted CI for
-this increment and an actual cloud-provider recovery rehearsal are pending.
+To explore the portfolio, with Node 24.11+, pnpm 11.9.0 and Docker installed:
 
-For the next AWS phase, an isolated [deployment mock](docs/deployment-mock.md) is available:
-`pnpm deploy:verify` exercises production containers, HTTPS cookies, proxy trust, SSE and private
-S3 over TLS. `pnpm deploy:mock` keeps that local stack running until stopped. No AWS account or
-domain is needed; no AWS resources are created. The [AWS infrastructure foundation](docs/aws-infrastructure.md)
-(Terraform in `infra/aws`, offline mock-provider tests, deployment contract and
-[cost worksheet](docs/aws-cost-worksheet.md)) is ready for review; nothing has been provisioned.
-The next step's [hosted verification](docs/hosted-verification.md) is prepared but not performed:
-`pnpm hosted:verify` (an explicit HTTPS origin, credentials from the environment, two
-counterparties and an outsider in Chromium, an operator-controlled API restart), identity-guarded
-recovery tooling, an operator runbook with the remaining deployment inputs, and a
-[results template](docs/hosted-verification-results.md). `pnpm hosted:rehearse-mock` proves them
-end to end against a local mock. Step 9 stays pending until a real hosted run and an AWS restore
-rehearsal pass.
+```sh
+pnpm install --frozen-lockfile
+pnpm demo:portfolio
+```
+
+The command prints a loopback URL and fictional accounts, opens no cloud account, and prepares
+a fresh showcase with missing, awaiting-review, rejected and approved document states. Use
+separate browser profiles or a normal/private window for seller and buyer; tabs share cookies.
+Stop with Ctrl+C or `q` and Enter to remove that run's data. [Demo guide](docs/demo.md#the-portfolio-showcase-pnpm-demoportfolio).
+
+The [HTTPS deployment mock](docs/deployment-mock.md) and
+[paired storage recovery](docs/storage-recovery.md) have local automated evidence. Terraform in
+`infra/aws` has offline mock-provider tests, a [deployment contract](docs/aws-infrastructure.md)
+and a [cost worksheet](docs/aws-cost-worksheet.md); no AWS resources have been provisioned.
+The [hosted verification runbook](docs/hosted-verification.md) and
+[results template](docs/hosted-verification-results.md) are prepared. Actual AWS deployment,
+public HTTPS verification and cloud recovery remain deferred, so roadmap step 9 is not complete.
+Historical hosted CI is recorded against its own SHAs in the acceptance summary; it is not a
+hosted pass for this frozen checkpoint. Automated walkthroughs do not establish a human walkthrough.
 [Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
 by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
 [handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).
@@ -433,6 +437,9 @@ uploads `e2e/.output/demo/` as `demo-diagnostics`, with the same exclusions. The
 
 ## Roadmap
 
+Deferred directions, retained for context. Reopen the frozen scope explicitly before starting
+one; deployment and verification resume through [the freeze handoff](docs/portfolio-freeze.md#resume-for-publication).
+
 1. **Identity and tenant isolation (done, Milestone 2).** Sign-in, sessions, participation-scoped
    voyage access. Since: an in-process sign-in budget and concurrency cap (ADR 0018). Still open:
    a sign-in limit shared between instances, SSO.
@@ -450,8 +457,8 @@ uploads `e2e/.output/demo/` as `demo-diagnostics`, with the same exclusions. The
 4. **Documents.** First slice done (Milestone 7): private PDF upload against an exact
    instruction revision, immutable versions, counterparty-only downloads, local storage behind an
    interface. Buyer review done (Milestone 8): one final decision per exact file version, a
-   rejection with its reason. Next: S3-compatible storage and pre-signed uploads, a scheduled
-   orphan sweep, amending decisions.
+   rejection with its reason. Private S3-compatible storage and paired recovery are implemented
+   (ADR 0019). Deferred: pre-signed uploads, a scheduled orphan sweep, amending decisions.
 5. **Workflow, tasks and deadlines; real-time updates (SSE); background jobs and transactional outbox.**
    Started: a read-only voyage timeline of audit events, and live updates of notices,
    documentary instructions and documents over a per-voyage SSE stream, in process and best

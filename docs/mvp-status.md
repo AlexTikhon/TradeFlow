@@ -1,5 +1,12 @@
 # MVP status: acceptance summary
 
+**Current status, 2026-11-26: frozen as a local portfolio.** Implementation baseline `7141c1e`.
+The owner has deferred publication and actual AWS deployment/verification. The
+[freeze record](portfolio-freeze.md) is the current scope and handoff: it separates checks run
+on that baseline from older evidence below. Step 9's tooling is delivered, while its real
+hosted run and AWS restore rehearsal remain unperformed. These do not block the agreed local
+freeze. Further feature work requires an explicit decision to resume.
+
 TradeFlow's original MVP is complete: all eight areas below are implemented and covered by
 automated tests that passed in Linux CI. Some are complete within deliberate limits, listed
 under [Limitations](#limitations). The [demo](demo.md) walks through every area. Its walkthrough
@@ -12,7 +19,7 @@ verified where, and on which code: [at a glance](#verification-at-a-glance).
 
 ## Verification at a glance
 
-**Updated 2026-10-31:** `d00635f6813c4706f3a02e837e2f5cbd47ae457e` is on `origin/main`.
+**Historical hosted evidence, 2026-10-31:** commit `d00635f6813c4706f3a02e837e2f5cbd47ae457e`.
 [Hosted run 40710589366](https://github.com/AlexTikhon/TradeFlow/actions/runs/40710589366)
 succeeded in all three jobs: `verify`, `e2e`, `demo`. This supersedes the 2026-10-28 statements
 below about unpushed commits, sign-in/demo having no hosted evidence and the demo not running on Linux.
