@@ -1,0 +1,232 @@
+#!/bin/bash
+# TradeFlow instance bootstrap: cloud-init user data, first boot of each instance only.
+# Rendered by Terraform (infra/aws/compute.tf). It contains no secret values: the database URL
+# is read from Secrets Manager at every container start and kept on tmpfs (/run). It never runs
+# migrations or seeds data; both are explicit operator operations (docs/aws-infrastructure.md).
+set -euo pipefail
+umask 022
+
+retry() {
+  local _
+  for _ in $(seq 1 30); do
+    "$@" && return 0
+    sleep 10
+  done
+  return 1
+}
+
+# --- Packages (Amazon Linux 2023 repositories; awscli-2 is preinstalled) ---------------------
+retry dnf -y install docker jq amazon-ecr-credential-helper xfsprogs
+
+# --- Docker: bounded logs, no privilege escalation, ECR pulls through the instance role -----
+install -d -m 0755 /etc/docker
+cat > /etc/docker/daemon.json <<'JSON'
+{
+  "log-driver": "local",
+  "log-opts": { "max-size": "${container_log_max_size}", "max-file": "${container_log_max_files}" },
+  "no-new-privileges": true
+}
+JSON
+install -d -m 0700 /root/.docker
+cat > /root/.docker/config.json <<'JSON'
+{ "credHelpers": { "${ecr_registry}": "ecr-login" } }
+JSON
+chmod 0600 /root/.docker/config.json
+systemctl enable --now docker.service
+
+# --- Caddy state volume: survives instance replacement, formatted only when blank ------------
+caddy_device=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(caddy_volume_id, "-", "")}
+for _ in $(seq 1 120); do
+  [ -b "$caddy_device" ] && break
+  sleep 5
+done
+[ -b "$caddy_device" ] || { echo "Caddy state volume ${caddy_volume_id} did not attach" >&2; exit 1; }
+if ! blkid "$caddy_device" > /dev/null 2>&1; then
+  mkfs.xfs -L tf-caddy "$caddy_device"
+fi
+install -d -m 0755 /var/lib/tradeflow/caddy
+caddy_uuid=$(blkid -s UUID -o value "$caddy_device")
+grep -q "$caddy_uuid" /etc/fstab ||
+  echo "UUID=$caddy_uuid /var/lib/tradeflow/caddy xfs defaults,nofail,noatime,nodev,nosuid,noexec 0 2" >> /etc/fstab
+mountpoint -q /var/lib/tradeflow/caddy || mount /var/lib/tradeflow/caddy
+install -d -o 1000 -g 1000 -m 0700 /var/lib/tradeflow/caddy/data /var/lib/tradeflow/caddy/config
+
+# --- RDS CA bundle for sslmode=verify-full (public certificates, fetched over verified HTTPS) -
+install -d -m 0755 /etc/tradeflow
+retry curl -fsS --proto =https --tlsv1.2 -o /etc/tradeflow/rds-ca.pem.download \
+  "https://truststore.pki.rds.amazonaws.com/${aws_region}/${aws_region}-bundle.pem"
+grep -q 'BEGIN CERTIFICATE' /etc/tradeflow/rds-ca.pem.download
+install -m 0644 /etc/tradeflow/rds-ca.pem.download /etc/tradeflow/rds-ca.pem
+rm -f /etc/tradeflow/rds-ca.pem.download
+
+# --- Non-secret configuration ---------------------------------------------------------------
+cat > /etc/tradeflow/instance.env <<'ENV'
+AWS_REGION=${aws_region}
+APP_SECRET_ARN=${app_secret_arn}
+RELEASE_PARAMETER=${release_parameter_name}
+ECR_REPOSITORY_PREFIX=${ecr_repository_prefix}
+DOCKER_FRONT_SUBNET=${docker_front_subnet}
+EDGE_IP=${edge_container_ip}
+API_IP=${api_container_ip}
+ENV
+# The edge's exact /32 is the only trusted proxy (ADR 0020). No DATABASE_URL here.
+cat > /etc/tradeflow/api.env <<'ENV'
+NODE_ENV=production
+HOST=0.0.0.0
+PORT=3000
+TRUSTED_PROXY_CIDRS=${edge_container_ip}/32
+DOCUMENT_STORAGE_DRIVER=s3
+S3_BUCKET=${documents_bucket}
+S3_REGION=${aws_region}
+S3_PREFIX=${document_prefix}
+AWS_REGION=${aws_region}
+HTTP_REQUEST_LOG=enabled
+ENV
+cat > /etc/tradeflow/edge.env <<'ENV'
+APP_DOMAIN=${domain_name}
+ENV
+
+# --- Start-time preparation: release, secret, network, IMDS guard, image pulls --------------
+install -d -m 0755 /usr/local/libexec/tradeflow
+cat > /usr/local/libexec/tradeflow/prepare <<'SCRIPT'
+#!/bin/bash
+# Usage: prepare api|edge. Runs before each container start; serialized by a lock.
+set -euo pipefail
+# shellcheck source=/dev/null # written at boot / at start
+. /etc/tradeflow/instance.env
+export AWS_DEFAULT_REGION="$AWS_REGION"
+install -d -m 0700 /run/tradeflow
+exec 9> /run/tradeflow/prepare.lock
+flock 9
+
+release=$(aws ssm get-parameter --name "$RELEASE_PARAMETER" --query Parameter.Value --output text)
+if [ "$release" = unset ]; then
+  echo "No release yet: set $RELEASE_PARAMETER (docs/aws-infrastructure.md, Release)" >&2
+  exit 1
+fi
+for image in api web tools; do
+  ref=$(jq -er --arg image "$image" '.[$image] | strings' <<< "$release") ||
+    { echo "Release has no $image image" >&2; exit 1; }
+  if [[ "$ref" != "$ECR_REPOSITORY_PREFIX$image@sha256:"* || ! "$ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+    echo "Release $image must be $ECR_REPOSITORY_PREFIX$image@sha256:<digest>" >&2
+    exit 1
+  fi
+  printf '%s_IMAGE=%s\n' "$${image^^}" "$ref"
+done > /run/tradeflow/release.env.new
+mv /run/tradeflow/release.env.new /run/tradeflow/release.env
+# shellcheck source=/dev/null # written at boot / at start
+. /run/tradeflow/release.env
+
+if [ "$1" = api ]; then
+  secret=$(aws secretsmanager get-secret-value --secret-id "$APP_SECRET_ARN" --query SecretString --output text)
+  url=$(jq -er '.DATABASE_URL | strings' <<< "$secret") ||
+    { echo "Application secret has no DATABASE_URL string" >&2; exit 1; }
+  if [[ "$url" != postgresql://* || "$url" == *$'\n'* || "$url" != *sslmode=verify-full* || "$url" != *sslrootcert=/etc/tradeflow/rds-ca.pem* ]]; then
+    echo "DATABASE_URL must be postgresql:// with sslmode=verify-full and sslrootcert=/etc/tradeflow/rds-ca.pem" >&2
+    exit 1
+  fi
+  (umask 077 && printf 'DATABASE_URL=%s\n' "$url" > /run/tradeflow/api-secrets.env.new)
+  mv /run/tradeflow/api-secrets.env.new /run/tradeflow/api-secrets.env
+  unset secret url
+fi
+
+docker network inspect tradeflow-front > /dev/null 2>&1 ||
+  docker network create --driver bridge --subnet "$DOCKER_FRONT_SUBNET" tradeflow-front > /dev/null
+# Hop limit 2 lets containers reach IMDS. Only the API container needs the instance role.
+iptables -C DOCKER-USER ! -s "$API_IP/32" -d 169.254.169.254/32 -j DROP 2> /dev/null ||
+  iptables -I DOCKER-USER 1 ! -s "$API_IP/32" -d 169.254.169.254/32 -j DROP
+
+case "$(uname -m)" in aarch64) host_arch=arm64 ;; x86_64) host_arch=amd64 ;; *) host_arch=unknown ;; esac
+ref=$([ "$1" = api ] && echo "$API_IMAGE" || echo "$WEB_IMAGE")
+docker pull --quiet "$ref" > /dev/null
+image_arch=$(docker image inspect --format '{{.Architecture}}' "$ref")
+if [ "$image_arch" != "$host_arch" ]; then
+  echo "Image $ref is $image_arch; this instance is $host_arch" >&2
+  exit 1
+fi
+SCRIPT
+
+cat > /usr/local/libexec/tradeflow/run <<'SCRIPT'
+#!/bin/bash
+# Usage: run api|edge. The container runs in the foreground under systemd and is removed on stop.
+set -euo pipefail
+# shellcheck source=/dev/null # written at boot / at start
+. /etc/tradeflow/instance.env
+# shellcheck source=/dev/null # written at boot / at start
+. /run/tradeflow/release.env
+common=(--rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges=true
+  --network tradeflow-front --pull never)
+case "$1" in
+  api)
+    exec docker run "$${common[@]}" --name tradeflow-api --ip "$API_IP" --network-alias api \
+      --env-file /etc/tradeflow/api.env --env-file /run/tradeflow/api-secrets.env \
+      --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly \
+      --stop-timeout 20 "$API_IMAGE"
+    ;;
+  edge)
+    exec docker run "$${common[@]}" --name tradeflow-edge --ip "$EDGE_IP" \
+      --env-file /etc/tradeflow/edge.env --publish 80:8080 --publish 443:8443 \
+      --mount type=bind,source=/var/lib/tradeflow/caddy/data,target=/data \
+      --mount type=bind,source=/var/lib/tradeflow/caddy/config,target=/config \
+      --stop-timeout 10 "$WEB_IMAGE"
+    ;;
+  *) echo "usage: run api|edge" >&2; exit 2 ;;
+esac
+SCRIPT
+
+# Operator-only migration, run before the release that needs it is set. The tools image is named
+# explicitly; the migrator URL is read from standard input (never an argument, a file or the
+# instance role) and passed to the tools container's environment.
+cat > /usr/local/bin/tradeflow-migrate <<'SCRIPT'
+#!/bin/bash
+# Usage (as root, after fetching the migrator secret with operator credentials):
+#   ... | jq -r .DATABASE_URL | tradeflow-migrate <registry>/<environment>/tools@sha256:<digest>
+set -euo pipefail
+# shellcheck source=/dev/null # written at boot / at start
+. /etc/tradeflow/instance.env
+tools_image=$${1:-}
+if [[ "$tools_image" != "$ECR_REPOSITORY_PREFIX"tools@sha256:* || ! "$tools_image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo "usage: tradeflow-migrate $ECR_REPOSITORY_PREFIX""tools@sha256:<digest>  (URL on stdin)" >&2
+  exit 2
+fi
+IFS= read -r DATABASE_URL
+[[ "$DATABASE_URL" == postgresql://* ]] || { echo "Expected a postgresql:// URL on stdin" >&2; exit 1; }
+export DATABASE_URL
+docker pull --quiet "$tools_image" > /dev/null
+exec docker run --rm --cap-drop ALL --security-opt no-new-privileges=true --tmpfs /tmp \
+  --env DATABASE_URL \
+  --mount type=bind,source=/etc/tradeflow/rds-ca.pem,target=/etc/tradeflow/rds-ca.pem,readonly \
+  --pull never "$tools_image"
+SCRIPT
+chmod 0755 /usr/local/libexec/tradeflow/prepare /usr/local/libexec/tradeflow/run
+chmod 0700 /usr/local/bin/tradeflow-migrate
+
+# --- systemd units: retry every 30 s until a release exists and its prerequisites answer -----
+for unit in api edge; do
+  cat > "/etc/systemd/system/tradeflow-$unit.service" <<UNIT
+[Unit]
+Description=TradeFlow $unit container
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+$([ "$unit" = edge ] && echo "RequiresMountsFor=/var/lib/tradeflow/caddy")
+
+[Service]
+Type=exec
+Restart=always
+RestartSec=30
+TimeoutStartSec=15min
+TimeoutStopSec=40
+ExecStartPre=/usr/local/libexec/tradeflow/prepare $unit
+ExecStartPre=-/usr/bin/docker rm --force tradeflow-$unit
+ExecStart=/usr/local/libexec/tradeflow/run $unit
+ExecStop=/usr/bin/docker stop --time 20 tradeflow-$unit
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+done
+systemctl daemon-reload
+systemctl enable tradeflow-api.service tradeflow-edge.service
+systemctl start --no-block tradeflow-api.service tradeflow-edge.service

@@ -29,3 +29,21 @@ playwright/.auth/
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Terraform (infra/aws): real inputs, backend settings, state, saved plans and local caches.
+# Committed: *.tf, *.tftest.hcl, templates, .terraform.lock.hcl and the *.example files.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan
+*.tfplan.json
+tfplan
+backend.hcl
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

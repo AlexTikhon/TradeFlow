@@ -23,3 +23,12 @@ README.md
 .github
 e2e/**
 !e2e/package.json
+# Infrastructure code, Terraform state, inputs and plans never enter an image build context.
+infra
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/*.tfvars.json
+**/*.tfplan
+**/backend.hcl

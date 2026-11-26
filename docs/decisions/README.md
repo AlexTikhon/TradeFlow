@@ -27,6 +27,7 @@ with a link to its replacement.
 | 0019 | [S3 document storage and paired recovery](0019-s3-document-storage.md)                                                     | Accepted                                     |
 | 0020 | [Production edge and an isolated AWS mock](0020-production-edge-and-aws-mock.md)                                           | Accepted                                     |
 | 0021 | [Portfolio-demo write budget: a durable allowance of business commands per dataset](0021-portfolio-demo-write-budget.md)   | Accepted                                     |
+| 0022 | [AWS foundation: one EC2 instance, private RDS and S3](0022-aws-infrastructure-foundation.md)                              | Proposed (not provisioned)                   |
 
 Template: **Context** (forces at play), **Decision**, **Alternatives considered**,
 **Consequences** (good and bad).

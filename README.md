@@ -35,7 +35,9 @@ this increment and an actual cloud-provider recovery rehearsal are pending.
 For the next AWS phase, an isolated [deployment mock](docs/deployment-mock.md) is available:
 `pnpm deploy:verify` exercises production containers, HTTPS cookies, proxy trust, SSE and private
 S3 over TLS. `pnpm deploy:mock` keeps that local stack running until stopped. No AWS account or
-domain is needed; no AWS resources are created. Actual AWS deployment remains deferred.
+domain is needed; no AWS resources are created. The [AWS infrastructure foundation](docs/aws-infrastructure.md)
+(Terraform in `infra/aws`, offline mock-provider tests, deployment contract and
+[cost worksheet](docs/aws-cost-worksheet.md)) is ready for review; nothing has been provisioned.
 [Acceptance summary](docs/mvp-status.md) (what was verified where and on which commit, coverage
 by test layer, limitations) · [ten-minute demo](docs/demo.md) (with the walkthrough records) ·
 [handoff](docs/handoff.md) (restarting work: commands, data, recovery, next directions).

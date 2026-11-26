@@ -67,6 +67,41 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:storage
 
+  # Offline infrastructure checks for infra/aws (docs/aws-infrastructure.md). No AWS credentials,
+  # secrets or role exist in this job, no backend is initialized, and nothing is planned or
+  # applied against an account: `terraform test` runs against mock providers only. Provider
+  # packages are downloaded from the public registry and checked against the committed locks.
+  iac:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TF_IN_AUTOMATION: '1'
+      CHECKPOINT_DISABLE: '1'
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+
+      - run: terraform fmt -check -recursive infra/aws
+
+      - name: Main configuration (validate, mock-provider tests)
+        working-directory: infra/aws
+        run: |
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform validate
+          terraform test
+
+      - name: State bootstrap (validate, mock-provider tests)
+        working-directory: infra/aws/bootstrap
+        run: |
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform validate
+          terraform test
+
   # Production-mode mock: owned Docker containers, trusted local TLS, real browser + S3.
   deploy:
     runs-on: ubuntu-latest

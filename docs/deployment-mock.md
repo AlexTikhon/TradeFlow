@@ -275,9 +275,10 @@ Never use `docker system prune`, a global container stop, or a process-name kill
 
 ## Move to AWS later
 
-The production Docker targets and public-domain Caddyfile are reusable, but there is no AWS
-deployment in this increment. Before provisioning, select the account/role, region, domain,
-resource sizes and cost ceiling; produce a concrete infrastructure plan. Then configure a
-private RDS instance with an appropriate application role/TLS, a private S3 bucket and scoped
-instance role, SSM access, retained certificate/config storage, DNS, and the paired recovery
-procedure. Rehearse in that actual account before keeping non-disposable data.
+The production Docker targets and public-domain Caddyfile are reused unchanged by the
+[AWS infrastructure foundation](aws-infrastructure.md): Terraform for the EC2 instance, private
+RDS and S3, ECR, the scoped instance role and SSM access, with offline tests, the deployment
+contract and a [cost worksheet](aws-cost-worksheet.md). It has not been applied. Before
+provisioning, select the account/role, region, domain, resource sizes and cost ceiling (the
+exact list is in that document), then rehearse the paired recovery procedure in that account
+before keeping non-disposable data.

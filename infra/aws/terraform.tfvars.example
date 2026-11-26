@@ -1,0 +1,26 @@
+# FICTIONAL EXAMPLE VALUES. Nothing here is a selected account, region, domain or size.
+# Copy to terraform.tfvars (ignored by Git) and replace every value before a real plan.
+# Never put a password or connection string in a tfvars file: there is no variable for one.
+
+aws_account_id = "123456789012"    # AWS documentation's placeholder account
+aws_region     = "eu-central-1"    # example Region used by the cost worksheet
+domain_name    = "portfolio.tradeflow.example" # .example is reserved (RFC 2606)
+
+# Must agree: arm64 with Graviton (t4g, m7g, ...), x86_64 with Intel/AMD (t3, m7i, ...).
+# Images are built for the same platform (output image_platform).
+instance_type         = "t4g.small"
+instance_architecture = "arm64"
+
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage_gib = 20
+
+# Reviewable defaults (uncomment to change):
+# environment                  = "portfolio"
+# db_max_allocated_storage_gib = null # storage autoscaling off
+# db_backup_retention_days     = 7
+# root_volume_size_gib         = 20
+# caddy_state_volume_size_gib  = 1
+# vpc_cidr                     = "10.40.0.0/16"
+# document_prefix              = "tradeflow/"
+# secret_recovery_window_days  = 30
+# ami_id                       = null # latest Amazon Linux 2023 for instance_architecture
